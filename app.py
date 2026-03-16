@@ -7,6 +7,7 @@
 # -----------------------------------
 
 import io
+import time
 import requests
 import numpy as np
 import pandas as pd
@@ -219,8 +220,8 @@ with st.sidebar:
     st.header("🔧 Performance")
     max_workers = st.slider(
         "Parallel Workers",
-        min_value=1, max_value=20, value=10, step=1,
-        help="Higher = faster scan but more network load."
+        min_value=1, max_value=20, value=5, step=1,
+        help="Lower values reduce rate-limiting errors on cloud. Recommended: 3–5 on Streamlit Cloud, 10+ on local PC."
     )
 
     mfi_period = st.slider(
@@ -365,42 +366,56 @@ def calculate_roic_trend(stock):
 
 def process_ticker(args):
     t, mfi_period = args
-    try:
-        stock = yf.Ticker(t)
-        info  = stock.info
-
-        # Exclude ETFs, index funds, trusts, and other non-company securities
-        if is_etf_or_fund(info):
-            return None
-
-        price = info.get("currentPrice")
-        owner_earnings, oe_yield = get_owner_earnings(stock, info)
-        vol_signals = get_volume_signals(stock, mfi_period)
+    # Retry up to 3 times with backoff — yfinance can return empty data
+    # on the first attempt when running in cloud environments
+    for attempt in range(3):
         try:
-            hist = stock.history(period="3mo")
-            ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-        except:
-            ma50 = None
-        return {
-            "Ticker":         t,
-            "Sector":         info.get("sector", "Unknown"),
-            "Price":          price,
-            "MA50":           ma50,
-            "MarketCap":      info.get("marketCap"),
-            "P/E":            info.get("trailingPE"),
-            "OwnerEarnings":  owner_earnings,
-            "OE_Yield":       oe_yield,
-            "ROIC":           calculate_roic(stock),
-            "ROIC_Trend":     calculate_roic_trend(stock),
-            "RevenueGrowth":  info.get("revenueGrowth"),
-            "EarningsGrowth": info.get("earningsGrowth"),
-            "Piotroski":      calculate_piotroski(stock),
-            "OBV":            vol_signals["OBV"],
-            "MFI":            vol_signals["MFI"],
-            "PCV":            vol_signals["PCV"],
-        }
-    except:
-        return None
+            time.sleep(attempt * 1.5)   # 0s, 1.5s, 3s between retries
+            stock = yf.Ticker(t)
+            info  = stock.info
+
+            # yfinance returns an empty/minimal dict for invalid tickers
+            if not info or len(info) < 5:
+                return None
+
+            # Exclude ETFs, index funds, trusts, and other non-company securities
+            if is_etf_or_fund(info):
+                return None
+
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if price is None:
+                return None   # skip tickers with no price data
+
+            owner_earnings, oe_yield = get_owner_earnings(stock, info)
+            vol_signals = get_volume_signals(stock, mfi_period)
+            try:
+                hist = stock.history(period="3mo")
+                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+            except:
+                ma50 = None
+            return {
+                "Ticker":         t,
+                "Sector":         info.get("sector", "Unknown"),
+                "Price":          price,
+                "MA50":           ma50,
+                "MarketCap":      info.get("marketCap"),
+                "P/E":            info.get("trailingPE"),
+                "OwnerEarnings":  owner_earnings,
+                "OE_Yield":       oe_yield,
+                "ROIC":           calculate_roic(stock),
+                "ROIC_Trend":     calculate_roic_trend(stock),
+                "RevenueGrowth":  info.get("revenueGrowth"),
+                "EarningsGrowth": info.get("earningsGrowth"),
+                "Piotroski":      calculate_piotroski(stock),
+                "OBV":            vol_signals["OBV"],
+                "MFI":            vol_signals["MFI"],
+                "PCV":            vol_signals["PCV"],
+            }
+        except Exception:
+            if attempt == 2:
+                return None   # all 3 attempts failed
+            continue
+    return None
 
 # ───────────────────────────────────────────────────────────────
 # TICKER LOADERS
@@ -541,7 +556,13 @@ if run_btn:
     progress_bar.empty()
 
     if not results:
-        st.error("No results returned. Check your internet connection.")
+        st.error(
+            "No results returned. This is usually caused by yfinance rate limiting on Streamlit Cloud. "
+            "Try these fixes:\n\n"
+            "1. **Reduce Parallel Workers** to 3 in the sidebar and run again\n"
+            "2. **Wait 60 seconds** and try again — rate limits reset quickly\n"
+            "3. If it keeps failing, try scanning a **single sector** instead of all sectors to reduce the number of requests"
+        )
         st.stop()
 
     # Build DataFrame
