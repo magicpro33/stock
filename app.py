@@ -162,7 +162,7 @@ with st.sidebar:
     min_score = st.slider(
         "Min Hybrid Score",
         min_value=0.0, max_value=20.0, value=2.0, step=0.5,
-        help="Only show stocks with a score above this threshold."
+        help="Only show stocks with a score above this threshold. score combines all metrics"
     )
 
     top_n = st.slider(
@@ -572,11 +572,7 @@ def color_score(val):
 
 with tab_screener:
  if run_btn:
-    # Validate at least one metric is on
     active_metrics = [k for k, v in metric_enabled.items() if v]
-    if not active_metrics:
-        st.error("Please enable at least one metric before running.")
-        st.stop()
 
     exchange_key  = EXCHANGES[exchange]
     sector_label  = sector if sector != "All Sectors" else "All Sectors"
@@ -594,11 +590,11 @@ with tab_screener:
         st.stop()
 
     if exchange == "S&P 500":
-        est_time = "~5–10 min"
+        est_time = "~5 min"
     elif exchange == "NYSE":
-        est_time = "~30–60 min"
+        est_time = "~10 min"
     else:
-        est_time = "~40–70 min"
+        est_time = "~10 min"
 
     st.info(
         f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
@@ -683,7 +679,13 @@ with tab_screener:
 
     # Apply filters
     under_price = df["Price"].isna() | (df["Price"] <= max_price)
-    above_score = df["Score"] >= min_score
+    # Only apply score threshold when at least one metric is active —
+    # if all metrics are off the score is 0 for everything, so filtering by score
+    # would return nothing. Instead sort by RangePct (tightest range first).
+    if active_metrics:
+        above_score = df["Score"] >= min_score
+    else:
+        above_score = pd.Series(True, index=df.index)
     if use_ma50_filter:
         below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] <= df["MA50"])
     else:
@@ -695,16 +697,23 @@ with tab_screener:
     else:
         in_range = pd.Series(True, index=df.index)
 
+    # Sort by Score when metrics are active, otherwise by RangePct (tightest range first)
+    sort_col = "Score" if active_metrics else "RangePct"
+    sort_asc  = not active_metrics   # ascending for RangePct (tighter = better), descending for Score
+
     screened = (
         df[under_price & below_ma50 & above_score & in_range]
-        .sort_values("Score", ascending=False)
+        .sort_values(sort_col, ascending=sort_asc, na_position="last")
         .head(top_n)
         .reset_index(drop=True)
     )
 
     # ── Active metrics summary banner ────────────────────────────
-    active_labels = [METRICS[k]["label"] for k in active_metrics]
-    st.success(f"**Active metrics:** {' · '.join(active_labels)}")
+    if active_metrics:
+        active_labels = [METRICS[k]["label"] for k in active_metrics]
+        st.success(f"**Active metrics:** {' · '.join(active_labels)}")
+    else:
+        st.info("**No metrics active** — results sorted by tightest price range. Score column will show 0.")
 
     # ── Results summary cards ────────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
