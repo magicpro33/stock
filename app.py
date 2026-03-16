@@ -591,11 +591,11 @@ with tab_screener:
         st.stop()
 
     if exchange == "S&P 500":
-        est_time = "~5–10 min"
+        est_time = "~5 min"
     elif exchange == "NYSE":
-        est_time = "~30–60 min"
+        est_time = "~10 min"
     else:
-        est_time = "~40–70 min"
+        est_time = "~10 min"
 
     st.info(
         f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
@@ -836,12 +836,47 @@ with tab_analyze:
             with st.spinner(f"Fetching data for **{ticker_input}**..."):
                 try:
                     stock = yf.Ticker(ticker_input)
-                    info  = stock.info
 
+                    # ── Fetch ALL data in one pass to avoid rate limits ──
+                    # Each yfinance property is fetched once and stored locally.
+                    # All subsequent rendering uses these cached variables only.
+                    info       = stock.info or {}
                     if not info or len(info) < 5:
                         st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol and try again.")
                         st.stop()
 
+                    # Fetch price history once — long enough for all uses
+                    # (MA50 needs 50 days, range needs range_days, price history up to 5y)
+                    try:
+                        hist_1y = stock.history(period="1y")
+                    except:
+                        hist_1y = pd.DataFrame()
+
+                    # Fetch financial statements once each
+                    try:
+                        fin_stmt  = stock.financials
+                    except:
+                        fin_stmt  = None
+
+                    try:
+                        bal_stmt  = stock.balance_sheet
+                    except:
+                        bal_stmt  = None
+
+                    try:
+                        cf_stmt   = stock.cashflow
+                    except:
+                        cf_stmt   = None
+
+                    # Small pause to avoid rate limit on slower connections
+                    time.sleep(0.5)
+
+                except Exception as e:
+                    st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
+                    st.stop()
+
+            # ── All rendering happens OUTSIDE the spinner, using cached data ──
+            try:
                     # ── Company header ───────────────────────────
                     name     = info.get("longName") or info.get("shortName") or ticker_input
                     price    = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -863,7 +898,7 @@ with tab_analyze:
                         st.warning("Select at least one metric.")
                         st.stop()
 
-                    # Collect raw values
+                    # Collect raw values — reuse cached stock object (no new API calls)
                     raw = {}
                     owner_earnings, oe_yield = get_owner_earnings(stock, info)
                     vol_signals = get_volume_signals(stock, mfi_period)
@@ -898,13 +933,13 @@ with tab_analyze:
                         if good is None:
                             return "⚪", str(val)
                         if higher:
-                            if val >= good:   return "🟢", val
+                            if val >= good:      return "🟢", val
                             elif val >= neutral: return "🟡", val
-                            else:             return "🔴", val
+                            else:                return "🔴", val
                         else:
-                            if val <= good:   return "🟢", val
+                            if val <= good:      return "🟢", val
                             elif val <= neutral: return "🟡", val
-                            else:             return "🔴", val
+                            else:                return "🔴", val
 
                     def fmt_value(key, val):
                         if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -921,110 +956,83 @@ with tab_analyze:
                     st.markdown("### Metric Results")
                     cols = st.columns(3)
                     for i, key in enumerate(selected):
-                        cfg  = METRICS[key]
-                        val  = raw.get(key)
-                        emoji, _ = signal_emoji(key, val)
+                        cfg         = METRICS[key]
+                        val         = raw.get(key)
+                        emoji, _    = signal_emoji(key, val)
                         display_val = fmt_value(key, val)
-
                         with cols[i % 3]:
                             st.markdown(
-                                f"""
-                                <div style="border:1px solid #444; border-radius:8px;
-                                            padding:14px; margin-bottom:12px;">
-                                  <div style="font-size:1.1em; font-weight:600;">
-                                    {emoji} {cfg['label']}
-                                  </div>
-                                  <div style="font-size:1.8em; font-weight:700;
-                                              margin:6px 0;">
-                                    {display_val}
-                                  </div>
-                                  <div style="font-size:0.78em; color:#aaa;">
-                                    {cfg['desc'][:120]}...
-                                  </div>
-                                </div>
-                                """,
+                                f"""<div style="border:1px solid #444; border-radius:8px;
+                                               padding:14px; margin-bottom:12px;">
+                                  <div style="font-size:1.1em; font-weight:600;">{emoji} {cfg['label']}</div>
+                                  <div style="font-size:1.8em; font-weight:700; margin:6px 0;">{display_val}</div>
+                                  <div style="font-size:0.78em; color:#aaa;">{cfg['desc'][:120]}...</div>
+                                </div>""",
                                 unsafe_allow_html=True,
                             )
 
-                    # ── MA50 comparison ──────────────────────────
+                    # ── MA50 comparison (uses cached hist_1y) ────
                     st.divider()
-                    try:
-                        hist = stock.history(period="3mo")
-                        if len(hist) >= 50:
-                            ma50_val = round(hist["Close"].rolling(50).mean().iloc[-1], 2)
-                            diff_pct = ((price - ma50_val) / ma50_val) * 100 if price else 0
-                            ma_emoji = "🔴 Above" if price > ma50_val else "🟢 Below"
-                            m1, m2, m3 = st.columns(3)
-                            m1.metric("Current Price",  f"${price:,.2f}" if price else "N/A")
-                            m2.metric("50-Day MA",      f"${ma50_val:,.2f}")
-                            m3.metric("vs MA50",        f"{diff_pct:+.1f}%",
-                                      delta_color="inverse",
-                                      help="Negative = trading below MA50 (potential value zone)")
-                            st.caption(f"{ma_emoji} its 50-day moving average")
-                    except:
-                        pass
+                    if not hist_1y.empty and len(hist_1y) >= 50:
+                        ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
+                        diff_pct = ((price - ma50_val) / ma50_val) * 100 if price else 0
+                        ma_emoji = "🔴 Above" if price > ma50_val else "🟢 Below"
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Current Price", f"${price:,.2f}" if price else "N/A")
+                        m2.metric("50-Day MA",     f"${ma50_val:,.2f}")
+                        m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
+                                  help="Negative = trading below MA50 (potential value zone)")
+                        st.caption(f"{ma_emoji} its 50-day moving average")
 
-                    # ── Price Range Analysis ─────────────────────
+                    # ── Price Range Analysis (uses cached hist_1y) ──
                     st.divider()
                     st.markdown("### 📦 Price Range Analysis")
                     st.caption(f"Showing price range over the last **{range_days} trading days** (adjust in sidebar)")
 
-                    range_data = calculate_price_range(stock, range_days)
-                    rh = range_data["RangeHigh"]
-                    rl = range_data["RangeLow"]
-                    rp = range_data["RangePct"]
-                    rpos = range_data["RangePos"]
+                    if not hist_1y.empty and len(hist_1y) >= range_days:
+                        window = hist_1y["Close"].iloc[-range_days:]
+                        rh     = round(window.max(), 2)
+                        rl     = round(window.min(), 2)
+                        mid    = (rh + rl) / 2
+                        rp     = round((rh - rl) / mid * 100, 2) if mid > 0 else None
+                        cur    = window.iloc[-1]
+                        rpos   = round((cur - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
 
-                    if rh is not None and rl is not None:
                         rc1, rc2, rc3, rc4 = st.columns(4)
-                        rc1.metric("Range High",   f"${rh:,.2f}")
-                        rc2.metric("Range Low",    f"${rl:,.2f}")
-                        rc3.metric("Range Width",  f"{rp:.1f}%",
+                        rc1.metric("Range High",        f"${rh:,.2f}")
+                        rc2.metric("Range Low",         f"${rl:,.2f}")
+                        rc3.metric("Range Width",       f"{rp:.1f}%" if rp else "N/A",
                                    help="(High − Low) ÷ Midpoint × 100. Lower = tighter consolidation.")
                         rc4.metric("Position in Range", f"{rpos:.0%}",
-                                   help="0% = at range low (support), 100% = at range high (resistance), 50% = midpoint.")
+                                   help="0% = at range low (support), 100% = at range high (resistance).")
 
-                        # Visual range bar
                         bar_filled = int(rpos * 20)
-                        bar_empty  = 20 - bar_filled
-                        bar_str    = "█" * bar_filled + "░" * bar_empty
+                        bar_str    = "█" * bar_filled + "░" * (20 - bar_filled)
                         pos_label  = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
-
                         st.markdown(
-                            f"<div style='font-family:monospace; font-size:1.2em; letter-spacing:2px; margin:10px 0;'>"
+                            f"<div style='font-family:monospace;font-size:1.2em;letter-spacing:2px;margin:10px 0;'>"
                             f"Low ${rl:,.2f} &nbsp;|{bar_str}|&nbsp; High ${rh:,.2f}</div>"
-                            f"<div style='color:#aaa; font-size:0.9em;'>Current: <b>${price:,.2f}</b> — {pos_label}</div>",
+                            f"<div style='color:#aaa;font-size:0.9em;'>Current: <b>${price:,.2f}</b> — {pos_label}</div>",
                             unsafe_allow_html=True
                         )
-
-                        # Tight range signal
                         if rp is not None:
-                            if rp <= 5:
-                                st.success(f"🔒 **Very Tight Range ({rp:.1f}%)** — stock is heavily consolidated. Potential breakout setup.")
-                            elif rp <= 10:
-                                st.info(f"📦 **Tight Range ({rp:.1f}%)** — stock is consolidating within a defined range.")
-                            elif rp <= 20:
-                                st.warning(f"📊 **Moderate Range ({rp:.1f}%)** — some volatility but still range-bound.")
-                            else:
-                                st.error(f"📉 **Wide Range ({rp:.1f}%)** — stock has been volatile over this period.")
+                            if rp <= 5:    st.success(f"🔒 **Very Tight Range ({rp:.1f}%)** — heavily consolidated. Potential breakout setup.")
+                            elif rp <= 10: st.info(f"📦 **Tight Range ({rp:.1f}%)** — consolidating within a defined range.")
+                            elif rp <= 20: st.warning(f"📊 **Moderate Range ({rp:.1f}%)** — some volatility but range-bound.")
+                            else:          st.error(f"📉 **Wide Range ({rp:.1f}%)** — stock has been volatile over this period.")
 
-                        # Range chart with high/low bands
-                        try:
-                            hist_range = stock.history(period="1y").tail(range_days)
-                            if not hist_range.empty:
-                                chart_df = hist_range[["Close"]].copy()
-                                chart_df["Range High"] = rh
-                                chart_df["Range Low"]  = rl
-                                st.markdown("**Price vs Range Boundaries**")
-                                st.line_chart(chart_df, use_container_width=True)
-                        except:
-                            pass
+                        # Range chart — uses already-fetched hist_1y slice
+                        chart_df = hist_1y["Close"].iloc[-range_days:].to_frame()
+                        chart_df["Range High"] = rh
+                        chart_df["Range Low"]  = rl
+                        st.markdown("**Price vs Range Boundaries**")
+                        st.line_chart(chart_df, use_container_width=True)
                     else:
                         st.warning("Not enough price history to calculate range for this ticker.")
 
                     # ── Overall summary score ────────────────────
                     st.divider()
-                    total_score = 0.0
+                    total_score  = 0.0
                     max_possible = 0.0
                     for key in selected:
                         val = raw.get(key)
@@ -1032,14 +1040,11 @@ with tab_analyze:
                         if val is not None and not (isinstance(val, float) and np.isnan(val)):
                             total_score  += float(val) * w
                             max_possible += w
-                    st.metric(
-                        "Weighted Score (selected metrics)",
-                        f"{total_score:.2f}",
-                        help="Sum of (metric value × weight) for all selected metrics with valid data."
-                    )
+                    st.metric("Weighted Score (selected metrics)", f"{total_score:.2f}",
+                              help="Sum of (metric value × weight) for all selected metrics with valid data.")
 
                     # ════════════════════════════════════════════
-                    # FULL FINANCIAL BREAKDOWN
+                    # FULL FINANCIAL BREAKDOWN — all use cached statements
                     # ════════════════════════════════════════════
                     st.divider()
                     st.markdown("## 📋 Full Financial Breakdown")
@@ -1053,9 +1058,7 @@ with tab_analyze:
                         "📊 Price History",
                     ])
 
-                    # ── helper ───────────────────────────────────
                     def fmt_big(val):
-                        """Format large dollar numbers as $1.23B / $456M / $12K"""
                         if val is None or (isinstance(val, float) and np.isnan(val)):
                             return "N/A"
                         try:
@@ -1069,16 +1072,12 @@ with tab_analyze:
                             return "N/A"
 
                     def fmt_pct(val):
-                        try:
-                            return f"{float(val):.2%}" if val is not None else "N/A"
-                        except:
-                            return "N/A"
+                        try:    return f"{float(val):.2%}" if val is not None else "N/A"
+                        except: return "N/A"
 
                     def fmt_num(val, decimals=2):
-                        try:
-                            return f"{float(val):,.{decimals}f}" if val is not None else "N/A"
-                        except:
-                            return "N/A"
+                        try:    return f"{float(val):,.{decimals}f}" if val is not None else "N/A"
+                        except: return "N/A"
 
                     def info_row(label, value):
                         st.markdown(
@@ -1094,198 +1093,168 @@ with tab_analyze:
                         st.markdown("### 🏢 Company Overview")
                         ov1, ov2 = st.columns(2)
                         with ov1:
-                            info_row("Full Name",        info.get("longName", "N/A"))
-                            info_row("Ticker",           ticker_input)
-                            info_row("Exchange",         info.get("exchange", "N/A"))
-                            info_row("Sector",           info.get("sector", "N/A"))
-                            info_row("Industry",         info.get("industry", "N/A"))
-                            info_row("Country",          info.get("country", "N/A"))
-                            info_row("Employees",        f"{info.get('fullTimeEmployees', 0):,}" if info.get("fullTimeEmployees") else "N/A")
-                            info_row("Website",          info.get("website", "N/A"))
+                            info_row("Full Name",         info.get("longName", "N/A"))
+                            info_row("Ticker",            ticker_input)
+                            info_row("Exchange",          info.get("exchange", "N/A"))
+                            info_row("Sector",            info.get("sector", "N/A"))
+                            info_row("Industry",          info.get("industry", "N/A"))
+                            info_row("Country",           info.get("country", "N/A"))
+                            info_row("Employees",         f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A")
+                            info_row("Website",           info.get("website", "N/A"))
                         with ov2:
-                            info_row("CEO / Officers",   info.get("companyOfficers", [{}])[0].get("name", "N/A") if info.get("companyOfficers") else "N/A")
-                            info_row("IPO Year",         str(info.get("ipoExpectedDate", "N/A")))
-                            info_row("Fiscal Year End",  str(info.get("fiscalYearEnd", "N/A")))
-                            info_row("Audit Risk",       str(info.get("auditRisk", "N/A")))
-                            info_row("Board Risk",       str(info.get("boardRisk", "N/A")))
-                            info_row("Compensation Risk",str(info.get("compensationRisk", "N/A")))
+                            officers = info.get("companyOfficers", [])
+                            ceo_name = officers[0].get("name", "N/A") if officers else "N/A"
+                            info_row("CEO",               ceo_name)
+                            info_row("Fiscal Year End",   str(info.get("fiscalYearEnd", "N/A")))
+                            info_row("Audit Risk",        str(info.get("auditRisk", "N/A")))
+                            info_row("Board Risk",        str(info.get("boardRisk", "N/A")))
+                            info_row("Compensation Risk", str(info.get("compensationRisk", "N/A")))
                             info_row("Shareholder Rights",str(info.get("shareHolderRightsRisk", "N/A")))
-                            info_row("Overall Risk",     str(info.get("overallRisk", "N/A")))
-
+                            info_row("Overall Risk",      str(info.get("overallRisk", "N/A")))
                         st.markdown("#### Business Summary")
-                        summary = info.get("longBusinessSummary", "No summary available.")
-                        st.markdown(f"<div style='color:#ccc;line-height:1.6;'>{summary}</div>",
-                                    unsafe_allow_html=True)
+                        st.markdown(
+                            f"<div style='color:#ccc;line-height:1.6;'>{info.get('longBusinessSummary','No summary available.')}</div>",
+                            unsafe_allow_html=True)
 
                     # ── Tab 2: Valuation ─────────────────────────
                     with fin_tabs[1]:
                         st.markdown("### 💰 Valuation Metrics")
                         v1, v2 = st.columns(2)
                         with v1:
-                            info_row("Market Cap",           fmt_big(info.get("marketCap")))
-                            info_row("Enterprise Value",     fmt_big(info.get("enterpriseValue")))
-                            info_row("Trailing P/E",         fmt_num(info.get("trailingPE")))
-                            info_row("Forward P/E",          fmt_num(info.get("forwardPE")))
-                            info_row("PEG Ratio",            fmt_num(info.get("pegRatio")))
-                            info_row("Price / Sales",        fmt_num(info.get("priceToSalesTrailing12Months")))
-                            info_row("Price / Book",         fmt_num(info.get("priceToBook")))
-                            info_row("EV / Revenue",         fmt_num(info.get("enterpriseToRevenue")))
-                            info_row("EV / EBITDA",          fmt_num(info.get("enterpriseToEbitda")))
+                            info_row("Market Cap",        fmt_big(info.get("marketCap")))
+                            info_row("Enterprise Value",  fmt_big(info.get("enterpriseValue")))
+                            info_row("Trailing P/E",      fmt_num(info.get("trailingPE")))
+                            info_row("Forward P/E",       fmt_num(info.get("forwardPE")))
+                            info_row("PEG Ratio",         fmt_num(info.get("pegRatio")))
+                            info_row("Price / Sales",     fmt_num(info.get("priceToSalesTrailing12Months")))
+                            info_row("Price / Book",      fmt_num(info.get("priceToBook")))
+                            info_row("EV / Revenue",      fmt_num(info.get("enterpriseToRevenue")))
+                            info_row("EV / EBITDA",       fmt_num(info.get("enterpriseToEbitda")))
                         with v2:
-                            info_row("Trailing EPS",         fmt_num(info.get("trailingEps")))
-                            info_row("Forward EPS",          fmt_num(info.get("forwardEps")))
-                            info_row("Book Value / Share",   fmt_num(info.get("bookValue")))
-                            info_row("52-Week High",         fmt_num(info.get("fiftyTwoWeekHigh")))
-                            info_row("52-Week Low",          fmt_num(info.get("fiftyTwoWeekLow")))
-                            info_row("50-Day MA",            fmt_num(info.get("fiftyDayAverage")))
-                            info_row("200-Day MA",           fmt_num(info.get("twoHundredDayAverage")))
-                            info_row("Beta",                 fmt_num(info.get("beta")))
-                            info_row("Short % of Float",     fmt_pct(info.get("shortPercentOfFloat")))
-
+                            info_row("Trailing EPS",      fmt_num(info.get("trailingEps")))
+                            info_row("Forward EPS",       fmt_num(info.get("forwardEps")))
+                            info_row("Book Value/Share",  fmt_num(info.get("bookValue")))
+                            info_row("52-Week High",      fmt_num(info.get("fiftyTwoWeekHigh")))
+                            info_row("52-Week Low",       fmt_num(info.get("fiftyTwoWeekLow")))
+                            info_row("50-Day MA",         fmt_num(info.get("fiftyDayAverage")))
+                            info_row("200-Day MA",        fmt_num(info.get("twoHundredDayAverage")))
+                            info_row("Beta",              fmt_num(info.get("beta")))
+                            info_row("Short % of Float",  fmt_pct(info.get("shortPercentOfFloat")))
                         st.markdown("#### Dividends")
                         d1, d2, d3 = st.columns(3)
-                        d1.metric("Dividend Rate",   fmt_num(info.get("dividendRate")) if info.get("dividendRate") else "None")
-                        d2.metric("Dividend Yield",  fmt_pct(info.get("dividendYield")) if info.get("dividendYield") else "None")
-                        d3.metric("Payout Ratio",    fmt_pct(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A")
+                        d1.metric("Dividend Rate",  fmt_num(info.get("dividendRate")) if info.get("dividendRate") else "None")
+                        d2.metric("Dividend Yield", fmt_pct(info.get("dividendYield")) if info.get("dividendYield") else "None")
+                        d3.metric("Payout Ratio",   fmt_pct(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A")
 
-                    # ── Tab 3: Income Statement ───────────────────
+                    # ── Tab 3: Income Statement (cached) ─────────
                     with fin_tabs[2]:
                         st.markdown("### 📈 Income Statement (Annual)")
-                        try:
-                            fin_df = stock.financials
-                            if fin_df is not None and not fin_df.empty:
-                                # Transpose so years are rows
-                                fin_disp = fin_df.T.copy()
-                                fin_disp.index = [str(i)[:10] for i in fin_disp.index]
-                                # Format all values as $B
-                                for c in fin_disp.columns:
-                                    fin_disp[c] = fin_disp[c].apply(
-                                        lambda x: fmt_big(x) if pd.notnull(x) else "N/A"
-                                    )
-                                st.dataframe(fin_disp, use_container_width=True)
-                            else:
-                                st.info("Income statement data not available for this ticker.")
-                        except Exception as ex:
-                            st.warning(f"Could not load income statement: {ex}")
-
+                        if fin_stmt is not None and not fin_stmt.empty:
+                            fin_disp = fin_stmt.T.copy()
+                            fin_disp.index = [str(i)[:10] for i in fin_disp.index]
+                            for c in fin_disp.columns:
+                                fin_disp[c] = fin_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
+                            st.dataframe(fin_disp, use_container_width=True)
+                        else:
+                            st.info("Income statement data not available for this ticker.")
                         st.markdown("#### Key Highlights")
                         is1, is2, is3, is4 = st.columns(4)
-                        is1.metric("Total Revenue",      fmt_big(info.get("totalRevenue")))
-                        is2.metric("Gross Profit",       fmt_big(info.get("grossProfits")))
-                        is3.metric("EBITDA",             fmt_big(info.get("ebitda")))
-                        is4.metric("Net Income",         fmt_big(info.get("netIncomeToCommon")))
-
+                        is1.metric("Total Revenue",    fmt_big(info.get("totalRevenue")))
+                        is2.metric("Gross Profit",     fmt_big(info.get("grossProfits")))
+                        is3.metric("EBITDA",           fmt_big(info.get("ebitda")))
+                        is4.metric("Net Income",       fmt_big(info.get("netIncomeToCommon")))
                         is5, is6, is7, is8 = st.columns(4)
-                        is5.metric("Gross Margin",       fmt_pct(info.get("grossMargins")))
-                        is6.metric("Operating Margin",   fmt_pct(info.get("operatingMargins")))
-                        is7.metric("Profit Margin",      fmt_pct(info.get("profitMargins")))
-                        is8.metric("Revenue Growth",     fmt_pct(info.get("revenueGrowth")))
+                        is5.metric("Gross Margin",     fmt_pct(info.get("grossMargins")))
+                        is6.metric("Operating Margin", fmt_pct(info.get("operatingMargins")))
+                        is7.metric("Profit Margin",    fmt_pct(info.get("profitMargins")))
+                        is8.metric("Revenue Growth",   fmt_pct(info.get("revenueGrowth")))
 
-                    # ── Tab 4: Balance Sheet ─────────────────────
+                    # ── Tab 4: Balance Sheet (cached) ─────────────
                     with fin_tabs[3]:
                         st.markdown("### 🏦 Balance Sheet (Annual)")
-                        try:
-                            bal_df = stock.balance_sheet
-                            if bal_df is not None and not bal_df.empty:
-                                bal_disp = bal_df.T.copy()
-                                bal_disp.index = [str(i)[:10] for i in bal_disp.index]
-                                for c in bal_disp.columns:
-                                    bal_disp[c] = bal_disp[c].apply(
-                                        lambda x: fmt_big(x) if pd.notnull(x) else "N/A"
-                                    )
-                                st.dataframe(bal_disp, use_container_width=True)
-                            else:
-                                st.info("Balance sheet data not available for this ticker.")
-                        except Exception as ex:
-                            st.warning(f"Could not load balance sheet: {ex}")
-
+                        if bal_stmt is not None and not bal_stmt.empty:
+                            bal_disp = bal_stmt.T.copy()
+                            bal_disp.index = [str(i)[:10] for i in bal_disp.index]
+                            for c in bal_disp.columns:
+                                bal_disp[c] = bal_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
+                            st.dataframe(bal_disp, use_container_width=True)
+                        else:
+                            st.info("Balance sheet data not available for this ticker.")
                         st.markdown("#### Key Highlights")
                         bs1, bs2, bs3, bs4 = st.columns(4)
-                        bs1.metric("Total Cash",         fmt_big(info.get("totalCash")))
-                        bs2.metric("Total Debt",         fmt_big(info.get("totalDebt")))
-                        bs3.metric("Net Cash",           fmt_big((info.get("totalCash") or 0) - (info.get("totalDebt") or 0)))
-                        bs4.metric("Total Assets",       fmt_big(info.get("totalAssets")))
-
+                        bs1.metric("Total Cash",   fmt_big(info.get("totalCash")))
+                        bs2.metric("Total Debt",   fmt_big(info.get("totalDebt")))
+                        bs3.metric("Net Cash",     fmt_big((info.get("totalCash") or 0) - (info.get("totalDebt") or 0)))
+                        bs4.metric("Total Assets", fmt_big(info.get("totalAssets")))
                         bs5, bs6, bs7, bs8 = st.columns(4)
-                        bs5.metric("Cash Per Share",     fmt_num(info.get("totalCashPerShare")))
-                        bs6.metric("Debt / Equity",      fmt_num(info.get("debtToEquity")))
-                        bs7.metric("Current Ratio",      fmt_num(info.get("currentRatio")))
-                        bs8.metric("Quick Ratio",        fmt_num(info.get("quickRatio")))
+                        bs5.metric("Cash/Share",   fmt_num(info.get("totalCashPerShare")))
+                        bs6.metric("Debt/Equity",  fmt_num(info.get("debtToEquity")))
+                        bs7.metric("Current Ratio",fmt_num(info.get("currentRatio")))
+                        bs8.metric("Quick Ratio",  fmt_num(info.get("quickRatio")))
 
-                    # ── Tab 5: Cash Flow ─────────────────────────
+                    # ── Tab 5: Cash Flow (cached) ─────────────────
                     with fin_tabs[4]:
                         st.markdown("### 💵 Cash Flow Statement (Annual)")
-                        try:
-                            cf_df = stock.cashflow
-                            if cf_df is not None and not cf_df.empty:
-                                cf_disp = cf_df.T.copy()
-                                cf_disp.index = [str(i)[:10] for i in cf_disp.index]
-                                for c in cf_disp.columns:
-                                    cf_disp[c] = cf_disp[c].apply(
-                                        lambda x: fmt_big(x) if pd.notnull(x) else "N/A"
-                                    )
-                                st.dataframe(cf_disp, use_container_width=True)
-                            else:
-                                st.info("Cash flow data not available for this ticker.")
-                        except Exception as ex:
-                            st.warning(f"Could not load cash flow: {ex}")
-
+                        if cf_stmt is not None and not cf_stmt.empty:
+                            cf_disp = cf_stmt.T.copy()
+                            cf_disp.index = [str(i)[:10] for i in cf_disp.index]
+                            for c in cf_disp.columns:
+                                cf_disp[c] = cf_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
+                            st.dataframe(cf_disp, use_container_width=True)
+                        else:
+                            st.info("Cash flow data not available for this ticker.")
                         st.markdown("#### Key Highlights")
                         cf1, cf2, cf3, cf4 = st.columns(4)
-                        cf1.metric("Operating Cash Flow",  fmt_big(info.get("operatingCashflow")))
-                        cf2.metric("Free Cash Flow",       fmt_big(info.get("freeCashflow")))
-                        cf3.metric("CapEx",                fmt_big(info.get("capitalExpenditures")))
-                        cf4.metric("FCF / Share",          fmt_num(
-                            (info.get("freeCashflow") / info.get("sharesOutstanding"))
-                            if info.get("freeCashflow") and info.get("sharesOutstanding") else None
-                        ))
-
+                        cf1.metric("Operating CF",  fmt_big(info.get("operatingCashflow")))
+                        cf2.metric("Free CF",       fmt_big(info.get("freeCashflow")))
+                        cf3.metric("CapEx",         fmt_big(info.get("capitalExpenditures")))
+                        shares = info.get("sharesOutstanding")
+                        fcf    = info.get("freeCashflow")
+                        cf4.metric("FCF/Share",     fmt_num(fcf / shares if fcf and shares else None))
                         cf5, cf6 = st.columns(2)
-                        cf5.metric("Return on Assets",    fmt_pct(info.get("returnOnAssets")))
-                        cf6.metric("Return on Equity",    fmt_pct(info.get("returnOnEquity")))
+                        cf5.metric("Return on Assets", fmt_pct(info.get("returnOnAssets")))
+                        cf6.metric("Return on Equity", fmt_pct(info.get("returnOnEquity")))
 
-                    # ── Tab 6: Price History ─────────────────────
+                    # ── Tab 6: Price History (uses cached hist_1y + selectbox) ──
                     with fin_tabs[5]:
                         st.markdown("### 📊 Price History")
-                        try:
-                            period_choice = st.selectbox(
-                                "Time Period",
-                                ["1mo", "3mo", "6mo", "1y", "2y", "5y"],
-                                index=2,
-                                key="price_history_period",
-                            )
-                            hist_full = stock.history(period=period_choice)
-                            if not hist_full.empty:
-                                # Price + volume chart
-                                ph1, ph2 = st.columns([3, 1])
-                                with ph1:
-                                    st.markdown("**Closing Price**")
-                                    st.line_chart(hist_full["Close"], use_container_width=True)
-                                with ph2:
-                                    first_p = hist_full["Close"].iloc[0]
-                                    last_p  = hist_full["Close"].iloc[-1]
-                                    period_ret = (last_p - first_p) / first_p
-                                    st.metric("Period Return",   fmt_pct(period_ret),
-                                              delta=f"{period_ret:+.2%}")
-                                    st.metric("Period High",     f"${hist_full['High'].max():,.2f}")
-                                    st.metric("Period Low",      f"${hist_full['Low'].min():,.2f}")
-                                    st.metric("Avg Daily Vol",   fmt_big(hist_full["Volume"].mean()).replace("$",""))
+                        period_choice = st.selectbox(
+                            "Time Period",
+                            ["1mo", "3mo", "6mo", "1y"],
+                            index=2,
+                            key="price_history_period",
+                        )
+                        # Slice the already-fetched 1y history instead of a new API call
+                        period_days = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252}
+                        days_needed = period_days.get(period_choice, 126)
+                        hist_disp   = hist_1y.iloc[-days_needed:] if len(hist_1y) >= days_needed else hist_1y
 
-                                st.markdown("**Volume**")
-                                st.bar_chart(hist_full["Volume"], use_container_width=True)
+                        if not hist_disp.empty:
+                            ph1, ph2 = st.columns([3, 1])
+                            with ph1:
+                                st.markdown("**Closing Price**")
+                                st.line_chart(hist_disp["Close"], use_container_width=True)
+                            with ph2:
+                                first_p    = hist_disp["Close"].iloc[0]
+                                last_p     = hist_disp["Close"].iloc[-1]
+                                period_ret = (last_p - first_p) / first_p
+                                st.metric("Period Return",  fmt_pct(period_ret), delta=f"{period_ret:+.2%}")
+                                st.metric("Period High",    f"${hist_disp['High'].max():,.2f}")
+                                st.metric("Period Low",     f"${hist_disp['Low'].min():,.2f}")
+                                st.metric("Avg Daily Vol",  fmt_big(hist_disp["Volume"].mean()).replace("$", ""))
+                            st.markdown("**Volume**")
+                            st.bar_chart(hist_disp["Volume"], use_container_width=True)
 
-                                # Moving averages overlay table
-                                hist_full["MA20"]  = hist_full["Close"].rolling(20).mean()
-                                hist_full["MA50"]  = hist_full["Close"].rolling(50).mean()
-                                hist_full["MA200"] = hist_full["Close"].rolling(200).mean()
-                                ma_chart = hist_full[["Close", "MA20", "MA50", "MA200"]].dropna()
-                                if not ma_chart.empty:
-                                    st.markdown("**Price with Moving Averages (20 / 50 / 200 day)**")
-                                    st.line_chart(ma_chart, use_container_width=True)
-                            else:
-                                st.info("No price history available.")
-                        except Exception as ex:
-                            st.warning(f"Could not load price history: {ex}")
+                            hist_ma = hist_disp["Close"].to_frame()
+                            hist_ma["MA20"]  = hist_ma["Close"].rolling(20).mean()
+                            hist_ma["MA50"]  = hist_ma["Close"].rolling(50).mean()
+                            hist_ma["MA200"] = hist_ma["Close"].rolling(200).mean()
+                            ma_chart = hist_ma.dropna()
+                            if not ma_chart.empty:
+                                st.markdown("**Price with Moving Averages (20 / 50 / 200 day)**")
+                                st.line_chart(ma_chart, use_container_width=True)
+                        else:
+                            st.info("No price history available.")
 
-                except Exception as e:
-                    st.error(f"Error fetching data for {ticker_input}: {e}")
+            except Exception as e:
+                    st.error(f"Error rendering analysis for {ticker_input}: {e}")
