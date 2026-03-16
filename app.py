@@ -789,6 +789,7 @@ with tab_screener:
     - **Min score** — removes low-conviction picks from the table
     """)
 
+
 # ───────────────────────────────────────────────────────────────
 # ANALYZE TAB — single ticker deep dive
 # ───────────────────────────────────────────────────────────────
@@ -796,13 +797,13 @@ with tab_analyze:
     st.subheader("🔍 Single Stock Analyzer")
     st.caption("Enter any ticker and select which metrics to run. Works on any stock — S&P 500, NYSE, NASDAQ, or international.")
 
-    # ── Ticker input + metric checkboxes ────────────────────────
     a_col1, a_col2 = st.columns([1, 2])
 
     with a_col1:
         ticker_input = st.text_input(
             "Stock Ticker",
             placeholder="e.g. AAPL, MSFT, TSLA",
+            key="analyze_ticker_input",
             help="Enter the ticker symbol exactly as it appears on the exchange."
         ).strip().upper()
 
@@ -810,16 +811,58 @@ with tab_analyze:
         analyze_metrics = {}
         for key, cfg in METRICS.items():
             analyze_metrics[key] = st.checkbox(
-                cfg["label"],
-                value=True,
-                key=f"analyze_{key}",
-                help=cfg["desc"],
+                cfg["label"], value=True,
+                key=f"analyze_{key}", help=cfg["desc"],
             )
 
         analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
 
+    # ── On Analyze click: fetch ALL data and cache in session_state ──
+    if analyze_btn and ticker_input:
+        with st.spinner(f"Fetching data for **{ticker_input}**..."):
+            try:
+                _stock = yf.Ticker(ticker_input)
+                _info  = _stock.info or {}
+                if not _info or len(_info) < 5:
+                    st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol.")
+                else:
+                    try:    _hist  = _stock.history(period="1y")
+                    except: _hist  = pd.DataFrame()
+                    try:    _fin   = _stock.financials
+                    except: _fin   = None
+                    try:    _bal   = _stock.balance_sheet
+                    except: _bal   = None
+                    try:    _cf    = _stock.cashflow
+                    except: _cf    = None
+
+                    _oe, _oey  = get_owner_earnings(_stock, _info)
+                    _vols      = get_volume_signals(_stock, mfi_period)
+                    _raw = {
+                        "OE_Yield":       _oey,
+                        "ROIC":           calculate_roic(_stock),
+                        "ROIC_Trend":     calculate_roic_trend(_stock),
+                        "RevenueGrowth":  _info.get("revenueGrowth"),
+                        "EarningsGrowth": _info.get("earningsGrowth"),
+                        "Piotroski":      calculate_piotroski(_stock),
+                        "OBV":            _vols["OBV"],
+                        "MFI":            _vols["MFI"],
+                        "PCV":            _vols["PCV"],
+                    }
+                    time.sleep(0.5)
+                    st.session_state["analyze_data"] = {
+                        "ticker": ticker_input, "info": _info,
+                        "hist":   _hist, "fin": _fin, "bal": _bal, "cf": _cf,
+                        "raw":    _raw,  "metrics_sel": dict(analyze_metrics),
+                    }
+            except Exception as e:
+                st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
+
+    elif analyze_btn and not ticker_input:
+        st.warning("Please enter a ticker symbol.")
+
+    # ── Render from session_state — persists across all reruns ──
     with a_col2:
-        if not analyze_btn:
+        if "analyze_data" not in st.session_state:
             st.markdown("""
             **How to use:**
             1. Type a ticker symbol on the left (e.g. `NVDA`)
@@ -830,434 +873,301 @@ with tab_analyze:
             color-coded signal: 🟢 Good · 🟡 Neutral · 🔴 Weak
 
             You can analyze **any publicly traded stock** — not just S&P 500.
+            Changing the chart time frame will **not** reset the analysis.
             """)
-
-        elif not ticker_input:
-            st.warning("Please enter a ticker symbol.")
-
         else:
-            with st.spinner(f"Fetching data for **{ticker_input}**..."):
-                try:
-                    stock = yf.Ticker(ticker_input)
+            try:
+                _d       = st.session_state["analyze_data"]
+                info     = _d["info"]
+                hist_1y  = _d["hist"]
+                fin_stmt = _d["fin"]
+                bal_stmt = _d["bal"]
+                cf_stmt  = _d["cf"]
+                raw      = _d["raw"]
+                sticker  = _d["ticker"]
+                selected = [k for k, v in _d["metrics_sel"].items() if v]
 
-                    # ── Fetch ALL data in one pass to avoid rate limits ──
-                    # Each yfinance property is fetched once and stored locally.
-                    # All subsequent rendering uses these cached variables only.
-                    info       = stock.info or {}
-                    if not info or len(info) < 5:
-                        st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol and try again.")
-                        st.stop()
+                name    = info.get("longName") or info.get("shortName") or sticker
+                price   = info.get("currentPrice") or info.get("regularMarketPrice")
+                mktcap  = info.get("marketCap")
 
-                    # Fetch price history once — long enough for all uses
-                    # (MA50 needs 50 days, range needs range_days, price history up to 5y)
-                    try:
-                        hist_1y = stock.history(period="1y")
-                    except:
-                        hist_1y = pd.DataFrame()
+                st.markdown(f"## {name} &nbsp; `{sticker}`")
+                h1, h2, h3, h4 = st.columns(4)
+                h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
+                h2.metric("Sector",   info.get("sector", "N/A"))
+                h3.metric("Industry", info.get("industry", "N/A"))
+                h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
+                st.divider()
 
-                    # Fetch financial statements once each
-                    try:
-                        fin_stmt  = stock.financials
-                    except:
-                        fin_stmt  = None
-
-                    try:
-                        bal_stmt  = stock.balance_sheet
-                    except:
-                        bal_stmt  = None
-
-                    try:
-                        cf_stmt   = stock.cashflow
-                    except:
-                        cf_stmt   = None
-
-                    # Small pause to avoid rate limit on slower connections
-                    time.sleep(0.5)
-
-                except Exception as e:
-                    st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
+                if not selected:
+                    st.warning("No metrics were selected when Analyze was run.")
                     st.stop()
 
-            # ── All rendering happens OUTSIDE the spinner, using cached data ──
-            try:
-                    # ── Company header ───────────────────────────
-                    name     = info.get("longName") or info.get("shortName") or ticker_input
-                    price    = info.get("currentPrice") or info.get("regularMarketPrice")
-                    sector_v = info.get("sector", "N/A")
-                    industry = info.get("industry", "N/A")
-                    mktcap   = info.get("marketCap")
+                THRESHOLDS = {
+                    "OE_Yield":       (0.05, 0.02, True),
+                    "ROIC":           (0.15, 0.08, True),
+                    "ROIC_Trend":     (0.02, 0.0,  True),
+                    "RevenueGrowth":  (0.10, 0.05, True),
+                    "EarningsGrowth": (0.10, 0.05, True),
+                    "Piotroski":      (7,    4,    True),
+                    "OBV":            (0.8,  0.4,  True),
+                    "MFI":            (0.5,  0.2,  True),
+                    "PCV":            (0.5,  0.2,  True),
+                }
 
-                    st.markdown(f"## {name} &nbsp; `{ticker_input}`")
-                    h1, h2, h3, h4 = st.columns(4)
-                    h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
-                    h2.metric("Sector",   sector_v)
-                    h3.metric("Industry", industry)
-                    h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
-                    st.divider()
+                def _sig(key, val):
+                    if val is None or (isinstance(val, float) and np.isnan(val)): return "⚪"
+                    g, n, hi = THRESHOLDS.get(key, (None, None, True))
+                    if g is None: return "⚪"
+                    if hi:  return "🟢" if val >= g else ("🟡" if val >= n else "🔴")
+                    else:   return "🟢" if val <= g else ("🟡" if val <= n else "🔴")
 
-                    # ── Run selected metrics ─────────────────────
-                    selected = [k for k, v in analyze_metrics.items() if v]
-                    if not selected:
-                        st.warning("Select at least one metric.")
-                        st.stop()
+                def _fv(key, val):
+                    if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+                    if key in ("OE_Yield","RevenueGrowth","EarningsGrowth","ROIC","ROIC_Trend"): return f"{val:.2%}"
+                    if key in ("OBV","MFI","PCV"): return f"{val:.4f}"
+                    if key == "Piotroski": return f"{int(val)} / 9"
+                    return str(round(val, 4))
 
-                    # Collect raw values — reuse cached stock object (no new API calls)
-                    raw = {}
-                    owner_earnings, oe_yield = get_owner_earnings(stock, info)
-                    vol_signals = get_volume_signals(stock, mfi_period)
+                def _fb(val):
+                    if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+                    try:
+                        v = float(val)
+                        if abs(v)>=1e12: return f"${v/1e12:.2f}T"
+                        if abs(v)>=1e9:  return f"${v/1e9:.2f}B"
+                        if abs(v)>=1e6:  return f"${v/1e6:.2f}M"
+                        if abs(v)>=1e3:  return f"${v/1e3:.2f}K"
+                        return f"${v:,.2f}"
+                    except: return "N/A"
 
-                    raw["OE_Yield"]       = oe_yield
-                    raw["ROIC"]           = calculate_roic(stock)
-                    raw["ROIC_Trend"]     = calculate_roic_trend(stock)
-                    raw["RevenueGrowth"]  = info.get("revenueGrowth")
-                    raw["EarningsGrowth"] = info.get("earningsGrowth")
-                    raw["Piotroski"]      = calculate_piotroski(stock)
-                    raw["OBV"]            = vol_signals["OBV"]
-                    raw["MFI"]            = vol_signals["MFI"]
-                    raw["PCV"]            = vol_signals["PCV"]
+                def _fp(val):
+                    try:    return f"{float(val):.2%}" if val is not None else "N/A"
+                    except: return "N/A"
 
-                    # Signal thresholds: (good_threshold, neutral_threshold, higher_is_better)
-                    THRESHOLDS = {
-                        "OE_Yield":       (0.05,  0.02,  True),
-                        "ROIC":           (0.15,  0.08,  True),
-                        "ROIC_Trend":     (0.02,  0.0,   True),
-                        "RevenueGrowth":  (0.10,  0.05,  True),
-                        "EarningsGrowth": (0.10,  0.05,  True),
-                        "Piotroski":      (7,     4,     True),
-                        "OBV":            (0.8,   0.4,   True),
-                        "MFI":            (0.5,   0.2,   True),
-                        "PCV":            (0.5,   0.2,   True),
-                    }
+                def _fn(val, d=2):
+                    try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
+                    except: return "N/A"
 
-                    def signal_emoji(key, val):
-                        if val is None or (isinstance(val, float) and np.isnan(val)):
-                            return "⚪", "N/A"
-                        good, neutral, higher = THRESHOLDS.get(key, (None, None, True))
-                        if good is None:
-                            return "⚪", str(val)
-                        if higher:
-                            if val >= good:      return "🟢", val
-                            elif val >= neutral: return "🟡", val
-                            else:                return "🔴", val
-                        else:
-                            if val <= good:      return "🟢", val
-                            elif val <= neutral: return "🟡", val
-                            else:                return "🔴", val
+                def irow(label, value):
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
+                        f"<span style='color:#aaa;'>{label}</span>"
+                        f"<span style='font-weight:600;'>{value}</span></div>",
+                        unsafe_allow_html=True)
 
-                    def fmt_value(key, val):
-                        if val is None or (isinstance(val, float) and np.isnan(val)):
-                            return "N/A"
-                        if key in ("OE_Yield", "RevenueGrowth", "EarningsGrowth", "ROIC", "ROIC_Trend"):
-                            return f"{val:.2%}"
-                        if key in ("OBV", "MFI", "PCV"):
-                            return f"{val:.4f}"
-                        if key == "Piotroski":
-                            return f"{int(val)} / 9"
-                        return str(round(val, 4))
-
-                    # ── Render metric cards ──────────────────────
-                    st.markdown("### Metric Results")
-                    cols = st.columns(3)
-                    for i, key in enumerate(selected):
-                        cfg         = METRICS[key]
-                        val         = raw.get(key)
-                        emoji, _    = signal_emoji(key, val)
-                        display_val = fmt_value(key, val)
-                        with cols[i % 3]:
-                            st.markdown(
-                                f"""<div style="border:1px solid #444; border-radius:8px;
-                                               padding:14px; margin-bottom:12px;">
-                                  <div style="font-size:1.1em; font-weight:600;">{emoji} {cfg['label']}</div>
-                                  <div style="font-size:1.8em; font-weight:700; margin:6px 0;">{display_val}</div>
-                                  <div style="font-size:0.78em; color:#aaa;">{cfg['desc'][:120]}...</div>
-                                </div>""",
-                                unsafe_allow_html=True,
-                            )
-
-                    # ── MA50 comparison (uses cached hist_1y) ────
-                    st.divider()
-                    if not hist_1y.empty and len(hist_1y) >= 50:
-                        ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
-                        diff_pct = ((price - ma50_val) / ma50_val) * 100 if price else 0
-                        ma_emoji = "🔴 Above" if price > ma50_val else "🟢 Below"
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Current Price", f"${price:,.2f}" if price else "N/A")
-                        m2.metric("50-Day MA",     f"${ma50_val:,.2f}")
-                        m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
-                                  help="Negative = trading below MA50 (potential value zone)")
-                        st.caption(f"{ma_emoji} its 50-day moving average")
-
-                    # ── Price Range Analysis (uses cached hist_1y) ──
-                    st.divider()
-                    st.markdown("### 📦 Price Range Analysis")
-                    st.caption(f"Showing price range over the last **{range_days} trading days** (adjust in sidebar)")
-
-                    if not hist_1y.empty and len(hist_1y) >= range_days:
-                        window = hist_1y["Close"].iloc[-range_days:]
-                        rh     = round(window.max(), 2)
-                        rl     = round(window.min(), 2)
-                        mid    = (rh + rl) / 2
-                        rp     = round((rh - rl) / mid * 100, 2) if mid > 0 else None
-                        cur    = window.iloc[-1]
-                        rpos   = round((cur - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
-
-                        rc1, rc2, rc3, rc4 = st.columns(4)
-                        rc1.metric("Range High",        f"${rh:,.2f}")
-                        rc2.metric("Range Low",         f"${rl:,.2f}")
-                        rc3.metric("Range Width",       f"{rp:.1f}%" if rp else "N/A",
-                                   help="(High − Low) ÷ Midpoint × 100. Lower = tighter consolidation.")
-                        rc4.metric("Position in Range", f"{rpos:.0%}",
-                                   help="0% = at range low (support), 100% = at range high (resistance).")
-
-                        bar_filled = int(rpos * 20)
-                        bar_str    = "█" * bar_filled + "░" * (20 - bar_filled)
-                        pos_label  = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
+                # ── Metric cards ─────────────────────────────────
+                st.markdown("### Metric Results")
+                cols = st.columns(3)
+                for i, key in enumerate(selected):
+                    cfg = METRICS[key]; val = raw.get(key)
+                    with cols[i % 3]:
                         st.markdown(
-                            f"<div style='font-family:monospace;font-size:1.2em;letter-spacing:2px;margin:10px 0;'>"
-                            f"Low ${rl:,.2f} &nbsp;|{bar_str}|&nbsp; High ${rh:,.2f}</div>"
-                            f"<div style='color:#aaa;font-size:0.9em;'>Current: <b>${price:,.2f}</b> — {pos_label}</div>",
-                            unsafe_allow_html=True
-                        )
-                        if rp is not None:
-                            if rp <= 5:    st.success(f"🔒 **Very Tight Range ({rp:.1f}%)** — heavily consolidated. Potential breakout setup.")
-                            elif rp <= 10: st.info(f"📦 **Tight Range ({rp:.1f}%)** — consolidating within a defined range.")
-                            elif rp <= 20: st.warning(f"📊 **Moderate Range ({rp:.1f}%)** — some volatility but range-bound.")
-                            else:          st.error(f"📉 **Wide Range ({rp:.1f}%)** — stock has been volatile over this period.")
+                            f"""<div style="border:1px solid #444;border-radius:8px;
+                                           padding:14px;margin-bottom:12px;">
+                              <div style="font-size:1.1em;font-weight:600;">{_sig(key,val)} {cfg['label']}</div>
+                              <div style="font-size:1.8em;font-weight:700;margin:6px 0;">{_fv(key,val)}</div>
+                              <div style="font-size:0.78em;color:#aaa;">{cfg['desc'][:120]}...</div>
+                            </div>""", unsafe_allow_html=True)
 
-                        # Range chart — uses already-fetched hist_1y slice
-                        chart_df = hist_1y["Close"].iloc[-range_days:].to_frame()
-                        chart_df["Range High"] = rh
-                        chart_df["Range Low"]  = rl
-                        st.markdown("**Price vs Range Boundaries**")
-                        st.line_chart(chart_df, use_container_width=True)
+                # ── MA50 ─────────────────────────────────────────
+                st.divider()
+                if not hist_1y.empty and len(hist_1y) >= 50:
+                    ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
+                    diff_pct = ((price - ma50_val) / ma50_val * 100) if price else 0
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Current Price", f"${price:,.2f}" if price else "N/A")
+                    m2.metric("50-Day MA",     f"${ma50_val:,.2f}")
+                    m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse")
+                    st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
+
+                # ── Price Range ───────────────────────────────────
+                st.divider()
+                st.markdown("### 📦 Price Range Analysis")
+                st.caption(f"Last **{range_days} trading days** — adjust via sidebar")
+                if not hist_1y.empty and len(hist_1y) >= range_days:
+                    win  = hist_1y["Close"].iloc[-range_days:]
+                    rh   = round(win.max(), 2); rl = round(win.min(), 2)
+                    mid  = (rh + rl) / 2
+                    rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
+                    rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
+                    rc1, rc2, rc3, rc4 = st.columns(4)
+                    rc1.metric("Range High", f"${rh:,.2f}")
+                    rc2.metric("Range Low",  f"${rl:,.2f}")
+                    rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A")
+                    rc4.metric("Position",    f"{rpos:.0%}")
+                    bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
+                    pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
+                    st.markdown(
+                        f"<div style='font-family:monospace;font-size:1.1em;margin:10px 0;'>"
+                        f"${rl:,.2f} |{bar}| ${rh:,.2f}</div>"
+                        f"<div style='color:#aaa;font-size:0.9em;'>Current ${price:,.2f} — {pos_lbl}</div>",
+                        unsafe_allow_html=True)
+                    if rp is not None:
+                        if rp <= 5:    st.success(f"🔒 Very Tight Range ({rp:.1f}%) — consolidation/breakout setup")
+                        elif rp <= 10: st.info(f"📦 Tight Range ({rp:.1f}%) — consolidating")
+                        elif rp <= 20: st.warning(f"📊 Moderate Range ({rp:.1f}%)")
+                        else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
+                    cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
+                    cdf["High"] = rh; cdf["Low"] = rl
+                    st.line_chart(cdf, use_container_width=True)
+                else:
+                    st.warning("Not enough price history to calculate range.")
+
+                # ── Weighted score ────────────────────────────────
+                st.divider()
+                ts = sum(
+                    float(raw.get(k) or 0) * metric_weight.get(k, METRICS[k]["weight"])
+                    for k in selected
+                    if raw.get(k) is not None and not (isinstance(raw.get(k), float) and np.isnan(raw.get(k)))
+                )
+                st.metric("Weighted Score", f"{ts:.2f}")
+
+                # ── Financial tabs ────────────────────────────────
+                st.divider()
+                st.markdown("## 📋 Full Financial Breakdown")
+                ft = st.tabs(["🏢 Overview","💰 Valuation","📈 Income","🏦 Balance Sheet","💵 Cash Flow","📊 Price History"])
+
+                with ft[0]:
+                    st.markdown("### 🏢 Company Overview")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        irow("Full Name",    info.get("longName","N/A"))
+                        irow("Exchange",     info.get("exchange","N/A"))
+                        irow("Sector",       info.get("sector","N/A"))
+                        irow("Industry",     info.get("industry","N/A"))
+                        irow("Country",      info.get("country","N/A"))
+                        irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A")
+                        irow("Website",      info.get("website","N/A"))
+                    with c2:
+                        officers = info.get("companyOfficers",[])
+                        irow("CEO",          officers[0].get("name","N/A") if officers else "N/A")
+                        irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")))
+                        irow("Audit Risk",   str(info.get("auditRisk","N/A")))
+                        irow("Board Risk",   str(info.get("boardRisk","N/A")))
+                        irow("Comp Risk",    str(info.get("compensationRisk","N/A")))
+                        irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")))
+                        irow("Overall Risk", str(info.get("overallRisk","N/A")))
+                    st.markdown("#### Business Summary")
+                    st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
+
+                with ft[1]:
+                    st.markdown("### 💰 Valuation")
+                    v1, v2 = st.columns(2)
+                    with v1:
+                        irow("Market Cap",       _fb(info.get("marketCap")))
+                        irow("Enterprise Value", _fb(info.get("enterpriseValue")))
+                        irow("Trailing P/E",     _fn(info.get("trailingPE")))
+                        irow("Forward P/E",      _fn(info.get("forwardPE")))
+                        irow("PEG Ratio",        _fn(info.get("pegRatio")))
+                        irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")))
+                        irow("Price/Book",       _fn(info.get("priceToBook")))
+                        irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")))
+                        irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")))
+                    with v2:
+                        irow("Trailing EPS",     _fn(info.get("trailingEps")))
+                        irow("Forward EPS",      _fn(info.get("forwardEps")))
+                        irow("Book Value/Share", _fn(info.get("bookValue")))
+                        irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")))
+                        irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")))
+                        irow("50-Day MA",        _fn(info.get("fiftyDayAverage")))
+                        irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")))
+                        irow("Beta",             _fn(info.get("beta")))
+                        irow("Short % Float",    _fp(info.get("shortPercentOfFloat")))
+                    d1,d2,d3 = st.columns(3)
+                    d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None")
+                    d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None")
+                    d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A")
+
+                with ft[2]:
+                    st.markdown("### 📈 Income Statement (Annual)")
+                    if fin_stmt is not None and not fin_stmt.empty:
+                        fd = fin_stmt.T.copy()
+                        fd.index = [str(i)[:10] for i in fd.index]
+                        for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                        st.dataframe(fd, use_container_width=True)
                     else:
-                        st.warning("Not enough price history to calculate range for this ticker.")
+                        st.info("Income statement not available.")
+                    i1,i2,i3,i4 = st.columns(4)
+                    i1.metric("Revenue",   _fb(info.get("totalRevenue")))
+                    i2.metric("Gross",     _fb(info.get("grossProfits")))
+                    i3.metric("EBITDA",    _fb(info.get("ebitda")))
+                    i4.metric("Net Inc",   _fb(info.get("netIncomeToCommon")))
+                    i5,i6,i7,i8 = st.columns(4)
+                    i5.metric("Gross Mgn", _fp(info.get("grossMargins")))
+                    i6.metric("Op Mgn",    _fp(info.get("operatingMargins")))
+                    i7.metric("Net Mgn",   _fp(info.get("profitMargins")))
+                    i8.metric("Rev Growth",_fp(info.get("revenueGrowth")))
 
-                    # ── Overall summary score ────────────────────
-                    st.divider()
-                    total_score  = 0.0
-                    max_possible = 0.0
-                    for key in selected:
-                        val = raw.get(key)
-                        w   = metric_weight.get(key, METRICS[key]["weight"])
-                        if val is not None and not (isinstance(val, float) and np.isnan(val)):
-                            total_score  += float(val) * w
-                            max_possible += w
-                    st.metric("Weighted Score (selected metrics)", f"{total_score:.2f}",
-                              help="Sum of (metric value × weight) for all selected metrics with valid data.")
+                with ft[3]:
+                    st.markdown("### 🏦 Balance Sheet (Annual)")
+                    if bal_stmt is not None and not bal_stmt.empty:
+                        bd = bal_stmt.T.copy()
+                        bd.index = [str(i)[:10] for i in bd.index]
+                        for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                        st.dataframe(bd, use_container_width=True)
+                    else:
+                        st.info("Balance sheet not available.")
+                    b1,b2,b3,b4 = st.columns(4)
+                    b1.metric("Cash",      _fb(info.get("totalCash")))
+                    b2.metric("Debt",      _fb(info.get("totalDebt")))
+                    b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)))
+                    b4.metric("Assets",    _fb(info.get("totalAssets")))
+                    b5,b6,b7,b8 = st.columns(4)
+                    b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")))
+                    b6.metric("D/E",       _fn(info.get("debtToEquity")))
+                    b7.metric("Cur Ratio", _fn(info.get("currentRatio")))
+                    b8.metric("Qck Ratio", _fn(info.get("quickRatio")))
 
-                    # ════════════════════════════════════════════
-                    # FULL FINANCIAL BREAKDOWN — all use cached statements
-                    # ════════════════════════════════════════════
-                    st.divider()
-                    st.markdown("## 📋 Full Financial Breakdown")
+                with ft[4]:
+                    st.markdown("### 💵 Cash Flow (Annual)")
+                    if cf_stmt is not None and not cf_stmt.empty:
+                        cd = cf_stmt.T.copy()
+                        cd.index = [str(i)[:10] for i in cd.index]
+                        for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                        st.dataframe(cd, use_container_width=True)
+                    else:
+                        st.info("Cash flow not available.")
+                    cf1,cf2,cf3,cf4 = st.columns(4)
+                    cf1.metric("Op CF",  _fb(info.get("operatingCashflow")))
+                    cf2.metric("FCF",    _fb(info.get("freeCashflow")))
+                    cf3.metric("CapEx",  _fb(info.get("capitalExpenditures")))
+                    sh = info.get("sharesOutstanding"); fcf = info.get("freeCashflow")
+                    cf4.metric("FCF/Shr",_fn(fcf/sh if fcf and sh else None))
+                    cf5,cf6 = st.columns(2)
+                    cf5.metric("ROA", _fp(info.get("returnOnAssets")))
+                    cf6.metric("ROE", _fp(info.get("returnOnEquity")))
 
-                    fin_tabs = st.tabs([
-                        "🏢 Company Overview",
-                        "💰 Valuation",
-                        "📈 Income Statement",
-                        "🏦 Balance Sheet",
-                        "💵 Cash Flow",
-                        "📊 Price History",
-                    ])
-
-                    def fmt_big(val):
-                        if val is None or (isinstance(val, float) and np.isnan(val)):
-                            return "N/A"
-                        try:
-                            v = float(val)
-                            if abs(v) >= 1e12: return f"${v/1e12:.2f}T"
-                            if abs(v) >= 1e9:  return f"${v/1e9:.2f}B"
-                            if abs(v) >= 1e6:  return f"${v/1e6:.2f}M"
-                            if abs(v) >= 1e3:  return f"${v/1e3:.2f}K"
-                            return f"${v:,.2f}"
-                        except:
-                            return "N/A"
-
-                    def fmt_pct(val):
-                        try:    return f"{float(val):.2%}" if val is not None else "N/A"
-                        except: return "N/A"
-
-                    def fmt_num(val, decimals=2):
-                        try:    return f"{float(val):,.{decimals}f}" if val is not None else "N/A"
-                        except: return "N/A"
-
-                    def info_row(label, value):
-                        st.markdown(
-                            f"<div style='display:flex;justify-content:space-between;"
-                            f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
-                            f"<span style='color:#aaa;'>{label}</span>"
-                            f"<span style='font-weight:600;'>{value}</span></div>",
-                            unsafe_allow_html=True,
-                        )
-
-                    # ── Tab 1: Company Overview ───────────────────
-                    with fin_tabs[0]:
-                        st.markdown("### 🏢 Company Overview")
-                        ov1, ov2 = st.columns(2)
-                        with ov1:
-                            info_row("Full Name",         info.get("longName", "N/A"))
-                            info_row("Ticker",            ticker_input)
-                            info_row("Exchange",          info.get("exchange", "N/A"))
-                            info_row("Sector",            info.get("sector", "N/A"))
-                            info_row("Industry",          info.get("industry", "N/A"))
-                            info_row("Country",           info.get("country", "N/A"))
-                            info_row("Employees",         f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A")
-                            info_row("Website",           info.get("website", "N/A"))
-                        with ov2:
-                            officers = info.get("companyOfficers", [])
-                            ceo_name = officers[0].get("name", "N/A") if officers else "N/A"
-                            info_row("CEO",               ceo_name)
-                            info_row("Fiscal Year End",   str(info.get("fiscalYearEnd", "N/A")))
-                            info_row("Audit Risk",        str(info.get("auditRisk", "N/A")))
-                            info_row("Board Risk",        str(info.get("boardRisk", "N/A")))
-                            info_row("Compensation Risk", str(info.get("compensationRisk", "N/A")))
-                            info_row("Shareholder Rights",str(info.get("shareHolderRightsRisk", "N/A")))
-                            info_row("Overall Risk",      str(info.get("overallRisk", "N/A")))
-                        st.markdown("#### Business Summary")
-                        st.markdown(
-                            f"<div style='color:#ccc;line-height:1.6;'>{info.get('longBusinessSummary','No summary available.')}</div>",
-                            unsafe_allow_html=True)
-
-                    # ── Tab 2: Valuation ─────────────────────────
-                    with fin_tabs[1]:
-                        st.markdown("### 💰 Valuation Metrics")
-                        v1, v2 = st.columns(2)
-                        with v1:
-                            info_row("Market Cap",        fmt_big(info.get("marketCap")))
-                            info_row("Enterprise Value",  fmt_big(info.get("enterpriseValue")))
-                            info_row("Trailing P/E",      fmt_num(info.get("trailingPE")))
-                            info_row("Forward P/E",       fmt_num(info.get("forwardPE")))
-                            info_row("PEG Ratio",         fmt_num(info.get("pegRatio")))
-                            info_row("Price / Sales",     fmt_num(info.get("priceToSalesTrailing12Months")))
-                            info_row("Price / Book",      fmt_num(info.get("priceToBook")))
-                            info_row("EV / Revenue",      fmt_num(info.get("enterpriseToRevenue")))
-                            info_row("EV / EBITDA",       fmt_num(info.get("enterpriseToEbitda")))
-                        with v2:
-                            info_row("Trailing EPS",      fmt_num(info.get("trailingEps")))
-                            info_row("Forward EPS",       fmt_num(info.get("forwardEps")))
-                            info_row("Book Value/Share",  fmt_num(info.get("bookValue")))
-                            info_row("52-Week High",      fmt_num(info.get("fiftyTwoWeekHigh")))
-                            info_row("52-Week Low",       fmt_num(info.get("fiftyTwoWeekLow")))
-                            info_row("50-Day MA",         fmt_num(info.get("fiftyDayAverage")))
-                            info_row("200-Day MA",        fmt_num(info.get("twoHundredDayAverage")))
-                            info_row("Beta",              fmt_num(info.get("beta")))
-                            info_row("Short % of Float",  fmt_pct(info.get("shortPercentOfFloat")))
-                        st.markdown("#### Dividends")
-                        d1, d2, d3 = st.columns(3)
-                        d1.metric("Dividend Rate",  fmt_num(info.get("dividendRate")) if info.get("dividendRate") else "None")
-                        d2.metric("Dividend Yield", fmt_pct(info.get("dividendYield")) if info.get("dividendYield") else "None")
-                        d3.metric("Payout Ratio",   fmt_pct(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A")
-
-                    # ── Tab 3: Income Statement (cached) ─────────
-                    with fin_tabs[2]:
-                        st.markdown("### 📈 Income Statement (Annual)")
-                        if fin_stmt is not None and not fin_stmt.empty:
-                            fin_disp = fin_stmt.T.copy()
-                            fin_disp.index = [str(i)[:10] for i in fin_disp.index]
-                            for c in fin_disp.columns:
-                                fin_disp[c] = fin_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
-                            st.dataframe(fin_disp, use_container_width=True)
-                        else:
-                            st.info("Income statement data not available for this ticker.")
-                        st.markdown("#### Key Highlights")
-                        is1, is2, is3, is4 = st.columns(4)
-                        is1.metric("Total Revenue",    fmt_big(info.get("totalRevenue")))
-                        is2.metric("Gross Profit",     fmt_big(info.get("grossProfits")))
-                        is3.metric("EBITDA",           fmt_big(info.get("ebitda")))
-                        is4.metric("Net Income",       fmt_big(info.get("netIncomeToCommon")))
-                        is5, is6, is7, is8 = st.columns(4)
-                        is5.metric("Gross Margin",     fmt_pct(info.get("grossMargins")))
-                        is6.metric("Operating Margin", fmt_pct(info.get("operatingMargins")))
-                        is7.metric("Profit Margin",    fmt_pct(info.get("profitMargins")))
-                        is8.metric("Revenue Growth",   fmt_pct(info.get("revenueGrowth")))
-
-                    # ── Tab 4: Balance Sheet (cached) ─────────────
-                    with fin_tabs[3]:
-                        st.markdown("### 🏦 Balance Sheet (Annual)")
-                        if bal_stmt is not None and not bal_stmt.empty:
-                            bal_disp = bal_stmt.T.copy()
-                            bal_disp.index = [str(i)[:10] for i in bal_disp.index]
-                            for c in bal_disp.columns:
-                                bal_disp[c] = bal_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
-                            st.dataframe(bal_disp, use_container_width=True)
-                        else:
-                            st.info("Balance sheet data not available for this ticker.")
-                        st.markdown("#### Key Highlights")
-                        bs1, bs2, bs3, bs4 = st.columns(4)
-                        bs1.metric("Total Cash",   fmt_big(info.get("totalCash")))
-                        bs2.metric("Total Debt",   fmt_big(info.get("totalDebt")))
-                        bs3.metric("Net Cash",     fmt_big((info.get("totalCash") or 0) - (info.get("totalDebt") or 0)))
-                        bs4.metric("Total Assets", fmt_big(info.get("totalAssets")))
-                        bs5, bs6, bs7, bs8 = st.columns(4)
-                        bs5.metric("Cash/Share",   fmt_num(info.get("totalCashPerShare")))
-                        bs6.metric("Debt/Equity",  fmt_num(info.get("debtToEquity")))
-                        bs7.metric("Current Ratio",fmt_num(info.get("currentRatio")))
-                        bs8.metric("Quick Ratio",  fmt_num(info.get("quickRatio")))
-
-                    # ── Tab 5: Cash Flow (cached) ─────────────────
-                    with fin_tabs[4]:
-                        st.markdown("### 💵 Cash Flow Statement (Annual)")
-                        if cf_stmt is not None and not cf_stmt.empty:
-                            cf_disp = cf_stmt.T.copy()
-                            cf_disp.index = [str(i)[:10] for i in cf_disp.index]
-                            for c in cf_disp.columns:
-                                cf_disp[c] = cf_disp[c].apply(lambda x: fmt_big(x) if pd.notnull(x) else "N/A")
-                            st.dataframe(cf_disp, use_container_width=True)
-                        else:
-                            st.info("Cash flow data not available for this ticker.")
-                        st.markdown("#### Key Highlights")
-                        cf1, cf2, cf3, cf4 = st.columns(4)
-                        cf1.metric("Operating CF",  fmt_big(info.get("operatingCashflow")))
-                        cf2.metric("Free CF",       fmt_big(info.get("freeCashflow")))
-                        cf3.metric("CapEx",         fmt_big(info.get("capitalExpenditures")))
-                        shares = info.get("sharesOutstanding")
-                        fcf    = info.get("freeCashflow")
-                        cf4.metric("FCF/Share",     fmt_num(fcf / shares if fcf and shares else None))
-                        cf5, cf6 = st.columns(2)
-                        cf5.metric("Return on Assets", fmt_pct(info.get("returnOnAssets")))
-                        cf6.metric("Return on Equity", fmt_pct(info.get("returnOnEquity")))
-
-                    # ── Tab 6: Price History (uses cached hist_1y + selectbox) ──
-                    with fin_tabs[5]:
-                        st.markdown("### 📊 Price History")
-                        period_choice = st.selectbox(
-                            "Time Period",
-                            ["1mo", "3mo", "6mo", "1y"],
-                            index=2,
-                            key="price_history_period",
-                        )
-                        # Slice the already-fetched 1y history instead of a new API call
-                        period_days = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252}
-                        days_needed = period_days.get(period_choice, 126)
-                        hist_disp   = hist_1y.iloc[-days_needed:] if len(hist_1y) >= days_needed else hist_1y
-
-                        if not hist_disp.empty:
-                            ph1, ph2 = st.columns([3, 1])
-                            with ph1:
-                                st.markdown("**Closing Price**")
-                                st.line_chart(hist_disp["Close"], use_container_width=True)
-                            with ph2:
-                                first_p    = hist_disp["Close"].iloc[0]
-                                last_p     = hist_disp["Close"].iloc[-1]
-                                period_ret = (last_p - first_p) / first_p
-                                st.metric("Period Return",  fmt_pct(period_ret), delta=f"{period_ret:+.2%}")
-                                st.metric("Period High",    f"${hist_disp['High'].max():,.2f}")
-                                st.metric("Period Low",     f"${hist_disp['Low'].min():,.2f}")
-                                st.metric("Avg Daily Vol",  fmt_big(hist_disp["Volume"].mean()).replace("$", ""))
-                            st.markdown("**Volume**")
-                            st.bar_chart(hist_disp["Volume"], use_container_width=True)
-
-                            hist_ma = hist_disp["Close"].to_frame()
-                            hist_ma["MA20"]  = hist_ma["Close"].rolling(20).mean()
-                            hist_ma["MA50"]  = hist_ma["Close"].rolling(50).mean()
-                            hist_ma["MA200"] = hist_ma["Close"].rolling(200).mean()
-                            ma_chart = hist_ma.dropna()
-                            if not ma_chart.empty:
-                                st.markdown("**Price with Moving Averages (20 / 50 / 200 day)**")
-                                st.line_chart(ma_chart, use_container_width=True)
-                        else:
-                            st.info("No price history available.")
+                with ft[5]:
+                    st.markdown("### 📊 Price History")
+                    # Selectbox triggers reruns — session_state keeps all other data stable
+                    pc = st.selectbox("Time Period", ["1mo","3mo","6mo","1y"], index=2, key="price_history_period")
+                    pdays = {"1mo":21,"3mo":63,"6mo":126,"1y":252}
+                    dn = pdays.get(pc, 126)
+                    hd = hist_1y.iloc[-dn:] if len(hist_1y) >= dn else hist_1y
+                    if not hd.empty:
+                        ph1, ph2 = st.columns([3,1])
+                        with ph1:
+                            st.markdown("**Closing Price**")
+                            st.line_chart(hd["Close"], use_container_width=True)
+                        with ph2:
+                            pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
+                            st.metric("Return",    _fp(pr), delta=f"{pr:+.2%}")
+                            st.metric("High",      f"${hd['High'].max():,.2f}")
+                            st.metric("Low",       f"${hd['Low'].min():,.2f}")
+                            st.metric("Avg Vol",   _fb(hd["Volume"].mean()).replace("$",""))
+                        st.markdown("**Volume**")
+                        st.bar_chart(hd["Volume"], use_container_width=True)
+                        hma = hd["Close"].to_frame()
+                        hma["MA20"]  = hma["Close"].rolling(20).mean()
+                        hma["MA50"]  = hma["Close"].rolling(50).mean()
+                        hma["MA200"] = hma["Close"].rolling(200).mean()
+                        mac = hma.dropna()
+                        if not mac.empty:
+                            st.markdown("**Moving Averages (20 / 50 / 200 day)**")
+                            st.line_chart(mac, use_container_width=True)
+                    else:
+                        st.info("No price history available.")
 
             except Exception as e:
-                    st.error(f"Error rendering analysis for {ticker_input}: {e}")
+                st.error(f"Error rendering analysis: {e}")
