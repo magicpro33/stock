@@ -345,6 +345,9 @@ def calculate_price_range(stock, range_days: int) -> dict:
         }
     except:
         return default
+
+
+def calculate_piotroski(stock):
     try:
         fin, bal, cf = stock.financials, stock.balance_sheet, stock.cashflow
         score = 0
@@ -591,11 +594,11 @@ with tab_screener:
         st.stop()
 
     if exchange == "S&P 500":
-        est_time = "~5 min"
+        est_time = "~5–10 min"
     elif exchange == "NYSE":
-        est_time = "~10 min"
+        est_time = "~30–60 min"
     else:
-        est_time = "~10 min"
+        est_time = "~40–70 min"
 
     st.info(
         f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
