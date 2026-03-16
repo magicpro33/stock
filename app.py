@@ -162,7 +162,7 @@ with st.sidebar:
     min_score = st.slider(
         "Min Hybrid Score",
         min_value=0.0, max_value=20.0, value=2.0, step=0.5,
-        help="Only show stocks with a score above this threshold. score combines all metrics"
+        help="Only show stocks with a score above this threshold."
     )
 
     top_n = st.slider(
@@ -258,6 +258,18 @@ with st.sidebar:
 
     st.divider()
     run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary")
+
+    # Show cache status so user knows if a rescan will be instant
+    _sc = st.session_state.get("screener_cache", {})
+    if _sc.get("results"):
+        _exch_name = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
+        st.caption(
+            f"💾 Cache: **{len(_sc['results'])} tickers** from **{_exch_name}** "
+            f"scanned at {_sc.get('scanned_at','')}. "
+            f"Re-running the same exchange reuses this data instantly."
+        )
+    else:
+        st.caption("💾 No cache yet — first scan will download all data.")
 
 # ───────────────────────────────────────────────────────────────
 # SIGNAL FUNCTIONS  (identical logic to stock_screener_2026.py)
@@ -577,57 +589,86 @@ with tab_screener:
     exchange_key  = EXCHANGES[exchange]
     sector_label  = sector if sector != "All Sectors" else "All Sectors"
 
-    # Load tickers for selected exchange (cached for 24hrs)
-    with st.spinner(f"Loading {exchange} tickers..."):
-        try:
-            tickers = load_tickers(exchange_key)
-        except Exception as e:
-            st.error(f"Failed to load tickers: {e}")
-            st.stop()
-
-    if not tickers:
-        st.error(f"No tickers returned for {exchange}. Try again later.")
-        st.stop()
-
-    if exchange == "S&P 500":
-        est_time = "~5 min"
-    elif exchange == "NYSE":
-        est_time = "~10 min"
-    else:
-        est_time = "~10 min"
-
-    st.info(
-        f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
-        f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: {est_time}"
+    # ── Check if we already have cached scan data for this exchange ──
+    cache         = st.session_state.get("screener_cache", {})
+    cache_valid   = (
+        cache.get("exchange_key") == exchange_key and
+        cache.get("mfi_period")   == mfi_period   and
+        cache.get("range_days")   == range_days    and
+        bool(cache.get("results"))
     )
 
-    # Progress bar + threaded scan
-    progress_bar = st.progress(0, text="Starting scan...")
-    results = []
-    total = len(tickers)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t for t in tickers}
-        done = 0
-        for future in futures:
-            result = future.result()
-            if result:
-                results.append(result)
-            done += 1
-            pct = done / total
-            progress_bar.progress(pct, text=f"Scanning... {done}/{total} ({int(pct*100)}%)")
-
-    progress_bar.empty()
-
-    if not results:
-        st.error(
-            "No results returned. This is usually caused by yfinance rate limiting on Streamlit Cloud. "
-            "Try these fixes:\n\n"
-            "1. **Reduce Parallel Workers** to 3 in the sidebar and run again\n"
-            "2. **Wait 60 seconds** and try again — rate limits reset quickly\n"
-            "3. If it keeps failing, try scanning a **single sector** instead of all sectors to reduce the number of requests"
+    if cache_valid:
+        results = cache["results"]
+        st.success(
+            f"⚡ Using cached data from last scan "
+            f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
+            f"filters re-applied instantly. Click **Clear Cache & Rescan** to fetch fresh data."
         )
-        st.stop()
+        if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
+            st.session_state.pop("screener_cache", None)
+            st.rerun()
+    else:
+        # Load tickers for selected exchange (cached for 24hrs)
+        with st.spinner(f"Loading {exchange} tickers..."):
+            try:
+                tickers = load_tickers(exchange_key)
+            except Exception as e:
+                st.error(f"Failed to load tickers: {e}")
+                st.stop()
+
+        if not tickers:
+            st.error(f"No tickers returned for {exchange}. Try again later.")
+            st.stop()
+
+        if exchange == "S&P 500":
+            est_time = "~5 min"
+        elif exchange == "NYSE":
+            est_time = "~10 min"
+        else:
+            est_time = "~10 min"
+
+        st.info(
+            f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
+            f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: {est_time}"
+        )
+
+        # Progress bar + threaded scan
+        progress_bar = st.progress(0, text="Starting scan...")
+        results = []
+        total = len(tickers)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t for t in tickers}
+            done = 0
+            for future in futures:
+                result = future.result()
+                if result:
+                    results.append(result)
+                done += 1
+                pct = done / total
+                progress_bar.progress(pct, text=f"Scanning... {done}/{total} ({int(pct*100)}%)")
+
+        progress_bar.empty()
+
+        if not results:
+            st.error(
+                "No results returned. This is usually caused by yfinance rate limiting on Streamlit Cloud. "
+                "Try these fixes:\n\n"
+                "1. **Reduce Parallel Workers** to 3 in the sidebar and run again\n"
+                "2. **Wait 60 seconds** and try again — rate limits reset quickly\n"
+                "3. If it keeps failing, try scanning a **single sector** instead of all sectors to reduce the number of requests"
+            )
+            st.stop()
+
+        # ── Store results in session_state cache ──────────────────
+        st.session_state["screener_cache"] = {
+            "exchange_key": exchange_key,
+            "mfi_period":   mfi_period,
+            "range_days":   range_days,
+            "results":      results,
+            "scanned_at":   datetime.now().strftime("%H:%M:%S"),
+        }
 
     # Build DataFrame
     df = pd.DataFrame(results)
@@ -830,45 +871,93 @@ with tab_analyze:
 
         analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
 
-    # ── On Analyze click: fetch ALL data and cache in session_state ──
+    # ── On Analyze click: check screener cache first, then fetch if needed ──
     if analyze_btn and ticker_input:
-        with st.spinner(f"Fetching data for **{ticker_input}**..."):
-            try:
-                _stock = yf.Ticker(ticker_input)
-                _info  = _stock.info or {}
-                if not _info or len(_info) < 5:
-                    st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol.")
-                else:
-                    try:    _hist  = _stock.history(period="1y")
-                    except: _hist  = pd.DataFrame()
-                    try:    _fin   = _stock.financials
-                    except: _fin   = None
-                    try:    _bal   = _stock.balance_sheet
-                    except: _bal   = None
-                    try:    _cf    = _stock.cashflow
-                    except: _cf    = None
+        # Check if this ticker was already scanned in the screener
+        _cache     = st.session_state.get("screener_cache", {})
+        _cached_results = _cache.get("results", [])
+        _cached_row = next((r for r in _cached_results if r.get("Ticker") == ticker_input), None)
 
-                    _oe, _oey  = get_owner_earnings(_stock, _info)
-                    _vols      = get_volume_signals(_stock, mfi_period)
+        if _cached_row:
+            # ── Build analyze_data from screener cache — no API calls needed ──
+            with st.spinner(f"Loading **{ticker_input}** from screener cache..."):
+                try:
+                    # Still need history + financials for the full breakdown tabs
+                    # but metrics/raw data comes entirely from the cache
+                    _stock = yf.Ticker(ticker_input)
+                    try:    _hist = _stock.history(period="1y")
+                    except: _hist = pd.DataFrame()
+                    try:    _fin  = _stock.financials
+                    except: _fin  = None
+                    try:    _bal  = _stock.balance_sheet
+                    except: _bal  = None
+                    try:    _cf   = _stock.cashflow
+                    except: _cf   = None
+
+                    # Build info dict from cached row fields
+                    _info = _stock.info or {}
+
+                    # Raw metrics come directly from the cached scan — no recalculation
                     _raw = {
-                        "OE_Yield":       _oey,
-                        "ROIC":           calculate_roic(_stock),
-                        "ROIC_Trend":     calculate_roic_trend(_stock),
-                        "RevenueGrowth":  _info.get("revenueGrowth"),
-                        "EarningsGrowth": _info.get("earningsGrowth"),
-                        "Piotroski":      calculate_piotroski(_stock),
-                        "OBV":            _vols["OBV"],
-                        "MFI":            _vols["MFI"],
-                        "PCV":            _vols["PCV"],
+                        "OE_Yield":       _cached_row.get("OE_Yield"),
+                        "ROIC":           _cached_row.get("ROIC"),
+                        "ROIC_Trend":     _cached_row.get("ROIC_Trend"),
+                        "RevenueGrowth":  _cached_row.get("RevenueGrowth"),
+                        "EarningsGrowth": _cached_row.get("EarningsGrowth"),
+                        "Piotroski":      _cached_row.get("Piotroski"),
+                        "OBV":            _cached_row.get("OBV"),
+                        "MFI":            _cached_row.get("MFI"),
+                        "PCV":            _cached_row.get("PCV"),
                     }
-                    time.sleep(0.5)
+
                     st.session_state["analyze_data"] = {
                         "ticker": ticker_input, "info": _info,
                         "hist":   _hist, "fin": _fin, "bal": _bal, "cf": _cf,
                         "raw":    _raw,  "metrics_sel": dict(analyze_metrics),
+                        "from_cache": True,
                     }
-            except Exception as e:
-                st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
+                except Exception as e:
+                    st.error(f"Failed to load {ticker_input} from cache: {e}")
+        else:
+            # ── Not in cache — full yfinance fetch ──────────────────
+            with st.spinner(f"Fetching data for **{ticker_input}**..."):
+                try:
+                    _stock = yf.Ticker(ticker_input)
+                    _info  = _stock.info or {}
+                    if not _info or len(_info) < 5:
+                        st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol.")
+                    else:
+                        try:    _hist  = _stock.history(period="1y")
+                        except: _hist  = pd.DataFrame()
+                        try:    _fin   = _stock.financials
+                        except: _fin   = None
+                        try:    _bal   = _stock.balance_sheet
+                        except: _bal   = None
+                        try:    _cf    = _stock.cashflow
+                        except: _cf    = None
+
+                        _oe, _oey  = get_owner_earnings(_stock, _info)
+                        _vols      = get_volume_signals(_stock, mfi_period)
+                        _raw = {
+                            "OE_Yield":       _oey,
+                            "ROIC":           calculate_roic(_stock),
+                            "ROIC_Trend":     calculate_roic_trend(_stock),
+                            "RevenueGrowth":  _info.get("revenueGrowth"),
+                            "EarningsGrowth": _info.get("earningsGrowth"),
+                            "Piotroski":      calculate_piotroski(_stock),
+                            "OBV":            _vols["OBV"],
+                            "MFI":            _vols["MFI"],
+                            "PCV":            _vols["PCV"],
+                        }
+                        time.sleep(0.5)
+                        st.session_state["analyze_data"] = {
+                            "ticker": ticker_input, "info": _info,
+                            "hist":   _hist, "fin": _fin, "bal": _bal, "cf": _cf,
+                            "raw":    _raw,  "metrics_sel": dict(analyze_metrics),
+                            "from_cache": False,
+                        }
+                except Exception as e:
+                    st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
 
     elif analyze_btn and not ticker_input:
         st.warning("Please enter a ticker symbol.")
@@ -905,6 +994,11 @@ with tab_analyze:
                 mktcap  = info.get("marketCap")
 
                 st.markdown(f"## {name} &nbsp; `{sticker}`")
+                # Show whether data came from screener cache or fresh fetch
+                if _d.get("from_cache"):
+                    st.caption("⚡ Metrics loaded from screener cache — price history fetched fresh")
+                else:
+                    st.caption("🌐 Data fetched live from yfinance")
                 h1, h2, h3, h4 = st.columns(4)
                 h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
                 h2.metric("Sector",   info.get("sector", "N/A"))
