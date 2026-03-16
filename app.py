@@ -29,6 +29,8 @@ st.set_page_config(
 st.title("📈 Hybrid Stock Screener")
 st.caption("Screens S&P 500, NYSE, or NASDAQ for individual companies — ETFs, funds, and index products excluded.")
 
+tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
+
 # ───────────────────────────────────────────────────────────────
 # METRIC CONFIG  — name, default weight, full description
 # ───────────────────────────────────────────────────────────────
@@ -132,10 +134,10 @@ ETF_KEYWORDS = [
 ]
 
 # ───────────────────────────────────────────────────────────────
-# SIDEBAR — FILTERS
+# SIDEBAR — FILTERS  (Screener tab only)
 # ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Filters")
+    st.header("⚙️ Screener Filters")
 
     exchange = st.selectbox(
         "Exchange / Universe",
@@ -503,7 +505,8 @@ def color_score(val):
 # MAIN RUN LOGIC
 # ───────────────────────────────────────────────────────────────
 
-if run_btn:
+with tab_screener:
+ if run_btn:
     # Validate at least one metric is on
     active_metrics = [k for k, v in metric_enabled.items() if v]
     if not active_metrics:
@@ -673,7 +676,7 @@ if run_btn:
             use_container_width=True,
         )
 
-else:
+ else:
     st.info("👈 Configure your filters in the sidebar, then click **Run Screener** to start.")
     st.markdown("""
     ### How to use
@@ -705,3 +708,200 @@ else:
     - **MA50 toggle** — when on, only stocks trading *below* their 50-day MA are shown
     - **Min score** — removes low-conviction picks from the table
     """)
+
+# ───────────────────────────────────────────────────────────────
+# ANALYZE TAB — single ticker deep dive
+# ───────────────────────────────────────────────────────────────
+with tab_analyze:
+    st.subheader("🔍 Single Stock Analyzer")
+    st.caption("Enter any ticker and select which metrics to run. Works on any stock — S&P 500, NYSE, NASDAQ, or international.")
+
+    # ── Ticker input + metric checkboxes ────────────────────────
+    a_col1, a_col2 = st.columns([1, 2])
+
+    with a_col1:
+        ticker_input = st.text_input(
+            "Stock Ticker",
+            placeholder="e.g. AAPL, MSFT, TSLA",
+            help="Enter the ticker symbol exactly as it appears on the exchange."
+        ).strip().upper()
+
+        st.markdown("**Select Metrics to Analyze**")
+        analyze_metrics = {}
+        for key, cfg in METRICS.items():
+            analyze_metrics[key] = st.checkbox(
+                cfg["label"],
+                value=True,
+                key=f"analyze_{key}",
+                help=cfg["desc"],
+            )
+
+        analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
+
+    with a_col2:
+        if not analyze_btn:
+            st.markdown("""
+            **How to use:**
+            1. Type a ticker symbol on the left (e.g. `NVDA`)
+            2. Check the metrics you want to see
+            3. Click **Analyze**
+
+            Results show the raw value for each metric alongside a
+            color-coded signal: 🟢 Good · 🟡 Neutral · 🔴 Weak
+
+            You can analyze **any publicly traded stock** — not just S&P 500.
+            """)
+
+        elif not ticker_input:
+            st.warning("Please enter a ticker symbol.")
+
+        else:
+            with st.spinner(f"Fetching data for **{ticker_input}**..."):
+                try:
+                    stock = yf.Ticker(ticker_input)
+                    info  = stock.info
+
+                    if not info or len(info) < 5:
+                        st.error(f"Could not find data for **{ticker_input}**. Check the ticker symbol and try again.")
+                        st.stop()
+
+                    # ── Company header ───────────────────────────
+                    name     = info.get("longName") or info.get("shortName") or ticker_input
+                    price    = info.get("currentPrice") or info.get("regularMarketPrice")
+                    sector_v = info.get("sector", "N/A")
+                    industry = info.get("industry", "N/A")
+                    mktcap   = info.get("marketCap")
+
+                    st.markdown(f"## {name} &nbsp; `{ticker_input}`")
+                    h1, h2, h3, h4 = st.columns(4)
+                    h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
+                    h2.metric("Sector",   sector_v)
+                    h3.metric("Industry", industry)
+                    h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
+                    st.divider()
+
+                    # ── Run selected metrics ─────────────────────
+                    selected = [k for k, v in analyze_metrics.items() if v]
+                    if not selected:
+                        st.warning("Select at least one metric.")
+                        st.stop()
+
+                    # Collect raw values
+                    raw = {}
+                    owner_earnings, oe_yield = get_owner_earnings(stock, info)
+                    vol_signals = get_volume_signals(stock, mfi_period)
+
+                    raw["OE_Yield"]       = oe_yield
+                    raw["ROIC"]           = calculate_roic(stock)
+                    raw["ROIC_Trend"]     = calculate_roic_trend(stock)
+                    raw["RevenueGrowth"]  = info.get("revenueGrowth")
+                    raw["EarningsGrowth"] = info.get("earningsGrowth")
+                    raw["Piotroski"]      = calculate_piotroski(stock)
+                    raw["OBV"]            = vol_signals["OBV"]
+                    raw["MFI"]            = vol_signals["MFI"]
+                    raw["PCV"]            = vol_signals["PCV"]
+
+                    # Signal thresholds: (good_threshold, neutral_threshold, higher_is_better)
+                    THRESHOLDS = {
+                        "OE_Yield":       (0.05,  0.02,  True),
+                        "ROIC":           (0.15,  0.08,  True),
+                        "ROIC_Trend":     (0.02,  0.0,   True),
+                        "RevenueGrowth":  (0.10,  0.05,  True),
+                        "EarningsGrowth": (0.10,  0.05,  True),
+                        "Piotroski":      (7,     4,     True),
+                        "OBV":            (0.8,   0.4,   True),
+                        "MFI":            (0.5,   0.2,   True),
+                        "PCV":            (0.5,   0.2,   True),
+                    }
+
+                    def signal_emoji(key, val):
+                        if val is None or (isinstance(val, float) and np.isnan(val)):
+                            return "⚪", "N/A"
+                        good, neutral, higher = THRESHOLDS.get(key, (None, None, True))
+                        if good is None:
+                            return "⚪", str(val)
+                        if higher:
+                            if val >= good:   return "🟢", val
+                            elif val >= neutral: return "🟡", val
+                            else:             return "🔴", val
+                        else:
+                            if val <= good:   return "🟢", val
+                            elif val <= neutral: return "🟡", val
+                            else:             return "🔴", val
+
+                    def fmt_value(key, val):
+                        if val is None or (isinstance(val, float) and np.isnan(val)):
+                            return "N/A"
+                        if key in ("OE_Yield", "RevenueGrowth", "EarningsGrowth", "ROIC", "ROIC_Trend"):
+                            return f"{val:.2%}"
+                        if key in ("OBV", "MFI", "PCV"):
+                            return f"{val:.4f}"
+                        if key == "Piotroski":
+                            return f"{int(val)} / 9"
+                        return str(round(val, 4))
+
+                    # ── Render metric cards ──────────────────────
+                    st.markdown("### Metric Results")
+                    cols = st.columns(3)
+                    for i, key in enumerate(selected):
+                        cfg  = METRICS[key]
+                        val  = raw.get(key)
+                        emoji, _ = signal_emoji(key, val)
+                        display_val = fmt_value(key, val)
+
+                        with cols[i % 3]:
+                            st.markdown(
+                                f"""
+                                <div style="border:1px solid #444; border-radius:8px;
+                                            padding:14px; margin-bottom:12px;">
+                                  <div style="font-size:1.1em; font-weight:600;">
+                                    {emoji} {cfg['label']}
+                                  </div>
+                                  <div style="font-size:1.8em; font-weight:700;
+                                              margin:6px 0;">
+                                    {display_val}
+                                  </div>
+                                  <div style="font-size:0.78em; color:#aaa;">
+                                    {cfg['desc'][:120]}...
+                                  </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+
+                    # ── MA50 comparison ──────────────────────────
+                    st.divider()
+                    try:
+                        hist = stock.history(period="3mo")
+                        if len(hist) >= 50:
+                            ma50_val = round(hist["Close"].rolling(50).mean().iloc[-1], 2)
+                            diff_pct = ((price - ma50_val) / ma50_val) * 100 if price else 0
+                            ma_emoji = "🔴 Above" if price > ma50_val else "🟢 Below"
+                            m1, m2, m3 = st.columns(3)
+                            m1.metric("Current Price",  f"${price:,.2f}" if price else "N/A")
+                            m2.metric("50-Day MA",      f"${ma50_val:,.2f}")
+                            m3.metric("vs MA50",        f"{diff_pct:+.1f}%",
+                                      delta_color="inverse",
+                                      help="Negative = trading below MA50 (potential value zone)")
+                            st.caption(f"{ma_emoji} its 50-day moving average")
+                    except:
+                        pass
+
+                    # ── Overall summary score ────────────────────
+                    st.divider()
+                    total_score = 0.0
+                    max_possible = 0.0
+                    for key in selected:
+                        val = raw.get(key)
+                        w   = metric_weight.get(key, METRICS[key]["weight"])
+                        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                            total_score  += float(val) * w
+                            max_possible += w
+                    st.metric(
+                        "Weighted Score (selected metrics)",
+                        f"{total_score:.2f}",
+                        help="Sum of (metric value × weight) for all selected metrics with valid data."
+                    )
+
+                except Exception as e:
+                    st.error(f"Error fetching data for {ticker_input}: {e}")
