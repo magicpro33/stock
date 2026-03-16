@@ -661,9 +661,9 @@ with tab_screener:
     df["EarningsYield"] = df["P/E"].apply(lambda x: round(1/x, 2) if pd.notnull(x) and x > 0 else 0)
     df["ROIC"]          = df["ROIC"].round(2)
     df["ROIC_Trend"]    = df["ROIC_Trend"].round(2)
-    df["OBV"]           = df["OBV"].round(4)
-    df["MFI"]           = df["MFI"].round(4)
-    df["PCV"]           = df["PCV"].round(4)
+    df["OBV"]           = df["OBV"].round(2)
+    df["MFI"]           = df["MFI"].round(2)
+    df["PCV"]           = df["PCV"].round(2)
     df["MA50"]          = pd.to_numeric(df["MA50"], errors="coerce").round(2)
     df["RangeHigh"]     = pd.to_numeric(df["RangeHigh"], errors="coerce").round(2)
     df["RangeLow"]      = pd.to_numeric(df["RangeLow"],  errors="coerce").round(2)
@@ -730,8 +730,12 @@ with tab_screener:
         )
 
         # Round all remaining numeric columns to 2 decimal places
+        # Exclude: dollar columns, percentage columns, and range cols already formatted as strings
+        skip_cols = {"Ticker", "Sector", "MarketCap", "OwnerEarnings",
+                     "RevenueGrowth", "EarningsGrowth", "RangePct", "RangePos",
+                     "OE_Yield", "ROIC", "ROIC_Trend"}
         for col in display.columns:
-            if col not in ["Ticker", "Sector", "MarketCap", "OwnerEarnings", "RevenueGrowth", "EarningsGrowth"]:
+            if col not in skip_cols:
                 if pd.api.types.is_numeric_dtype(display[col]):
                     display[col] = display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
 
