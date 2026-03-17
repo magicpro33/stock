@@ -1335,33 +1335,234 @@ with tab_analyze:
                                help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
 
                 with ft[5]:
-                    st.markdown("### 📊 Price History")
-                    # Selectbox triggers reruns — session_state keeps all other data stable
-                    pc = st.selectbox("Time Period", ["1mo","3mo","6mo","1y"], index=2, key="price_history_period")
+                    st.markdown("### 📊 Interactive Chart")
+
+                    # ── Chart controls ────────────────────────────
+                    cc1, cc2, cc3 = st.columns(3)
+                    with cc1:
+                        chart_type = st.selectbox(
+                            "Chart Type",
+                            ["Candlestick", "Heikin Ashi", "Line"],
+                            index=0, key="chart_type",
+                            help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
+                        )
+                    with cc2:
+                        pc = st.selectbox(
+                            "Time Period",
+                            ["1mo","3mo","6mo","1y"],
+                            index=2, key="price_history_period"
+                        )
+                    with cc3:
+                        chart_theme = st.selectbox(
+                            "Theme", ["Dark","Light"], index=0, key="chart_theme"
+                        )
+
+                    st.markdown("**Overlays**")
+                    ov1,ov2,ov3,ov4 = st.columns(4)
+                    show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
+                    show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
+                    show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
+                    show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
+
+                    st.markdown("**Sub-Charts**")
+                    sc1,sc2,sc3 = st.columns(3)
+                    show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
+                    show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
+                    show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
+
                     pdays = {"1mo":21,"3mo":63,"6mo":126,"1y":252}
                     dn = pdays.get(pc, 126)
-                    hd = hist_1y.iloc[-dn:] if len(hist_1y) >= dn else hist_1y
+                    hd = hist_1y.iloc[-dn:].copy() if len(hist_1y) >= dn else hist_1y.copy()
+
                     if not hd.empty:
-                        ph1, ph2 = st.columns([3,1])
-                        with ph1:
-                            st.markdown("**Closing Price**")
-                            st.line_chart(hd["Close"], use_container_width=True)
-                        with ph2:
-                            pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
-                            st.metric("Return",    _fp(pr), delta=f"{pr:+.2%}")
-                            st.metric("High",      f"${hd['High'].max():,.2f}")
-                            st.metric("Low",       f"${hd['Low'].min():,.2f}")
-                            st.metric("Avg Vol",   _fb(hd["Volume"].mean()).replace("$",""))
-                        st.markdown("**Volume**")
-                        st.bar_chart(hd["Volume"], use_container_width=True)
-                        hma = hd["Close"].to_frame()
-                        hma["MA20"]  = hma["Close"].rolling(20).mean()
-                        hma["MA50"]  = hma["Close"].rolling(50).mean()
-                        hma["MA200"] = hma["Close"].rolling(200).mean()
-                        mac = hma.dropna()
-                        if not mac.empty:
-                            st.markdown("**Moving Averages (20 / 50 / 200 day)**")
-                            st.line_chart(mac, use_container_width=True)
+                        import plotly.graph_objects as go
+                        from plotly.subplots import make_subplots
+
+                        bg   = "#0e1117" if chart_theme == "Dark" else "#ffffff"
+                        fg   = "#ffffff" if chart_theme == "Dark" else "#000000"
+                        grid = "#1f2937" if chart_theme == "Dark" else "#e5e7eb"
+
+                        # ── Compute indicators ────────────────────
+                        hd["EMA20"]  = hd["Close"].ewm(span=20,  adjust=False).mean()
+                        hd["EMA50"]  = hd["Close"].ewm(span=50,  adjust=False).mean()
+                        hd["EMA200"] = hd["Close"].ewm(span=200, adjust=False).mean()
+
+                        # Bollinger Bands (20-day, 2σ)
+                        bb_mid        = hd["Close"].rolling(20).mean()
+                        bb_std        = hd["Close"].rolling(20).std()
+                        hd["BB_mid"]  = bb_mid
+                        hd["BB_up"]   = bb_mid + 2 * bb_std
+                        hd["BB_low"]  = bb_mid - 2 * bb_std
+
+                        # RSI (14-period)
+                        delta  = hd["Close"].diff()
+                        gain   = delta.clip(lower=0).rolling(14).mean()
+                        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+                        rs     = gain / loss.replace(0, np.nan)
+                        hd["RSI"] = 100 - (100 / (1 + rs))
+
+                        # MACD (12/26/9)
+                        ema12       = hd["Close"].ewm(span=12, adjust=False).mean()
+                        ema26       = hd["Close"].ewm(span=26, adjust=False).mean()
+                        hd["MACD"]  = ema12 - ema26
+                        hd["Signal"]= hd["MACD"].ewm(span=9, adjust=False).mean()
+                        hd["Hist"]  = hd["MACD"] - hd["Signal"]
+
+                        # Heikin Ashi OHLC
+                        ha = hd.copy()
+                        ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
+                        ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
+                        ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                        ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
+                        ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
+
+                        # ── Build subplot layout ──────────────────
+                        sub_charts = [s for s, show in [
+                            ("Volume", show_vol), ("RSI", show_rsi), ("MACD", show_macd)
+                        ] if show]
+
+                        n_rows   = 1 + len(sub_charts)
+                        row_h    = [0.55] + [0.45 / max(len(sub_charts), 1)] * len(sub_charts) if sub_charts else [1.0]
+                        sub_specs= [[{"secondary_y": False}]] * n_rows
+
+                        fig = make_subplots(
+                            rows=n_rows, cols=1,
+                            shared_xaxes=True,
+                            row_heights=row_h,
+                            vertical_spacing=0.03,
+                            specs=sub_specs,
+                        )
+
+                        # ── Main price chart ──────────────────────
+                        if chart_type == "Candlestick":
+                            fig.add_trace(go.Candlestick(
+                                x=hd.index, open=hd["Open"], high=hd["High"],
+                                low=hd["Low"],  close=hd["Close"],
+                                name="Price",
+                                increasing_line_color="#26a69a",
+                                decreasing_line_color="#ef5350",
+                                increasing_fillcolor="#26a69a",
+                                decreasing_fillcolor="#ef5350",
+                            ), row=1, col=1)
+
+                        elif chart_type == "Heikin Ashi":
+                            fig.add_trace(go.Candlestick(
+                                x=ha.index, open=ha["HA_Open"], high=ha["HA_High"],
+                                low=ha["HA_Low"],  close=ha["HA_Close"],
+                                name="Heikin Ashi",
+                                increasing_line_color="#26a69a",
+                                decreasing_line_color="#ef5350",
+                                increasing_fillcolor="#26a69a",
+                                decreasing_fillcolor="#ef5350",
+                            ), row=1, col=1)
+
+                        else:  # Line
+                            fig.add_trace(go.Scatter(
+                                x=hd.index, y=hd["Close"],
+                                name="Close", line=dict(color="#2196f3", width=1.5)
+                            ), row=1, col=1)
+
+                        # ── Overlays ──────────────────────────────
+                        if show_ema20:
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA20"],
+                                name="EMA 20", line=dict(color="#f59e0b", width=1),
+                                opacity=0.85), row=1, col=1)
+                        if show_ema50:
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA50"],
+                                name="EMA 50", line=dict(color="#a78bfa", width=1),
+                                opacity=0.85), row=1, col=1)
+                        if show_ema200:
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA200"],
+                                name="EMA 200", line=dict(color="#f87171", width=1),
+                                opacity=0.85), row=1, col=1)
+                        if show_bb:
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_up"],
+                                name="BB Upper", line=dict(color="#94a3b8", width=1, dash="dot"),
+                                opacity=0.6), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_low"],
+                                name="BB Lower", line=dict(color="#94a3b8", width=1, dash="dot"),
+                                fill="tonexty", fillcolor="rgba(148,163,184,0.08)",
+                                opacity=0.6), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_mid"],
+                                name="BB Mid", line=dict(color="#94a3b8", width=1, dash="dash"),
+                                opacity=0.4), row=1, col=1)
+
+                        # ── Sub-charts ────────────────────────────
+                        sub_row = 2
+                        if show_vol:
+                            colors = ["#26a69a" if hd["Close"].iloc[i] >= hd["Open"].iloc[i]
+                                      else "#ef5350" for i in range(len(hd))]
+                            fig.add_trace(go.Bar(
+                                x=hd.index, y=hd["Volume"],
+                                name="Volume", marker_color=colors, opacity=0.7,
+                            ), row=sub_row, col=1)
+                            fig.update_yaxes(title_text="Volume", row=sub_row, col=1,
+                                             title_font=dict(size=10), tickfont=dict(size=9))
+                            sub_row += 1
+
+                        if show_rsi:
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["RSI"],
+                                name="RSI", line=dict(color="#60a5fa", width=1.5)),
+                                row=sub_row, col=1)
+                            fig.add_hline(y=70, line_dash="dot", line_color="#ef5350",
+                                          line_width=1, row=sub_row, col=1)
+                            fig.add_hline(y=30, line_dash="dot", line_color="#26a69a",
+                                          line_width=1, row=sub_row, col=1)
+                            fig.update_yaxes(title_text="RSI", range=[0,100],
+                                             row=sub_row, col=1,
+                                             title_font=dict(size=10), tickfont=dict(size=9))
+                            sub_row += 1
+
+                        if show_macd:
+                            hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
+                                           for v in hd["Hist"].fillna(0)]
+                            fig.add_trace(go.Bar(x=hd.index, y=hd["Hist"],
+                                name="MACD Hist", marker_color=hist_colors, opacity=0.6),
+                                row=sub_row, col=1)
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["MACD"],
+                                name="MACD", line=dict(color="#60a5fa", width=1.2)),
+                                row=sub_row, col=1)
+                            fig.add_trace(go.Scatter(x=hd.index, y=hd["Signal"],
+                                name="Signal", line=dict(color="#f59e0b", width=1.2)),
+                                row=sub_row, col=1)
+                            fig.update_yaxes(title_text="MACD", row=sub_row, col=1,
+                                             title_font=dict(size=10), tickfont=dict(size=9))
+
+                        # ── Layout ────────────────────────────────
+                        fig.update_layout(
+                            height=600 + 120 * len(sub_charts),
+                            paper_bgcolor=bg, plot_bgcolor=bg,
+                            font=dict(color=fg, size=11),
+                            legend=dict(
+                                orientation="h", yanchor="bottom", y=1.01,
+                                xanchor="left", x=0,
+                                bgcolor="rgba(0,0,0,0)", font=dict(size=10)
+                            ),
+                            margin=dict(l=10, r=10, t=30, b=10),
+                            xaxis_rangeslider_visible=False,
+                            hovermode="x unified",
+                        )
+                        fig.update_xaxes(
+                            gridcolor=grid, showgrid=True,
+                            zeroline=False, showspikes=True,
+                            spikecolor="#666", spikethickness=1,
+                        )
+                        fig.update_yaxes(
+                            gridcolor=grid, showgrid=True,
+                            zeroline=False,
+                        )
+                        fig.update_yaxes(title_text="Price ($)", row=1, col=1,
+                                         title_font=dict(size=10), tickfont=dict(size=9))
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # ── Period stats ──────────────────────────
+                        s1, s2, s3, s4 = st.columns(4)
+                        pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
+                        s1.metric("Period Return", _fp(pr),     delta=f"{pr:+.2%}")
+                        s2.metric("Period High",   f"${hd['High'].max():,.2f}")
+                        s3.metric("Period Low",    f"${hd['Low'].min():,.2f}")
+                        s4.metric("Avg Volume",    _fb(hd["Volume"].mean()).replace("$",""))
                     else:
                         st.info("No price history available.")
 
