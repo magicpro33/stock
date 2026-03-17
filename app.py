@@ -927,7 +927,7 @@ with tab_analyze:
             v = _fc.get(key)
             if v is None:                                return False
             if isinstance(v, pd.DataFrame) and v.empty:  return False
-            if isinstance(v, dict) and len(v) < 5:       return False
+            if isinstance(v, dict) and not v:             return False  # only reject empty dicts
             return True
 
         need_info = not _ok("info")
@@ -953,14 +953,13 @@ with tab_analyze:
                 if need_info:
                     try:
                         _info = _stock.info or {}
-                        if len(_info) >= 5:
+                        # Store whatever we got — even a partial dict is useful
+                        if _info:
                             _fc["info"] = _info
-                        else:
-                            _info = _fc.get("info", {})
                     except Exception:
                         _info = _fc.get("info", {})
                 else:
-                    _info = _fc["info"]
+                    _info = _fc.get("info", {})
 
                 # Patch info with screener row data for any gaps
                 if _cached_row:
@@ -976,12 +975,11 @@ with tab_analyze:
                         if v is not None and not _info.get(k):
                             _info[k] = v
 
-                # Abort if we still have no usable info
-                if not _info or len(_info) < 3:
-                    if not _cached_row:
-                        st.error(f"Could not find data for **{ticker_input}**. "
-                                 f"Check the ticker symbol and try again.")
-                        st.stop()
+                # Only abort if we have absolutely nothing — no info AND no screener row
+                if not _info and not _cached_row:
+                    st.error(f"Could not find data for **{ticker_input}**. "
+                             f"Check the ticker symbol and try again.")
+                    st.stop()
 
                 # ── price history ─────────────────────────────────
                 if need_hist:
