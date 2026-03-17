@@ -1337,8 +1337,8 @@ with tab_analyze:
                 with ft[5]:
                     st.markdown("### 📊 Interactive Chart")
 
-                    # ── Chart controls ────────────────────────────
-                    cc1, cc2, cc3 = st.columns(3)
+                    # ── Chart controls row 1 ──────────────────────
+                    cc1, cc2, cc3, cc4 = st.columns(4)
                     with cc1:
                         chart_type = st.selectbox(
                             "Chart Type",
@@ -1347,15 +1347,58 @@ with tab_analyze:
                             help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
                         )
                     with cc2:
-                        pc = st.selectbox(
-                            "Time Period",
-                            ["1mo","3mo","6mo","1y"],
-                            index=2, key="price_history_period"
+                        interval = st.selectbox(
+                            "Candle Interval",
+                            ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
+                            index=6, key="chart_interval",
+                            help=(
+                                "1m/5m: last 7 days max  |  "
+                                "15m/30m/1h: last 60 days max  |  "
+                                "4h: last 60 days max (resampled)  |  "
+                                "1d/1wk/1mo: years of data available"
+                            )
                         )
                     with cc3:
+                        # Restrict time period options based on interval
+                        intraday_short = interval in ("1m", "5m")
+                        intraday_mid   = interval in ("15m", "30m", "1h", "4h")
+
+                        if intraday_short:
+                            period_opts = ["1d", "5d", "7d"]
+                            period_def  = 1
+                        elif intraday_mid:
+                            period_opts = ["1d", "5d", "1mo", "2mo"]
+                            period_def  = 2
+                        else:
+                            period_opts = ["5d","1mo","3mo","6mo","1y","2y","5y","10y","Custom"]
+                            period_def  = 4
+
+                        pc = st.selectbox(
+                            "Time Period", period_opts,
+                            index=period_def, key="price_history_period"
+                        )
+                    with cc4:
                         chart_theme = st.selectbox(
                             "Theme", ["Dark","Light"], index=0, key="chart_theme"
                         )
+
+                    # ── Custom date range (daily+ only) ───────────
+                    if pc == "Custom":
+                        dr1, dr2 = st.columns(2)
+                        with dr1:
+                            custom_start = st.date_input(
+                                "Start Date",
+                                value=pd.Timestamp.today() - pd.Timedelta(days=365),
+                                max_value=pd.Timestamp.today(),
+                                key="chart_custom_start",
+                            )
+                        with dr2:
+                            custom_end = st.date_input(
+                                "End Date",
+                                value=pd.Timestamp.today(),
+                                max_value=pd.Timestamp.today(),
+                                key="chart_custom_end",
+                            )
 
                     st.markdown("**Overlays**")
                     ov1,ov2,ov3,ov4 = st.columns(4)
@@ -1370,9 +1413,56 @@ with tab_analyze:
                     show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
                     show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
 
-                    pdays = {"1mo":21,"3mo":63,"6mo":126,"1y":252}
-                    dn = pdays.get(pc, 126)
-                    hd = hist_1y.iloc[-dn:].copy() if len(hist_1y) >= dn else hist_1y.copy()
+                    # ── Fetch history with correct interval ───────
+                    # yfinance interval/period compatibility:
+                    #   1m        → max period "7d"
+                    #   5m/15m/30m/1h → max period "60d"
+                    #   4h        → not native; fetch 1h and resample
+                    #   1d/1wk/1mo → any period
+                    fetch_interval = "1h" if interval == "4h" else interval
+
+                    # Map display period → yfinance period string for fetch
+                    period_fetch_map = {
+                        "1d":"1d","5d":"5d","7d":"7d","1mo":"1mo","2mo":"2mo",
+                        "3mo":"3mo","6mo":"6mo","1y":"2y","2y":"5y",
+                        "5y":"10y","10y":"max","Custom":"max",
+                    }
+                    fetch_period = period_fetch_map.get(pc, "2y")
+
+                    try:
+                        _s = yf.Ticker(sticker)
+                        if pc == "Custom":
+                            hist_full = _s.history(
+                                start=str(custom_start),
+                                end=str(custom_end),
+                                interval=fetch_interval
+                            )
+                        else:
+                            hist_full = _s.history(period=fetch_period, interval=fetch_interval)
+                    except Exception as _fe:
+                        st.warning(f"Could not fetch {interval} data: {_fe}. Falling back to daily.")
+                        hist_full = hist_1y
+
+                    # Resample 1h → 4h if needed
+                    if interval == "4h" and not hist_full.empty:
+                        hist_full = hist_full.resample("4h").agg({
+                            "Open":  "first",
+                            "High":  "max",
+                            "Low":   "min",
+                            "Close": "last",
+                            "Volume":"sum",
+                        }).dropna()
+
+                    # Slice to display window for daily+ periods
+                    period_days_map = {
+                        "5d":5,"1mo":21,"3mo":63,"6mo":126,
+                        "1y":252,"2y":504,"5y":1260,"10y":2520,
+                    }
+                    if pc not in ("Custom","1d","5d","7d","1mo","2mo"):
+                        dn = period_days_map.get(pc, 252)
+                        hd = hist_full.iloc[-dn:].copy() if len(hist_full) >= dn else hist_full.copy()
+                    else:
+                        hd = hist_full.copy()
 
                     if not hd.empty:
                         import plotly.graph_objects as go
