@@ -135,6 +135,30 @@ ETF_KEYWORDS = [
 ]
 
 # ───────────────────────────────────────────────────────────────
+# CACHE HELPERS — must be defined before sidebar renders
+# ───────────────────────────────────────────────────────────────
+import pickle as _pickle
+
+def _cache_size_str() -> str:
+    total = 0
+    for key in ("screener_cache", "analyze_fin_cache"):
+        obj = st.session_state.get(key)
+        if obj is None:
+            continue
+        try:
+            total += len(_pickle.dumps(obj, protocol=2))
+        except Exception:
+            total += sys.getsizeof(obj)
+    if total == 0:        return "0 KB"
+    if total < 1024:      return f"{total} B"
+    if total < 1024**2:   return f"{total/1024:.1f} KB"
+    return f"{total/1024**2:.2f} MB"
+
+def _clear_all_cache():
+    for key in ("screener_cache", "analyze_fin_cache"):
+        st.session_state.pop(key, None)
+
+# ───────────────────────────────────────────────────────────────
 # SESSION STATE DEFAULTS — set once on first load
 # ───────────────────────────────────────────────────────────────
 _defaults = {
@@ -337,41 +361,6 @@ with st.sidebar:
         st.markdown("**💾 Cache Status**")
         st.caption("No cache yet — run a scan or analyze a stock to populate it.  "
                    "Cache is stored in your browser session and clears automatically when the tab is closed.")
-
-# ───────────────────────────────────────────────────────────────
-# CACHE SIZE HELPER
-# ───────────────────────────────────────────────────────────────
-def _cache_size_str() -> str:
-    """
-    Estimates total in-memory size of both caches stored in session_state
-    and returns a human-readable string like '4.2 MB'.
-    Uses recursive traversal to handle nested dicts, lists, and DataFrames.
-    """
-    import pickle
-    total = 0
-    for key in ("screener_cache", "analyze_fin_cache"):
-        obj = st.session_state.get(key)
-        if obj is None:
-            continue
-        try:
-            total += len(pickle.dumps(obj, protocol=2))
-        except Exception:
-            # Fallback: rough estimate via sys.getsizeof on top-level
-            total += sys.getsizeof(obj)
-    if total == 0:
-        return "0 KB"
-    if total < 1024:
-        return f"{total} B"
-    if total < 1024 ** 2:
-        return f"{total/1024:.1f} KB"
-    return f"{total/1024**2:.2f} MB"
-
-
-def _clear_all_cache():
-    """Wipe both screener and financial analysis caches from session state."""
-    for key in ("screener_cache", "analyze_fin_cache"):
-        st.session_state.pop(key, None)
-
 
 # ───────────────────────────────────────────────────────────────
 
