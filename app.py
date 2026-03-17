@@ -1176,21 +1176,29 @@ with tab_analyze:
                     c1, c2 = st.columns(2)
                     with c1:
                         irow("Full Name",    info.get("longName","N/A"))
-                        irow("Exchange",     info.get("exchange","N/A"))
-                        irow("Sector",       info.get("sector","N/A"))
-                        irow("Industry",     info.get("industry","N/A"))
-                        irow("Country",      info.get("country","N/A"))
-                        irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A")
+                        irow("Exchange",     info.get("exchange","N/A"),   "The stock exchange where shares are listed and traded")
+                        irow("Sector",       info.get("sector","N/A"),     "GICS sector classification — broad industry group the company belongs to")
+                        irow("Industry",     info.get("industry","N/A"),   "Specific industry within the sector")
+                        irow("Country",      info.get("country","N/A"),    "Country where the company is headquartered")
+                        irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A",
+                             "Total number of full-time employees")
                         irow("Website",      info.get("website","N/A"))
                     with c2:
                         officers = info.get("companyOfficers",[])
-                        irow("CEO",          officers[0].get("name","N/A") if officers else "N/A")
-                        irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")))
-                        irow("Audit Risk",   str(info.get("auditRisk","N/A")))
-                        irow("Board Risk",   str(info.get("boardRisk","N/A")))
-                        irow("Comp Risk",    str(info.get("compensationRisk","N/A")))
-                        irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")))
-                        irow("Overall Risk", str(info.get("overallRisk","N/A")))
+                        irow("CEO",          officers[0].get("name","N/A") if officers else "N/A",
+                             "Chief Executive Officer — the top executive responsible for running the company")
+                        irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")),
+                             "Fiscal Year End — the month the company closes its annual accounting period")
+                        irow("Audit Risk",   str(info.get("auditRisk","N/A")),
+                             "Score 1–10 rating audit-related governance risk. Lower = less risk")
+                        irow("Board Risk",   str(info.get("boardRisk","N/A")),
+                             "Score 1–10 rating board structure and independence risk. Lower = less risk")
+                        irow("Comp Risk",    str(info.get("compensationRisk","N/A")),
+                             "Compensation Risk — score 1–10 rating executive pay structure risk. Lower = less risk")
+                        irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")),
+                             "Shareholder Rights Risk — score 1–10. High = management has too much power vs shareholders")
+                        irow("Overall Risk", str(info.get("overallRisk","N/A")),
+                             "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
                     st.markdown("#### Business Summary")
                     st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
 
@@ -1198,29 +1206,50 @@ with tab_analyze:
                     st.markdown("### 💰 Valuation")
                     v1, v2 = st.columns(2)
                     with v1:
-                        irow("Market Cap",       _fb(info.get("marketCap")))
-                        irow("Enterprise Value", _fb(info.get("enterpriseValue")))
-                        irow("Trailing P/E",     _fn(info.get("trailingPE")))
-                        irow("Forward P/E",      _fn(info.get("forwardPE")))
-                        irow("PEG Ratio",        _fn(info.get("pegRatio")))
-                        irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")))
-                        irow("Price/Book",       _fn(info.get("priceToBook")))
-                        irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")))
-                        irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")))
+                        irow("Market Cap",       _fb(info.get("marketCap")),
+                             "Market Capitalization — total market value of all outstanding shares (Share Price × Shares Outstanding)")
+                        irow("Enterprise Value", _fb(info.get("enterpriseValue")),
+                             "Enterprise Value (EV) — Market Cap + Total Debt − Cash. Represents the true takeover cost of a company")
+                        irow("Trailing P/E",     _fn(info.get("trailingPE")),
+                             "Trailing Price-to-Earnings — share price divided by actual earnings per share over the last 12 months. Lower = cheaper relative to earnings")
+                        irow("Forward P/E",      _fn(info.get("forwardPE")),
+                             "Forward Price-to-Earnings — share price divided by analyst-estimated future earnings. Reflects growth expectations")
+                        irow("PEG Ratio",        _fn(info.get("pegRatio")),
+                             "Price/Earnings-to-Growth — P/E divided by earnings growth rate. Below 1.0 may indicate undervaluation relative to growth")
+                        irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")),
+                             "Price-to-Sales (P/S) — Market Cap divided by annual revenue. Useful for unprofitable companies. Lower = cheaper")
+                        irow("Price/Book",       _fn(info.get("priceToBook")),
+                             "Price-to-Book (P/B) — share price divided by book value per share (assets minus liabilities). Below 1.0 = trading below asset value")
+                        irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")),
+                             "Enterprise Value divided by annual revenue. Similar to P/S but accounts for debt. Lower = cheaper")
+                        irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")),
+                             "Enterprise Value divided by EBITDA. Popular acquisition valuation multiple. Below 10 is generally considered reasonable")
                     with v2:
-                        irow("Trailing EPS",     _fn(info.get("trailingEps")))
-                        irow("Forward EPS",      _fn(info.get("forwardEps")))
-                        irow("Book Value/Share", _fn(info.get("bookValue")))
-                        irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")))
-                        irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")))
-                        irow("50-Day MA",        _fn(info.get("fiftyDayAverage")))
-                        irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")))
-                        irow("Beta",             _fn(info.get("beta")))
-                        irow("Short % Float",    _fp(info.get("shortPercentOfFloat")))
+                        irow("Trailing EPS",     _fn(info.get("trailingEps")),
+                             "Trailing Earnings Per Share — actual net income per share over the last 12 months")
+                        irow("Forward EPS",      _fn(info.get("forwardEps")),
+                             "Forward Earnings Per Share — analyst-estimated earnings per share for the next 12 months")
+                        irow("Book Value/Share", _fn(info.get("bookValue")),
+                             "Net assets per share — total assets minus total liabilities, divided by shares outstanding")
+                        irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")),
+                             "Highest closing price over the last 52 weeks (one year)")
+                        irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")),
+                             "Lowest closing price over the last 52 weeks (one year)")
+                        irow("50-Day MA",        _fn(info.get("fiftyDayAverage")),
+                             "50-Day Moving Average — average closing price over the last 50 trading days. Used as a short-term trend indicator")
+                        irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")),
+                             "200-Day Moving Average — average closing price over the last 200 trading days. Used as a long-term trend indicator")
+                        irow("Beta",             _fn(info.get("beta")),
+                             "Beta — measures stock volatility vs the S&P 500. Beta > 1 = more volatile than market; Beta < 1 = less volatile")
+                        irow("Short % Float",    _fp(info.get("shortPercentOfFloat")),
+                             "Short Interest as % of Float — percentage of tradeable shares currently sold short. High % can signal bearish sentiment or potential short squeeze")
                     d1,d2,d3 = st.columns(3)
-                    d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None")
-                    d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None")
-                    d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A")
+                    d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None",
+                              help="Dividend Rate — annual cash dividend paid per share")
+                    d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None",
+                              help="Dividend Yield — annual dividend as a % of share price. Higher = more income per dollar invested")
+                    d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A",
+                              help="Payout Ratio — percentage of net income paid out as dividends. Above 100% means paying more than it earns")
 
                 with ft[2]:
                     st.markdown("### 📈 Income Statement (Annual)")
@@ -1232,15 +1261,23 @@ with tab_analyze:
                     else:
                         st.info("Income statement not available.")
                     i1,i2,i3,i4 = st.columns(4)
-                    i1.metric("Revenue",   _fb(info.get("totalRevenue")))
-                    i2.metric("Gross",     _fb(info.get("grossProfits")))
-                    i3.metric("EBITDA",    _fb(info.get("ebitda")))
-                    i4.metric("Net Inc",   _fb(info.get("netIncomeToCommon")))
+                    i1.metric("Revenue",    _fb(info.get("totalRevenue")),
+                              help="Total Revenue — all money earned from selling products/services before any expenses are deducted")
+                    i2.metric("Gross",      _fb(info.get("grossProfits")),
+                              help="Gross Profit — Revenue minus Cost of Goods Sold (COGS). Shows profit before operating expenses")
+                    i3.metric("EBITDA",     _fb(info.get("ebitda")),
+                              help="Earnings Before Interest, Taxes, Depreciation & Amortization — a proxy for operating cash flow and profitability")
+                    i4.metric("Net Inc",    _fb(info.get("netIncomeToCommon")),
+                              help="Net Income — the bottom line profit after all expenses, interest, and taxes have been deducted")
                     i5,i6,i7,i8 = st.columns(4)
-                    i5.metric("Gross Mgn", _fp(info.get("grossMargins")))
-                    i6.metric("Op Mgn",    _fp(info.get("operatingMargins")))
-                    i7.metric("Net Mgn",   _fp(info.get("profitMargins")))
-                    i8.metric("Rev Growth",_fp(info.get("revenueGrowth")))
+                    i5.metric("Gross Mgn",  _fp(info.get("grossMargins")),
+                              help="Gross Margin — Gross Profit ÷ Revenue. Higher % = more money left after production costs")
+                    i6.metric("Op Mgn",     _fp(info.get("operatingMargins")),
+                              help="Operating Margin — Operating Income ÷ Revenue. Shows profit from core business operations")
+                    i7.metric("Net Mgn",    _fp(info.get("profitMargins")),
+                              help="Net Profit Margin — Net Income ÷ Revenue. The % of every dollar of revenue that becomes profit")
+                    i8.metric("Rev Growth", _fp(info.get("revenueGrowth")),
+                              help="Revenue Growth — year-over-year percentage increase in total revenue")
 
                 with ft[3]:
                     st.markdown("### 🏦 Balance Sheet (Annual)")
@@ -1252,15 +1289,23 @@ with tab_analyze:
                     else:
                         st.info("Balance sheet not available.")
                     b1,b2,b3,b4 = st.columns(4)
-                    b1.metric("Cash",      _fb(info.get("totalCash")))
-                    b2.metric("Debt",      _fb(info.get("totalDebt")))
-                    b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)))
-                    b4.metric("Assets",    _fb(info.get("totalAssets")))
+                    b1.metric("Cash",      _fb(info.get("totalCash")),
+                              help="Total Cash & Short-Term Investments — liquid assets the company can access immediately")
+                    b2.metric("Debt",      _fb(info.get("totalDebt")),
+                              help="Total Debt — all short-term and long-term borrowings combined")
+                    b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)),
+                              help="Net Cash Position — Total Cash minus Total Debt. Positive = more cash than debt (strong balance sheet)")
+                    b4.metric("Assets",    _fb(info.get("totalAssets")),
+                              help="Total Assets — everything the company owns: cash, property, equipment, intangibles, etc.")
                     b5,b6,b7,b8 = st.columns(4)
-                    b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")))
-                    b6.metric("D/E",       _fn(info.get("debtToEquity")))
-                    b7.metric("Cur Ratio", _fn(info.get("currentRatio")))
-                    b8.metric("Qck Ratio", _fn(info.get("quickRatio")))
+                    b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")),
+                              help="Cash Per Share — total cash divided by shares outstanding. Higher = more cash backing each share")
+                    b6.metric("D/E",       _fn(info.get("debtToEquity")),
+                              help="Debt-to-Equity Ratio — total debt divided by shareholders equity. Lower = less financial leverage/risk. Above 2.0 can be concerning")
+                    b7.metric("Cur Ratio", _fn(info.get("currentRatio")),
+                              help="Current Ratio — Current Assets ÷ Current Liabilities. Above 1.0 means the company can cover its short-term debts. Above 2.0 is considered healthy")
+                    b8.metric("Qck Ratio", _fn(info.get("quickRatio")),
+                              help="Quick Ratio (Acid Test) — like Current Ratio but excludes inventory. Above 1.0 means the company can pay short-term debts without selling inventory")
 
                 with ft[4]:
                     st.markdown("### 💵 Cash Flow (Annual)")
@@ -1272,14 +1317,20 @@ with tab_analyze:
                     else:
                         st.info("Cash flow not available.")
                     cf1,cf2,cf3,cf4 = st.columns(4)
-                    cf1.metric("Op CF",  _fb(info.get("operatingCashflow")))
-                    cf2.metric("FCF",    _fb(info.get("freeCashflow")))
-                    cf3.metric("CapEx",  _fb(info.get("capitalExpenditures")))
+                    cf1.metric("Op CF",   _fb(info.get("operatingCashflow")),
+                               help="Operating Cash Flow — actual cash generated from core business operations. More reliable than net income as a profitability measure")
+                    cf2.metric("FCF",     _fb(info.get("freeCashflow")),
+                               help="Free Cash Flow — Operating Cash Flow minus Capital Expenditures. Cash left over that can be used for dividends, buybacks, or debt repayment")
+                    cf3.metric("CapEx",   _fb(info.get("capitalExpenditures")),
+                               help="Capital Expenditures — money spent on buying, maintaining or upgrading physical assets like buildings and equipment")
                     sh = info.get("sharesOutstanding"); fcf = info.get("freeCashflow")
-                    cf4.metric("FCF/Shr",_fn(fcf/sh if fcf and sh else None))
+                    cf4.metric("FCF/Shr", _fn(fcf/sh if fcf and sh else None),
+                               help="Free Cash Flow Per Share — FCF divided by shares outstanding. How much free cash is generated per share owned")
                     cf5,cf6 = st.columns(2)
-                    cf5.metric("ROA", _fp(info.get("returnOnAssets")))
-                    cf6.metric("ROE", _fp(info.get("returnOnEquity")))
+                    cf5.metric("ROA", _fp(info.get("returnOnAssets")),
+                               help="Return on Assets — Net Income ÷ Total Assets. Measures how efficiently a company uses its assets to generate profit. Above 5% is generally good")
+                    cf6.metric("ROE", _fp(info.get("returnOnEquity")),
+                               help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
 
                 with ft[5]:
                     st.markdown("### 📊 Price History")
