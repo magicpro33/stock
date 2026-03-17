@@ -906,120 +906,139 @@ with tab_analyze:
 
         analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
 
-    # ── On Analyze click: smart fetch — only request what's missing ──
+    # ── On Analyze click: fetch only what is missing from cache ──
     if analyze_btn and ticker_input:
         _screener_cache  = st.session_state.get("screener_cache", {})
         _cached_results  = _screener_cache.get("results", [])
-        _cached_row      = next((r for r in _cached_results if r.get("Ticker") == ticker_input), None)
+        _cached_row      = next(
+            (r for r in _cached_results if r.get("Ticker") == ticker_input), None
+        )
 
+        # Ensure fin cache dict exists and has an entry for this ticker
         if "analyze_fin_cache" not in st.session_state:
             st.session_state["analyze_fin_cache"] = {}
         _fin_store = st.session_state["analyze_fin_cache"]
-        _fin_cached = _fin_store.get(ticker_input, {})
+        if ticker_input not in _fin_store:
+            _fin_store[ticker_input] = {}          # initialise empty — avoids KeyError
+        _fc = _fin_store[ticker_input]             # shorthand reference
 
-        # ── Helper: check if a cached value is usable ──────────────
-        def _has(key):
-            v = _fin_cached.get(key)
-            if v is None:                                 return False
+        # ── Validator: is a cached value actually usable? ──────────
+        def _ok(key):
+            v = _fc.get(key)
+            if v is None:                                return False
             if isinstance(v, pd.DataFrame) and v.empty:  return False
             if isinstance(v, dict) and len(v) < 5:       return False
             return True
 
-        # Determine what still needs fetching
-        need_info = not _has("info")
-        need_hist = not _has("hist")
-        need_fin  = not _has("fin")
-        need_bal  = not _has("bal")
-        need_cf   = not _has("cf")
-        need_raw  = not _has("raw")
+        need_info = not _ok("info")
+        need_hist = not _ok("hist")
+        need_fin  = not _ok("fin")
+        need_bal  = not _ok("bal")
+        need_cf   = not _ok("cf")
+        need_raw  = not _ok("raw")
 
-        anything_to_fetch = any([need_info, need_hist, need_fin, need_bal, need_cf, need_raw])
+        anything_missing = any([need_info, need_hist, need_fin, need_bal, need_cf, need_raw])
 
-        if anything_to_fetch:
-            missing = [k for k, n in [("info",need_info),("history",need_hist),
-                                       ("income",need_fin),("balance",need_bal),
-                                       ("cashflow",need_cf),("metrics",need_raw)] if n]
-            with st.spinner(f"Fetching missing data for **{ticker_input}**: {', '.join(missing)}..."):
-                try:
-                    _stock = yf.Ticker(ticker_input)
-                    time.sleep(0.3)
+        if anything_missing:
+            missing_labels = [k for k, n in [
+                ("info", need_info), ("price history", need_hist),
+                ("income stmt", need_fin), ("balance sheet", need_bal),
+                ("cash flow", need_cf), ("metrics", need_raw),
+            ] if n]
+            with st.spinner(f"Fetching for **{ticker_input}**: {', '.join(missing_labels)}..."):
+                # Create ticker object once — used for all fetches below
+                _stock = yf.Ticker(ticker_input)
 
-                    if need_info:
-                        try:
-                            _info = _stock.info or {}
-                            if len(_info) >= 5:
-                                _fin_store[ticker_input]["info"] = _info
-                        except:
-                            _info = _fin_cached.get("info", {})
-                    else:
-                        _info = _fin_cached["info"]
-
-                    # Merge screener row fields into info for any missing keys
-                    if _cached_row:
-                        _screener_info = {
-                            "sector":         _cached_row.get("Sector", "N/A"),
-                            "currentPrice":   _cached_row.get("Price"),
-                            "marketCap":      _cached_row.get("MarketCap"),
-                            "trailingPE":     _cached_row.get("P/E"),
-                            "revenueGrowth":  _cached_row.get("RevenueGrowth"),
-                            "earningsGrowth": _cached_row.get("EarningsGrowth"),
-                        }
-                        for k, v in _screener_info.items():
-                            if v is not None and not _info.get(k):
-                                _info[k] = v
-
-                    if need_hist:
-                        try:
-                            _hist = _stock.history(period="1y")
-                            _fin_store[ticker_input]["hist"] = _hist
-                        except:
-                            _hist = _fin_cached.get("hist", pd.DataFrame())
-                    else:
-                        _hist = _fin_cached["hist"]
-
-                    if need_fin:
-                        try:
-                            _fin = _stock.financials
-                            _fin_store[ticker_input]["fin"] = _fin
-                        except:
-                            _fin = _fin_cached.get("fin")
-                    else:
-                        _fin = _fin_cached["fin"]
-
-                    if need_bal:
-                        try:
-                            _bal = _stock.balance_sheet
-                            _fin_store[ticker_input]["bal"] = _bal
-                        except:
-                            _bal = _fin_cached.get("bal")
-                    else:
-                        _bal = _fin_cached["bal"]
-
-                    if need_cf:
-                        try:
-                            _cf = _stock.cashflow
-                            _fin_store[ticker_input]["cf"] = _cf
-                        except:
-                            _cf = _fin_cached.get("cf")
-                    else:
-                        _cf = _fin_cached["cf"]
-
-                    if need_raw:
-                        if _cached_row:
-                            # Pull metrics directly from screener cache — no recalculation
-                            _raw = {
-                                "OE_Yield":       _cached_row.get("OE_Yield"),
-                                "ROIC":           _cached_row.get("ROIC"),
-                                "ROIC_Trend":     _cached_row.get("ROIC_Trend"),
-                                "RevenueGrowth":  _cached_row.get("RevenueGrowth"),
-                                "EarningsGrowth": _cached_row.get("EarningsGrowth"),
-                                "Piotroski":      _cached_row.get("Piotroski"),
-                                "OBV":            _cached_row.get("OBV"),
-                                "MFI":            _cached_row.get("MFI"),
-                                "PCV":            _cached_row.get("PCV"),
-                            }
+                # ── info ─────────────────────────────────────────
+                if need_info:
+                    try:
+                        _info = _stock.info or {}
+                        if len(_info) >= 5:
+                            _fc["info"] = _info
                         else:
-                            # Calculate fresh
+                            _info = _fc.get("info", {})
+                    except Exception:
+                        _info = _fc.get("info", {})
+                else:
+                    _info = _fc["info"]
+
+                # Patch info with screener row data for any gaps
+                if _cached_row:
+                    _patch = {
+                        "sector":         _cached_row.get("Sector"),
+                        "currentPrice":   _cached_row.get("Price"),
+                        "marketCap":      _cached_row.get("MarketCap"),
+                        "trailingPE":     _cached_row.get("P/E"),
+                        "revenueGrowth":  _cached_row.get("RevenueGrowth"),
+                        "earningsGrowth": _cached_row.get("EarningsGrowth"),
+                    }
+                    for k, v in _patch.items():
+                        if v is not None and not _info.get(k):
+                            _info[k] = v
+
+                # Abort if we still have no usable info
+                if not _info or len(_info) < 3:
+                    if not _cached_row:
+                        st.error(f"Could not find data for **{ticker_input}**. "
+                                 f"Check the ticker symbol and try again.")
+                        st.stop()
+
+                # ── price history ─────────────────────────────────
+                if need_hist:
+                    try:
+                        _hist = _stock.history(period="1y")
+                        if not _hist.empty:
+                            _fc["hist"] = _hist
+                    except Exception:
+                        _hist = _fc.get("hist", pd.DataFrame())
+                else:
+                    _hist = _fc["hist"]
+
+                # ── financial statements ──────────────────────────
+                if need_fin:
+                    try:
+                        _fin = _stock.financials
+                        _fc["fin"] = _fin
+                    except Exception:
+                        _fin = _fc.get("fin")
+                else:
+                    _fin = _fc.get("fin")
+
+                if need_bal:
+                    try:
+                        _bal = _stock.balance_sheet
+                        _fc["bal"] = _bal
+                    except Exception:
+                        _bal = _fc.get("bal")
+                else:
+                    _bal = _fc.get("bal")
+
+                if need_cf:
+                    try:
+                        _cf = _stock.cashflow
+                        _fc["cf"] = _cf
+                    except Exception:
+                        _cf = _fc.get("cf")
+                else:
+                    _cf = _fc.get("cf")
+
+                # ── metrics (raw scores) ──────────────────────────
+                if need_raw:
+                    if _cached_row:
+                        # Pull directly from screener data — no recalculation needed
+                        _raw = {
+                            "OE_Yield":       _cached_row.get("OE_Yield"),
+                            "ROIC":           _cached_row.get("ROIC"),
+                            "ROIC_Trend":     _cached_row.get("ROIC_Trend"),
+                            "RevenueGrowth":  _cached_row.get("RevenueGrowth"),
+                            "EarningsGrowth": _cached_row.get("EarningsGrowth"),
+                            "Piotroski":      _cached_row.get("Piotroski"),
+                            "OBV":            _cached_row.get("OBV"),
+                            "MFI":            _cached_row.get("MFI"),
+                            "PCV":            _cached_row.get("PCV"),
+                        }
+                    else:
+                        try:
                             _oe, _oey = get_owner_earnings(_stock, _info)
                             _vols     = get_volume_signals(_stock, mfi_period)
                             _raw = {
@@ -1033,28 +1052,27 @@ with tab_analyze:
                                 "MFI":            _vols["MFI"],
                                 "PCV":            _vols["PCV"],
                             }
-                        _fin_store[ticker_input]["raw"] = _raw
-                    else:
-                        _raw = _fin_cached["raw"]
+                        except Exception:
+                            _raw = _fc.get("raw", {})
+                    _fc["raw"] = _raw
+                else:
+                    _raw = _fc["raw"]
 
-                except Exception as e:
-                    st.error(f"Failed to fetch data for **{ticker_input}**: {e}")
-                    st.stop()
         else:
-            # Everything is cached — no API calls at all
-            _info = _fin_cached["info"]
-            _hist = _fin_cached["hist"]
-            _fin  = _fin_cached["fin"]
-            _bal  = _fin_cached["bal"]
-            _cf   = _fin_cached["cf"]
-            _raw  = _fin_cached["raw"]
+            # ── Fully cached — zero API calls ────────────────────
+            _info = _fc["info"]
+            _hist = _fc["hist"]
+            _fin  = _fc.get("fin")
+            _bal  = _fc.get("bal")
+            _cf   = _fc.get("cf")
+            _raw  = _fc["raw"]
 
-        # Persist the updated cache entry
-        _fin_store[ticker_input] = {
+        # Persist everything back to store
+        _fin_store[ticker_input].update({
             "info": _info, "hist": _hist,
             "fin":  _fin,  "bal":  _bal,
             "cf":   _cf,   "raw":  _raw,
-        }
+        })
 
         st.session_state["analyze_data"] = {
             "ticker":      ticker_input,
