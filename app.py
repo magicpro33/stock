@@ -7,6 +7,7 @@
 # -----------------------------------
 
 import io
+import sys
 import time
 import requests
 import numpy as np
@@ -305,20 +306,73 @@ with st.sidebar:
     st.divider()
     run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary")
 
-    # Show cache status so user knows if a rescan will be instant
-    _sc = st.session_state.get("screener_cache", {})
-    if _sc.get("results"):
-        _exch_name = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
-        st.caption(
-            f"💾 Cache: **{len(_sc['results'])} tickers** from **{_exch_name}** "
-            f"scanned at {_sc.get('scanned_at','')}. "
-            f"Re-running the same exchange reuses this data instantly."
-        )
+    # ── Cache status panel ────────────────────────────────────────
+    st.divider()
+    _sc  = st.session_state.get("screener_cache", {})
+    _fca = st.session_state.get("analyze_fin_cache", {})
+    _sz  = _cache_size_str()
+
+    if _sc.get("results") or _fca:
+        _exch_name    = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
+        _scan_tickers = len(_sc.get("results", []))
+        _fin_tickers  = len(_fca)
+
+        st.markdown("**💾 Cache Status**")
+        ci1, ci2 = st.columns(2)
+        ci1.metric("Screener Tickers", _scan_tickers if _scan_tickers else "—")
+        ci2.metric("Analyzed Stocks",  _fin_tickers  if _fin_tickers  else "—")
+        ci3, ci4 = st.columns(2)
+        ci3.metric("Cache Size",   _sz)
+        ci4.metric("Exchange",     _exch_name if _scan_tickers else "—")
+
+        if _sc.get("scanned_at"):
+            st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
+                       f"Cache clears automatically when you close the browser tab.")
+
+        if st.button("🗑️ Clear All Cache", use_container_width=True, key="clear_all_cache_btn"):
+            _clear_all_cache()
+            st.success("All cache cleared.")
+            st.rerun()
     else:
-        st.caption("💾 No cache yet — first scan will download all data.")
+        st.markdown("**💾 Cache Status**")
+        st.caption("No cache yet — run a scan or analyze a stock to populate it.  "
+                   "Cache is stored in your browser session and clears automatically when the tab is closed.")
 
 # ───────────────────────────────────────────────────────────────
-# SIGNAL FUNCTIONS  (identical logic to stock_screener_2026.py)
+# CACHE SIZE HELPER
+# ───────────────────────────────────────────────────────────────
+def _cache_size_str() -> str:
+    """
+    Estimates total in-memory size of both caches stored in session_state
+    and returns a human-readable string like '4.2 MB'.
+    Uses recursive traversal to handle nested dicts, lists, and DataFrames.
+    """
+    import pickle
+    total = 0
+    for key in ("screener_cache", "analyze_fin_cache"):
+        obj = st.session_state.get(key)
+        if obj is None:
+            continue
+        try:
+            total += len(pickle.dumps(obj, protocol=2))
+        except Exception:
+            # Fallback: rough estimate via sys.getsizeof on top-level
+            total += sys.getsizeof(obj)
+    if total == 0:
+        return "0 KB"
+    if total < 1024:
+        return f"{total} B"
+    if total < 1024 ** 2:
+        return f"{total/1024:.1f} KB"
+    return f"{total/1024**2:.2f} MB"
+
+
+def _clear_all_cache():
+    """Wipe both screener and financial analysis caches from session state."""
+    for key in ("screener_cache", "analyze_fin_cache"):
+        st.session_state.pop(key, None)
+
+
 # ───────────────────────────────────────────────────────────────
 
 def get_volume_signals(stock, mfi_period):
@@ -1209,9 +1263,15 @@ with tab_analyze:
                     ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
                     diff_pct = ((price - ma50_val) / ma50_val * 100) if price else 0
                     m1, m2, m3 = st.columns(3)
-                    m1.metric("Current Price", f"${price:,.2f}" if price else "N/A")
-                    m2.metric("50-Day MA",     f"${ma50_val:,.2f}")
-                    m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse")
+                    m1.metric("Current Price", f"${price:,.2f}" if price else "N/A",
+                              help="The latest traded price of the stock")
+                    m2.metric("50-Day MA",     f"${ma50_val:,.2f}",
+                              help="50-Day Moving Average — the average closing price over the last 50 trading days. "
+                                   "Price below this line = stock is in a short-term downtrend or pullback")
+                    m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
+                              help="How far the current price is above or below the 50-day MA. "
+                                   "Negative = trading below the MA (potential value zone). "
+                                   "Positive = trading above the MA (momentum zone)")
                     st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
 
                 # ── Price Range ───────────────────────────────────
@@ -1225,10 +1285,26 @@ with tab_analyze:
                     rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
                     rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
                     rc1, rc2, rc3, rc4 = st.columns(4)
-                    rc1.metric("Range High", f"${rh:,.2f}")
-                    rc2.metric("Range Low",  f"${rl:,.2f}")
-                    rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A")
-                    rc4.metric("Position",    f"{rpos:.0%}")
+                    rc1.metric("Range High", f"${rh:,.2f}",
+                               help=f"The highest closing price over the last {range_days} trading days. "
+                                    "This acts as the top of the price range — a resistance level. "
+                                    "Price approaching this level may face selling pressure.")
+                    rc2.metric("Range Low",  f"${rl:,.2f}",
+                               help=f"The lowest closing price over the last {range_days} trading days. "
+                                    "This acts as the bottom of the price range — a support level. "
+                                    "Price near this level may attract buyers.")
+                    rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A",
+                               help="Range Width = (High − Low) ÷ Midpoint × 100. "
+                                    "Measures how wide the trading channel is as a % of price. "
+                                    "Under 5% = very tight consolidation (coiling). "
+                                    "5–10% = normal consolidation. "
+                                    "Above 20% = high volatility / wide swings.")
+                    rc4.metric("Position",    f"{rpos:.0%}",
+                               help="Where the current price sits within the range. "
+                                    "0% = at the range low (at support — potential buy zone). "
+                                    "50% = exactly at the midpoint. "
+                                    "100% = at the range high (at resistance — potential sell zone). "
+                                    "Stocks near the low end of a tight range can signal accumulation before a breakout.")
                     bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
                     pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
                     st.markdown(
