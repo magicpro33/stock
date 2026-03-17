@@ -134,6 +134,27 @@ ETF_KEYWORDS = [
 ]
 
 # ───────────────────────────────────────────────────────────────
+# SESSION STATE DEFAULTS — set once on first load
+# ───────────────────────────────────────────────────────────────
+_defaults = {
+    "slider_max_price":  250,
+    "slider_min_score":  2.0,
+    "tog_ma50":          True,
+    "tog_range":         False,
+    "slider_range_days": 30,
+    "slider_range_pct":  10.0,
+    "slider_mfi_period": 14,
+}
+# Metric toggle/weight defaults
+for _k, _cfg in METRICS.items():
+    _defaults[f"tog_{_k}"] = True
+    _defaults[f"wt_{_k}"]  = float(_cfg["weight"])
+
+for _key, _val in _defaults.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _val
+
+# ───────────────────────────────────────────────────────────────
 # SIDEBAR — FILTERS  (Screener tab only)
 # ───────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -143,14 +164,15 @@ with st.sidebar:
     if st.button("✨ Magic Stock", use_container_width=True,
                  help="Auto-sets: Price ≤$200, Min Score=0, Below 50MA on, "
                       "Range filter on (10% / 30 days), MFI only (weight 5), MFI period 20 days"):
-        st.session_state["ms_max_price"]       = 200
-        st.session_state["ms_min_score"]       = 0.0
-        st.session_state["ms_use_ma50"]        = True
-        st.session_state["ms_use_range"]       = True
-        st.session_state["ms_range_days"]      = 30
-        st.session_state["ms_range_max_pct"]   = 10.0
-        st.session_state["ms_mfi_period"]      = 20
-        # Metrics: only MFI on, all others off; MFI weight = 5
+        # Write directly to each widget's session_state key
+        st.session_state["slider_max_price"]   = 200
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = True
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 10.0
+        st.session_state["slider_mfi_period"]  = 20
+        # Metric toggles — all off except MFI
         for _k in ["OE_Yield","ROIC","ROIC_Trend","RevenueGrowth","EarningsGrowth","Piotroski","OBV","PCV"]:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 1.0
@@ -177,7 +199,6 @@ with st.sidebar:
     max_price = st.slider(
         "Max Share Price ($)",
         min_value=10, max_value=1000, step=10,
-        value=st.session_state.get("ms_max_price", 250),
         help="Exclude stocks above this price.",
         key="slider_max_price",
     )
@@ -185,7 +206,6 @@ with st.sidebar:
     min_score = st.slider(
         "Min Hybrid Score",
         min_value=0.0, max_value=20.0, step=0.5,
-        value=st.session_state.get("ms_min_score", 2.0),
         help="Only show stocks with a score above this threshold.",
         key="slider_min_score",
     )
@@ -198,7 +218,6 @@ with st.sidebar:
 
     use_ma50_filter = st.toggle(
         "Only stocks BELOW 50-day MA",
-        value=st.session_state.get("ms_use_ma50", True),
         help="When on, only shows stocks in a pullback (price < MA50).",
         key="tog_ma50",
     )
@@ -209,7 +228,6 @@ with st.sidebar:
 
     use_range_filter = st.toggle(
         "Enable Price Range Filter",
-        value=st.session_state.get("ms_use_range", False),
         help="When on, only shows stocks trading within a tight range over the selected period.",
         key="tog_range",
     )
@@ -217,7 +235,6 @@ with st.sidebar:
     range_days = st.slider(
         "Range Lookback (days)",
         min_value=5, max_value=180, step=5,
-        value=st.session_state.get("ms_range_days", 30),
         help="Number of trading days to measure the high/low range over.",
         key="slider_range_days",
     )
@@ -225,7 +242,6 @@ with st.sidebar:
     range_max_pct = st.slider(
         "Max Range Width (%)",
         min_value=1.0, max_value=30.0, step=0.5,
-        value=st.session_state.get("ms_range_max_pct", 10.0),
         help="Maximum allowed spread between high and low as % of price. "
              "Lower = tighter range. 5–10% finds stocks in consolidation.",
         disabled=not use_range_filter,
@@ -245,11 +261,10 @@ with st.sidebar:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
-            metric_enabled[key] = st.toggle(cfg["label"], value=True, key=f"tog_{key}")
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
         with col_b:
             metric_weight[key] = st.slider(
-                f"Weight", min_value=0.0, max_value=5.0,
-                value=float(cfg["weight"]), step=0.5,
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
                 key=f"wt_{key}",
                 disabled=not metric_enabled[key],
                 label_visibility="collapsed",
@@ -262,11 +277,10 @@ with st.sidebar:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
-            metric_enabled[key] = st.toggle(cfg["label"], value=True, key=f"tog_{key}")
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
         with col_b:
             metric_weight[key] = st.slider(
-                f"Weight", min_value=0.0, max_value=5.0,
-                value=float(cfg["weight"]), step=0.5,
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
                 key=f"wt_{key}",
                 disabled=not metric_enabled[key],
                 label_visibility="collapsed",
@@ -284,7 +298,6 @@ with st.sidebar:
     mfi_period = st.slider(
         "MFI Period (days)",
         min_value=7, max_value=30, step=1,
-        value=st.session_state.get("ms_mfi_period", 14),
         help="Money Flow Index lookback window.",
         key="slider_mfi_period",
     )
@@ -636,7 +649,7 @@ with tab_screener:
         st.success(
             f"⚡ Using cached data from last scan "
             f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
-            f"filters re-applied instantly. Click **Clear Cache & Rescan** to fetch fresh data."
+            f"filters re-applied instantly. Est. time: **~0 sec**. Click **Clear Cache & Rescan** to fetch fresh data."
         )
         if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
             st.session_state.pop("screener_cache", None)
@@ -654,16 +667,9 @@ with tab_screener:
             st.error(f"No tickers returned for {exchange}. Try again later.")
             st.stop()
 
-        if exchange == "S&P 500":
-            est_time = "~5–10 min"
-        elif exchange == "NYSE":
-            est_time = "~30–60 min"
-        else:
-            est_time = "~40–70 min"
-
         st.info(
             f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
-            f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: {est_time}"
+            f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: ~5 min"
         )
 
         # Progress bar + threaded scan
@@ -728,7 +734,6 @@ with tab_screener:
 
     df["P/E"]           = df["P/E"].round(2)
     df["OE_Yield"]      = df["OE_Yield"].round(2)
-    df["EarningsYield"] = df["P/E"].apply(lambda x: round(1/x, 2) if pd.notnull(x) and x > 0 else 0)
     df["ROIC"]          = df["ROIC"].round(2)
     df["ROIC_Trend"]    = df["ROIC_Trend"].round(2)
     df["OBV"]           = df["OBV"].round(2)
@@ -739,9 +744,6 @@ with tab_screener:
     df["RangeLow"]      = pd.to_numeric(df["RangeLow"],  errors="coerce").round(2)
     df["RangePct"]      = pd.to_numeric(df["RangePct"],  errors="coerce").round(2)
     df["RangePos"]      = pd.to_numeric(df["RangePos"],  errors="coerce").round(4)
-    df["Rank_EY"]       = df["EarningsYield"].rank(ascending=False, method="min")
-    df["Rank_ROIC"]     = df["ROIC"].fillna(0).rank(ascending=False, method="min")
-    df["MagicFormula"]  = df["Rank_EY"] + df["Rank_ROIC"]
 
     # Dynamic score — use sidebar weight sliders, skip disabled metrics
     score = pd.Series(0.0, index=df.index)
