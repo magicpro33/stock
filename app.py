@@ -139,6 +139,27 @@ ETF_KEYWORDS = [
 with st.sidebar:
     st.header("⚙️ Screener Filters")
 
+    # ── Magic Stock preset button ────────────────────────────────
+    if st.button("✨ Magic Stock", use_container_width=True,
+                 help="Auto-sets: Price ≤$200, Min Score=0, Below 50MA on, "
+                      "Range filter on (10% / 30 days), MFI only (weight 5), MFI period 20 days"):
+        st.session_state["ms_max_price"]       = 200
+        st.session_state["ms_min_score"]       = 0.0
+        st.session_state["ms_use_ma50"]        = True
+        st.session_state["ms_use_range"]       = True
+        st.session_state["ms_range_days"]      = 30
+        st.session_state["ms_range_max_pct"]   = 10.0
+        st.session_state["ms_mfi_period"]      = 20
+        # Metrics: only MFI on, all others off; MFI weight = 5
+        for _k in ["OE_Yield","ROIC","ROIC_Trend","RevenueGrowth","EarningsGrowth","Piotroski","OBV","PCV"]:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 1.0
+        st.session_state["tog_MFI"] = True
+        st.session_state["wt_MFI"]  = 5.0
+        st.rerun()
+
+    st.divider()
+
     exchange = st.selectbox(
         "Exchange / Universe",
         options=list(EXCHANGES.keys()),
@@ -155,14 +176,18 @@ with st.sidebar:
 
     max_price = st.slider(
         "Max Share Price ($)",
-        min_value=10, max_value=1000, value=250, step=10,
-        help="Exclude stocks above this price."
+        min_value=10, max_value=1000, step=10,
+        value=st.session_state.get("ms_max_price", 250),
+        help="Exclude stocks above this price.",
+        key="slider_max_price",
     )
 
     min_score = st.slider(
         "Min Hybrid Score",
-        min_value=0.0, max_value=20.0, value=2.0, step=0.5,
-        help="Only show stocks with a score above this threshold."
+        min_value=0.0, max_value=20.0, step=0.5,
+        value=st.session_state.get("ms_min_score", 2.0),
+        help="Only show stocks with a score above this threshold.",
+        key="slider_min_score",
     )
 
     top_n = st.slider(
@@ -173,8 +198,9 @@ with st.sidebar:
 
     use_ma50_filter = st.toggle(
         "Only stocks BELOW 50-day MA",
-        value=True,
-        help="When on, only shows stocks in a pullback (price < MA50)."
+        value=st.session_state.get("ms_use_ma50", True),
+        help="When on, only shows stocks in a pullback (price < MA50).",
+        key="tog_ma50",
     )
 
     st.divider()
@@ -183,22 +209,27 @@ with st.sidebar:
 
     use_range_filter = st.toggle(
         "Enable Price Range Filter",
-        value=False,
-        help="When on, only shows stocks trading within a tight range over the selected period."
+        value=st.session_state.get("ms_use_range", False),
+        help="When on, only shows stocks trading within a tight range over the selected period.",
+        key="tog_range",
     )
 
     range_days = st.slider(
         "Range Lookback (days)",
-        min_value=5, max_value=180, value=30, step=5,
-        help="Number of trading days to measure the high/low range over."
+        min_value=5, max_value=180, step=5,
+        value=st.session_state.get("ms_range_days", 30),
+        help="Number of trading days to measure the high/low range over.",
+        key="slider_range_days",
     )
 
     range_max_pct = st.slider(
         "Max Range Width (%)",
-        min_value=1.0, max_value=30.0, value=10.0, step=0.5,
+        min_value=1.0, max_value=30.0, step=0.5,
+        value=st.session_state.get("ms_range_max_pct", 10.0),
         help="Maximum allowed spread between high and low as % of price. "
              "Lower = tighter range. 5–10% finds stocks in consolidation.",
         disabled=not use_range_filter,
+        key="slider_range_pct",
     )
 
     st.divider()
@@ -252,8 +283,10 @@ with st.sidebar:
 
     mfi_period = st.slider(
         "MFI Period (days)",
-        min_value=7, max_value=30, value=14, step=1,
-        help="Money Flow Index lookback window."
+        min_value=7, max_value=30, step=1,
+        value=st.session_state.get("ms_mfi_period", 14),
+        help="Money Flow Index lookback window.",
+        key="slider_mfi_period",
     )
 
     st.divider()
@@ -622,11 +655,11 @@ with tab_screener:
             st.stop()
 
         if exchange == "S&P 500":
-            est_time = "~5 min"
+            est_time = "~5–10 min"
         elif exchange == "NYSE":
-            est_time = "~10 min"
+            est_time = "~30–60 min"
         else:
-            est_time = "~10 min"
+            est_time = "~40–70 min"
 
         st.info(
             f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
@@ -1055,11 +1088,14 @@ with tab_analyze:
                     try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
                     except: return "N/A"
 
-                def irow(label, value):
+                def irow(label, value, tip=None):
+                    # tip renders as a small ℹ tooltip after the label
+                    tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
+                                f"font-size:0.85em;'>ℹ️</span>") if tip else ""
                     st.markdown(
                         f"<div style='display:flex;justify-content:space-between;"
                         f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
-                        f"<span style='color:#aaa;'>{label}</span>"
+                        f"<span style='color:#aaa;'>{label}{tip_html}</span>"
                         f"<span style='font-weight:600;'>{value}</span></div>",
                         unsafe_allow_html=True)
 
