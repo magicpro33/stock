@@ -1364,6 +1364,9 @@ with tab_analyze:
                 cols = st.columns(3)
                 for i, key in enumerate(selected):
                     cfg = METRICS[key]; val = raw.get(key)
+                    # HTML-escape the description so special chars don't break the markup
+                    import html as _html
+                    safe_desc = _html.escape(cfg['desc'][:120])
                     # Build extra badge line for MFI card
                     extra = ""
                     if key == "MFI" and _mfi_lbl:
@@ -1373,13 +1376,15 @@ with tab_analyze:
                                  f"{_mfi_lbl}</div>")
                     with cols[i % 3]:
                         st.markdown(
-                            f"""<div style="border:1px solid #444;border-radius:8px;
-                                           padding:14px;margin-bottom:12px;">
-                              <div style="font-size:1.1em;font-weight:600;">{_sig(key,val)} {cfg['label']}</div>
-                              <div style="font-size:1.8em;font-weight:700;margin:6px 0;">{_fv(key,val)}</div>
-                              {extra}
-                              <div style="font-size:0.78em;color:#aaa;margin-top:6px;">{cfg['desc'][:120]}...</div>
-                            </div>""", unsafe_allow_html=True)
+                            f"<div style='border:1px solid #444;border-radius:8px;"
+                            f"padding:14px;margin-bottom:12px;'>"
+                            f"<div style='font-size:1.1em;font-weight:600;'>{_sig(key,val)} {cfg['label']}</div>"
+                            f"<div style='font-size:1.8em;font-weight:700;margin:6px 0;'>{_fv(key,val)}</div>"
+                            f"{extra}"
+                            f"<div style='font-size:0.78em;color:#aaa;margin-top:6px;'>{safe_desc}...</div>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
 
                 # ── MA50 ─────────────────────────────────────────
                 st.divider()
