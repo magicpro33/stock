@@ -101,6 +101,15 @@ METRICS = {
                    "happens on up-days, buyers are in control. Score scales from 0 (50/50) "
                    "to 1.0 (all up-day volume).",
     },
+    "RangePosScore": {
+        "label":   "Range Position Score",
+        "weight":  2,
+        "desc":    "Breakout proximity score — measures how close the current price is to the "
+                   "LOW end of its trading range. Score = 1 − RangePos, so 1.0 means price is "
+                   "sitting exactly at range support (maximum coiled energy), and 0.0 means "
+                   "price is at the top of the range (already extended). Use this with the "
+                   "Price Range Filter to find stocks coiling at the bottom of a tight range.",
+    },
 }
 
 ALL_SECTORS = [
@@ -174,6 +183,8 @@ _defaults = {
 for _k, _cfg in METRICS.items():
     _defaults[f"tog_{_k}"] = True
     _defaults[f"wt_{_k}"]  = float(_cfg["weight"])
+# RangePosScore off by default — only meaningful when range filter is on
+_defaults["tog_RangePosScore"] = False
 
 for _key, _val in _defaults.items():
     if _key not in st.session_state:
@@ -187,22 +198,43 @@ with st.sidebar:
 
     # ── Magic Stock preset button ────────────────────────────────
     if st.button("✨ Magic Stock", use_container_width=True,
-                 help="Auto-sets: Price ≤$200, Min Score=0, Below 50MA on, "
-                      "Range filter on (10% / 30 days), MFI only (weight 5), MFI period 20 days"):
-        # Write directly to each widget's session_state key
-        st.session_state["slider_max_price"]   = 200
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = True
-        st.session_state["tog_range"]          = True
-        st.session_state["slider_range_days"]  = 30
-        st.session_state["slider_range_pct"]   = 10.0
-        st.session_state["slider_mfi_period"]  = 20
-        # Metric toggles — all off except MFI
-        for _k in ["OE_Yield","ROIC","ROIC_Trend","RevenueGrowth","EarningsGrowth","Piotroski","OBV","PCV"]:
+                 help="Optimized for breakout setups: finds stocks in a tight range near support "
+                      "with rising buying pressure — coiled and ready to move higher."):
+        # ── Filter settings ──────────────────────────────────────
+        st.session_state["slider_max_price"]   = 150    # Focus on lower-priced stocks with more % upside
+        st.session_state["slider_min_score"]   = 0.0    # Let the metrics + range filter do the work
+        st.session_state["tog_ma50"]           = True   # Only stocks in pullback — below 50MA
+        st.session_state["tog_range"]          = True   # Must be in a tight range
+        st.session_state["slider_range_days"]  = 20     # 20-day consolidation window
+        st.session_state["slider_range_pct"]   = 8.0    # Max 8% range width — tight coil
+        st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
+
+        # ── Turn off all metrics first ────────────────────────────
+        for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 1.0
-        st.session_state["tog_MFI"] = True
-        st.session_state["wt_MFI"]  = 5.0
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # ── Turn on breakout-specific metrics with tuned weights ──
+        # RangePosScore ×4 — CORE signal: price near range low = maximum coiled energy
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 4.0
+
+        # OBV ×3 — institutions quietly accumulating while price is flat
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 3.0
+
+        # MFI ×3 — money flowing in even at the low = buyers stepping up at support
+        st.session_state["tog_MFI"]  = True
+        st.session_state["wt_MFI"]   = 3.0
+
+        # PCV ×2 — up-day volume dominant = stealth buying accumulation
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 2.0
+
+        # ROIC ×1 — basic quality filter: only fundamentally sound businesses
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 1.0
+
         st.rerun()
 
     st.divider()
@@ -299,6 +331,22 @@ with st.sidebar:
     # ── Volume / buying pressure metrics ────────────────────────
     st.markdown("**Volume & Buying Pressure**")
     for key in ["OBV", "MFI", "PCV"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Range position metric ─────────────────────────────────
+    st.markdown("**Range & Breakout Setup**")
+    for key in ["RangePosScore"]:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -787,6 +835,8 @@ with tab_screener:
     df["RangeLow"]      = pd.to_numeric(df["RangeLow"],  errors="coerce").round(2)
     df["RangePct"]      = pd.to_numeric(df["RangePct"],  errors="coerce").round(2)
     df["RangePos"]      = pd.to_numeric(df["RangePos"],  errors="coerce").round(4)
+    # RangePosScore = 1 - RangePos: price at range LOW = 1.0 (best), at HIGH = 0.0
+    df["RangePosScore"] = (1 - df["RangePos"].fillna(0.5)).round(4)
 
     # Dynamic score — use sidebar weight sliders, skip disabled metrics
     score = pd.Series(0.0, index=df.index)
