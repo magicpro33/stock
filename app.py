@@ -238,6 +238,52 @@ with st.sidebar:
 
         st.rerun()
 
+    # ── Insider Buying preset button ─────────────────────────────
+    if st.button("🕵️ Insider Buying", use_container_width=True,
+                 help="Searches for stocks showing signs of institutional/insider accumulation: "
+                      "rising OBV while price is flat, strong money flow, dominant up-day volume, "
+                      "and fundamentally strong companies insiders would want to own."):
+        # ── Filter settings ──────────────────────────────────────
+        st.session_state["slider_max_price"]   = 200    # Wider price range — insiders buy mid-cap too
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = True   # Accumulation happens during pullbacks
+        st.session_state["tog_range"]          = True   # Insiders accumulate in a quiet range
+        st.session_state["slider_range_days"]  = 30     # Longer window — accumulation takes weeks/months
+        st.session_state["slider_range_pct"]   = 15.0   # Slightly wider — insider ranges aren't always super tight
+        st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
+
+        # ── Turn off all metrics first ────────────────────────────
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # ── Insider accumulation metric weights ───────────────────
+        # OBV ×4 — CORE: insiders can't hide volume. Rising OBV with flat price = pure accumulation
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 4.0
+
+        # MFI ×3 — money flowing in confirms dollars behind the moves, not just share count
+        st.session_state["tog_MFI"]  = True
+        st.session_state["wt_MFI"]   = 3.0
+
+        # PCV ×3 — heavy up-day volume = insiders buying aggressively on certain days
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 3.0
+
+        # RangePosScore ×2 — insiders buy near the low, not after it's already moved
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 2.0
+
+        # ROIC ×2 — insiders buy companies they know are earning well on capital
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 2.0
+
+        # EarningsGrowth ×1 — insiders know earnings direction ahead of the market
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+
+        st.rerun()
+
     st.divider()
 
     exchange = st.selectbox(
