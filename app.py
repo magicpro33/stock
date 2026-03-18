@@ -241,15 +241,15 @@ with st.sidebar:
     # ── Insider Buying preset button ─────────────────────────────
     if st.button("🕵️ Insider Buying", use_container_width=True,
                  help="Searches for stocks showing signs of institutional/insider accumulation: "
-                      "rising OBV while price is flat, strong money flow, dominant up-day volume, "
-                      "and fundamentally strong companies insiders would want to own."):
+                      "rising OBV while price is flat, strong money flow, dominant up-day volume. "
+                      "Uses a 60-day range window — the sweet spot for catching slow institutional accumulation."): 
         # ── Filter settings ──────────────────────────────────────
         st.session_state["slider_max_price"]   = 200    # Wider price range — insiders buy mid-cap too
         st.session_state["slider_min_score"]   = 0.0
         st.session_state["tog_ma50"]           = True   # Accumulation happens during pullbacks
         st.session_state["tog_range"]          = True   # Insiders accumulate in a quiet range
-        st.session_state["slider_range_days"]  = 30     # Longer window — accumulation takes weeks/months
-        st.session_state["slider_range_pct"]   = 15.0   # Slightly wider — insider ranges aren't always super tight
+        st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
+        st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
         st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
 
         # ── Turn off all metrics first ────────────────────────────
@@ -1165,8 +1165,39 @@ with tab_analyze:
 
                 # Only abort if we have absolutely nothing — no info AND no screener row
                 if not _info and not _cached_row:
-                    st.error(f"Could not find data for **{ticker_input}**. "
-                             f"Check the ticker symbol and try again.")
+                    # ── Smart typo suggestions ──────────────────
+                    _suggestions = {
+                        "APPL":  "AAPL (Apple)",
+                        "GOOGL": "GOOGL ✓ — if this failed, try GOOG",
+                        "GOOG":  "GOOG ✓ — if this failed, try GOOGL",
+                        "AMZN":  "AMZN ✓ — double-check spelling",
+                        "TSLA":  "TSLA ✓ — double-check spelling",
+                        "MSFT":  "MSFT ✓ — double-check spelling",
+                        "META":  "META (formerly FB)",
+                        "FB":    "META (Facebook rebranded to META in 2021)",
+                        "TWTR":  "TWTR was delisted — Twitter is now private (X)",
+                        "TWITCH":"TWITCH is not public — owned by Amazon (AMZN)",
+                        "BRK":   "BRK.A or BRK.B (Berkshire Hathaway)",
+                        "BRKA":  "BRK-A",
+                        "BRKB":  "BRK-B",
+                        "NVIDA": "NVDA (Nvidia)",
+                        "NVIDA": "NVDA (Nvidia)",
+                        "NFLX":  "NFLX ✓ — double-check spelling",
+                        "BABA":  "BABA ✓ — if this fails try 9988.HK (Hong Kong listing)",
+                    }
+                    _hint = _suggestions.get(ticker_input.upper())
+                    _msg  = f"**`{ticker_input}`** was not found. "
+                    if _hint:
+                        _msg += f"\n\n💡 Did you mean **{_hint}**?"
+                    else:
+                        _msg += (
+                            f"\n\n**Common causes:**\n"
+                            f"- Typo in the ticker (e.g. APPL instead of AAPL)\n"
+                            f"- The stock was delisted or went private\n"
+                            f"- International stocks may need a suffix (e.g. `TSM` for TSMC, `ASML` for ASML)\n"
+                            f"- yfinance may be rate-limited — wait 30 seconds and try again"
+                        )
+                    st.error(_msg)
                     st.stop()
 
                 # ── price history ─────────────────────────────────
