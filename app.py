@@ -90,8 +90,9 @@ METRICS = {
         "label":   "MFI (Money Flow Index)",
         "weight":  1,
         "desc":    "Money Flow Index is a volume-weighted RSI (0–100). It measures whether "
-                   "money is flowing into or out of a stock. Above 50 = net buying pressure; "
-                   "above 60 = strong buying. Score scales from 0 (MFI=50) to 1.0 (MFI=100).",
+                   "money is flowing into or out of a stock. Score = MFI ÷ 100, so it ranges "
+                   "0.0–1.0 across the full scale. Below 0.3 = oversold/outflow. "
+                   "0.5 = neutral. Above 0.6 = buying pressure. Above 0.8 = strong inflow.",
     },
     "PCV": {
         "label":   "PCV (Price-Confirmed Volume)",
@@ -475,7 +476,7 @@ def get_volume_signals(stock, mfi_period):
                 mfi_val = float(candidate)
                 break
 
-        mfi_score = max(0.0, (mfi_val - 50) / 50) if mfi_val is not None else 0.0
+        mfi_score = round(mfi_val / 100.0, 4) if mfi_val is not None else 0.0
 
         # ── PCV ──────────────────────────────────────────────────
         pcv_window = min(20, len(close))
@@ -864,6 +865,16 @@ with tab_screener:
     df["ROIC_Trend"]    = df["ROIC_Trend"].round(2)
     df["OBV"]           = df["OBV"].round(2)
     df["MFI"]           = df["MFI"].round(2)
+    # MFI signal label based on raw score (0–1 = MFI 0–100)
+    def _mfi_signal(v):
+        if pd.isna(v):   return "—"
+        mfi = v * 100    # convert back to 0–100 scale for labelling
+        if mfi >= 80:    return "🔥 Overbought"
+        if mfi >= 60:    return "📈 Buying"
+        if mfi >= 40:    return "➡️ Neutral"
+        if mfi >= 20:    return "📉 Selling"
+        return "🧊 Oversold"
+    df["MFI_Signal"] = df["MFI"].apply(_mfi_signal)
     df["PCV"]           = df["PCV"].round(2)
     df["MA50"]          = pd.to_numeric(df["MA50"], errors="coerce").round(2)
     df["RangeHigh"]     = pd.to_numeric(df["RangeHigh"], errors="coerce").round(2)
@@ -946,15 +957,18 @@ with tab_screener:
         # Exclude: dollar columns, percentage columns, and range cols already formatted as strings
         skip_cols = {"Ticker", "Sector", "MarketCap", "OwnerEarnings",
                      "RevenueGrowth", "EarningsGrowth", "RangePct", "RangePos",
-                     "OE_Yield", "ROIC", "ROIC_Trend"}
+                     "MFI_Signal", "OE_Yield", "ROIC", "ROIC_Trend"}
         for col in display.columns:
             if col not in skip_cols:
                 if pd.api.types.is_numeric_dtype(display[col]):
                     display[col] = display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
 
         # Hide columns for metrics that are toggled off
+        # Keep MFI_Signal visible whenever MFI column is visible
         all_metric_keys = list(METRICS.keys())
         hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
+        if "MFI" in hidden_cols and "MFI_Signal" in display.columns:
+            hidden_cols.append("MFI_Signal")
         display = display.drop(columns=hidden_cols, errors="ignore")
 
         styled = display.style.applymap(color_score, subset=["Score"])
@@ -1269,7 +1283,7 @@ with tab_analyze:
                     "EarningsGrowth": (0.10, 0.05, True),
                     "Piotroski":      (7,    4,    True),
                     "OBV":            (0.8,  0.4,  True),
-                    "MFI":            (0.5,  0.2,  True),
+                    "MFI":            (0.6,  0.4,  True),
                     "PCV":            (0.5,  0.2,  True),
                 }
 
@@ -1319,16 +1333,52 @@ with tab_analyze:
 
                 # ── Metric cards ─────────────────────────────────
                 st.markdown("### Metric Results")
+
+                # Compute MFI signal for use in card and banner
+                _mfi_raw = raw.get("MFI")
+                def _mfi_label(v):
+                    if v is None or (isinstance(v, float) and np.isnan(v)): return None, None
+                    mfi = v * 100
+                    if mfi >= 80: return "🔥 Overbought",  "#ef5350"
+                    if mfi >= 60: return "📈 Buying",       "#26a69a"
+                    if mfi >= 40: return "➡️ Neutral",      "#888888"
+                    if mfi >= 20: return "📉 Selling",      "#f59e0b"
+                    return         "🧊 Oversold",           "#60a5fa"
+
+                _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
+
+                # Show MFI signal banner if MFI is selected
+                if "MFI" in selected and _mfi_lbl:
+                    _mfi_pct = f"{_mfi_raw*100:.1f}" if _mfi_raw is not None else "N/A"
+                    st.markdown(
+                        f"<div style='background:{_mfi_col}22;border:1px solid {_mfi_col};"
+                        f"border-radius:8px;padding:10px 16px;margin-bottom:12px;"
+                        f"display:flex;justify-content:space-between;align-items:center;'>"
+                        f"<span style='font-weight:600;font-size:1.05em;'>{_mfi_lbl}</span>"
+                        f"<span style='color:#ccc;font-size:0.9em;'>MFI = {_mfi_pct} &nbsp;·&nbsp; "
+                        f"Oversold ≤20 · Selling 20–40 · Neutral 40–60 · Buying 60–80 · Overbought ≥80</span>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+
                 cols = st.columns(3)
                 for i, key in enumerate(selected):
                     cfg = METRICS[key]; val = raw.get(key)
+                    # Build extra badge line for MFI card
+                    extra = ""
+                    if key == "MFI" and _mfi_lbl:
+                        extra = (f"<div style='margin-top:6px;padding:3px 8px;border-radius:4px;"
+                                 f"background:{_mfi_col}33;color:{_mfi_col};"
+                                 f"font-size:0.85em;font-weight:600;display:inline-block;'>"
+                                 f"{_mfi_lbl}</div>")
                     with cols[i % 3]:
                         st.markdown(
                             f"""<div style="border:1px solid #444;border-radius:8px;
                                            padding:14px;margin-bottom:12px;">
                               <div style="font-size:1.1em;font-weight:600;">{_sig(key,val)} {cfg['label']}</div>
                               <div style="font-size:1.8em;font-weight:700;margin:6px 0;">{_fv(key,val)}</div>
-                              <div style="font-size:0.78em;color:#aaa;">{cfg['desc'][:120]}...</div>
+                              {extra}
+                              <div style="font-size:0.78em;color:#aaa;margin-top:6px;">{cfg['desc'][:120]}...</div>
                             </div>""", unsafe_allow_html=True)
 
                 # ── MA50 ─────────────────────────────────────────
