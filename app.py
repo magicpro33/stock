@@ -422,34 +422,69 @@ def get_volume_signals(stock, mfi_period):
     """
     default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
     try:
-        hist = stock.history(period="6mo")
+        # Fetch 1y instead of 6mo — gives more data for thin/illiquid stocks
+        # and ensures enough bars for MFI even after rolling NaN warm-up
+        hist = stock.history(period="1y")
+
+        # Fall back to shorter period if 1y unavailable (recent IPOs etc.)
         if hist.empty or len(hist) < mfi_period + 5:
+            hist = stock.history(period="3mo")
+        if hist.empty or len(hist) < mfi_period + 5:
+            hist = stock.history(period="1mo")
+        if hist.empty or len(hist) < 10:
             return default
+
         close, high, low, vol = hist["Close"], hist["High"], hist["Low"], hist["Volume"]
+
+        # Drop any rows where volume is 0 (halted/illiquid bars corrupt MFI)
+        mask = vol > 0
+        close, high, low, vol = close[mask], high[mask], low[mask], vol[mask]
+        if len(close) < 10:
+            return default
 
         # ── OBV ──────────────────────────────────────────────────
         direction = np.sign(close.diff().fillna(0))
         obv       = (direction * vol).cumsum()
-        obv_slope = np.polyfit(range(20), obv.iloc[-20:].values, 1)[0]
+        obv_window = min(20, len(obv))
+        obv_slope = np.polyfit(range(obv_window), obv.iloc[-obv_window:].values, 1)[0]
         obv_score = 1.0 if obv_slope > 0 else 0.0
 
         # ── MFI ──────────────────────────────────────────────────
+        # Use the smaller of mfi_period or half the available bars to handle short histories
+        effective_period = min(mfi_period, max(5, len(close) // 2))
         typical_price = (high + low + close) / 3
         raw_mf  = typical_price * vol
         tp_diff = typical_price.diff()
-        pos_mf  = raw_mf.where(tp_diff > 0, 0).rolling(mfi_period).sum()
-        neg_mf  = raw_mf.where(tp_diff < 0, 0).rolling(mfi_period).sum()
-        mfr     = pos_mf / neg_mf.replace(0, np.nan)
-        mfi_val = (100 - (100 / (1 + mfr))).iloc[-1]
-        mfi_score = max(0.0, (mfi_val - 50) / 50) if pd.notnull(mfi_val) else 0.0
+
+        pos_mf  = raw_mf.where(tp_diff > 0, 0).rolling(effective_period).sum()
+        neg_mf  = raw_mf.where(tp_diff < 0, 0).rolling(effective_period).sum()
+
+        # Replace 0 neg_mf with NaN to avoid divide-by-zero
+        # When neg_mf is 0, all money flow is positive → MFI = 100 → score = 1.0
+        all_positive = neg_mf == 0
+        mfr = pos_mf / neg_mf.replace(0, np.nan)
+        mfi_series = 100 - (100 / (1 + mfr))
+        # Where neg_mf was 0 and pos_mf > 0, MFI should be 100
+        mfi_series = mfi_series.where(~(all_positive & (pos_mf > 0)), 100.0)
+
+        # Take last valid value — walk back up to 5 bars if last is NaN
+        mfi_val = None
+        for _i in range(1, 6):
+            candidate = mfi_series.iloc[-_i]
+            if pd.notnull(candidate):
+                mfi_val = float(candidate)
+                break
+
+        mfi_score = max(0.0, (mfi_val - 50) / 50) if mfi_val is not None else 0.0
 
         # ── PCV ──────────────────────────────────────────────────
-        recent    = hist.iloc[-20:].copy()
-        recent["up_day"] = recent["Close"] > recent["Close"].shift(1)
-        up_vol    = recent.loc[recent["up_day"], "Volume"].sum()
-        total_vol = recent["Volume"].sum()
-        pcv_ratio = up_vol / total_vol if total_vol > 0 else 0.5
-        pcv_score = max(0.0, (pcv_ratio - 0.5) / 0.5)
+        pcv_window = min(20, len(close))
+        recent     = pd.DataFrame({"Close": close, "Volume": vol}).iloc[-pcv_window:]
+        recent_up  = recent["Close"] > recent["Close"].shift(1)
+        up_vol     = recent.loc[recent_up, "Volume"].sum()
+        total_vol  = recent["Volume"].sum()
+        pcv_ratio  = up_vol / total_vol if total_vol > 0 else 0.5
+        pcv_score  = max(0.0, (pcv_ratio - 0.5) / 0.5)
 
         return {
             "OBV": round(obv_score, 4),
