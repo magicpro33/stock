@@ -172,13 +172,14 @@ def _clear_all_cache():
 # SESSION STATE DEFAULTS — set once on first load
 # ───────────────────────────────────────────────────────────────
 _defaults = {
-    "slider_max_price":  250,
-    "slider_min_score":  2.0,
-    "tog_ma50":          True,
-    "tog_range":         False,
-    "slider_range_days": 30,
-    "slider_range_pct":  10.0,
-    "slider_mfi_period": 14,
+    "slider_max_price":   250,
+    "slider_min_score":   2.0,
+    "tog_ma50":           True,
+    "tog_range":          False,
+    "slider_range_days":  30,
+    "slider_range_pct":   10.0,
+    "slider_mfi_period":  14,
+    "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
 }
 # Metric toggle/weight defaults
 for _k, _cfg in METRICS.items():
@@ -1094,7 +1095,42 @@ with tab_analyze:
 
         analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
 
+        # ── Search History ────────────────────────────────────────
+        _history = st.session_state.get("analyze_history", [])
+        if _history:
+            st.divider()
+            st.markdown("**🕐 Recent Searches**")
+            _active = st.session_state.get("analyze_data", {}).get("ticker", "")
+            for _h in _history:
+                _is_active = _h["ticker"] == _active
+                _label = f"**{_h['ticker']}** · {_h['name']}" if _is_active else f"{_h['ticker']} · {_h['name']}"
+                _border = "2px solid #4CAF50" if _is_active else "1px solid #444"
+                _bg     = "rgba(76,175,80,0.08)" if _is_active else "transparent"
+                _col_a, _col_b = st.columns([5, 1])
+                with _col_a:
+                    st.markdown(
+                        f"<div style='border:{_border};border-radius:6px;padding:6px 10px;"
+                        f"background:{_bg};margin-bottom:4px;font-size:0.88em;line-height:1.3;'>"
+                        f"<span style='font-weight:600;font-size:1.0em;'>{_h['ticker']}</span><br>"
+                        f"<span style='color:#aaa;font-size:0.85em;'>{_h['name'][:38]}{'…' if len(_h['name'])>38 else ''}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                with _col_b:
+                    if st.button("↗", key=f"hist_btn_{_h['ticker']}", help=f"Re-analyze {_h['ticker']}"):
+                        st.session_state["analyze_ticker_input"] = _h["ticker"]
+                        st.session_state["_rerun_ticker"] = _h["ticker"]
+                        st.rerun()
+            if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
+                st.session_state["analyze_history"] = []
+                st.rerun()
+
     # ── On Analyze click: fetch only what is missing from cache ──
+    _rerun_ticker = st.session_state.pop("_rerun_ticker", None)
+    if _rerun_ticker:
+        ticker_input  = _rerun_ticker
+        analyze_btn   = True
+
     if analyze_btn and ticker_input:
         _screener_cache  = st.session_state.get("screener_cache", {})
         _cached_results  = _screener_cache.get("results", [])
@@ -1302,6 +1338,14 @@ with tab_analyze:
             "metrics_sel": dict(analyze_metrics),
             "from_cache":  bool(_cached_row),
         }
+
+        # ── Update search history ─────────────────────────────────
+        _company_name = _info.get("longName") or _info.get("shortName") or ticker_input
+        _hist_entry   = {"ticker": ticker_input, "name": _company_name}
+        _history      = st.session_state.get("analyze_history", [])
+        _history      = [h for h in _history if h["ticker"] != ticker_input]
+        _history.insert(0, _hist_entry)
+        st.session_state["analyze_history"] = _history[:30]
 
     elif analyze_btn and not ticker_input:
         st.warning("Please enter a ticker symbol.")
