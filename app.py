@@ -1078,10 +1078,16 @@ with tab_analyze:
     a_col1, a_col2 = st.columns([1, 2])
 
     with a_col1:
+        # Pre-fill input when a history item is clicked.
+        # _pending_ticker is set BEFORE this widget renders (on the prior rerun),
+        # so writing to the widget key here is safe and avoids StreamlitAPIException.
+        _pending = st.session_state.pop("_pending_ticker", None)
+        if _pending:
+            st.session_state["analyze_ticker_input"] = _pending
+
         ticker_input = st.text_input(
             "Stock Ticker",
             placeholder="e.g. AAPL, MSFT, TSLA",
-            value=st.session_state.get("_rerun_ticker", ""),
             key="analyze_ticker_input",
             help="Enter the ticker symbol exactly as it appears on the exchange."
         ).strip().upper()
@@ -1119,7 +1125,8 @@ with tab_analyze:
                     )
                 with _col_b:
                     if st.button("↗", key=f"hist_btn_{_h['ticker']}", help=f"Re-analyze {_h['ticker']}"):
-                        st.session_state["_rerun_ticker"] = _h["ticker"]
+                        st.session_state["_pending_ticker"] = _h["ticker"]
+                        st.session_state["_rerun_ticker"]   = _h["ticker"]
                         st.rerun()
             if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
                 st.session_state["analyze_history"] = []
@@ -1217,7 +1224,7 @@ with tab_analyze:
                         "BRKA":  "BRK-A",
                         "BRKB":  "BRK-B",
                         "NVIDA": "NVDA (Nvidia)",
-                        "NVIDA": "NVDA (Nvidia)",
+                        "NVDIA": "NVDA (Nvidia)",
                         "NFLX":  "NFLX ✓ — double-check spelling",
                         "BABA":  "BABA ✓ — if this fails try 9988.HK (Hong Kong listing)",
                     }
