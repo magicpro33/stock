@@ -1081,6 +1081,7 @@ with tab_analyze:
         ticker_input = st.text_input(
             "Stock Ticker",
             placeholder="e.g. AAPL, MSFT, TSLA",
+            value=st.session_state.get("_rerun_ticker", ""),
             key="analyze_ticker_input",
             help="Enter the ticker symbol exactly as it appears on the exchange."
         ).strip().upper()
@@ -1118,7 +1119,6 @@ with tab_analyze:
                     )
                 with _col_b:
                     if st.button("↗", key=f"hist_btn_{_h['ticker']}", help=f"Re-analyze {_h['ticker']}"):
-                        st.session_state["analyze_ticker_input"] = _h["ticker"]
                         st.session_state["_rerun_ticker"] = _h["ticker"]
                         st.rerun()
             if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
