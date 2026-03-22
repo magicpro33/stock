@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl.utils import get_column_letter
 import yfinance as yf
 
@@ -603,9 +603,9 @@ def calculate_price_range(hist_df, range_days: int) -> dict:
         return default
 
 
-def calculate_piotroski(stock):
+def calculate_piotroski(fin, bal, cf):
+    """Accepts pre-fetched financials/balance/cashflow DataFrames — no extra API calls."""
     try:
-        fin, bal, cf = stock.financials, stock.balance_sheet, stock.cashflow
         score = 0
         roa = fin.loc["Net Income"] / bal.loc["Total Assets"]
         if roa.iloc[0] > 0: score += 1
@@ -620,9 +620,9 @@ def calculate_piotroski(stock):
         return None
 
 
-def get_owner_earnings(stock, info):
+def get_owner_earnings(cf, fin, info):
+    """Accepts pre-fetched cashflow/financials DataFrames — no extra API calls."""
     try:
-        cf, fin = stock.cashflow, stock.financials
         oe = fin.loc["Net Income"].iloc[0] + cf.loc["Depreciation"].iloc[0] - abs(cf.loc["Capital Expenditure"].iloc[0])
         mc = info.get("marketCap")
         return oe, (oe / mc if mc else None)
@@ -642,9 +642,9 @@ def _get_bal_value(bal, *labels):
             return bal.loc[label]
     return None
 
-def calculate_roic(stock):
+def calculate_roic(fin, bal):
+    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
     try:
-        fin, bal = stock.financials, stock.balance_sheet
         ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
         if ebit_s is None: return None
         ebit = ebit_s.iloc[0]
@@ -662,9 +662,9 @@ def calculate_roic(stock):
         return None
 
 
-def calculate_roic_trend(stock):
+def calculate_roic_trend(fin, bal):
+    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
     try:
-        fin, bal = stock.financials, stock.balance_sheet
         ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
         if ebit_s is None or len(ebit_s) < 2: return None
         assets_s = _get_bal_value(bal, "Total Assets", "TotalAssets")
@@ -684,56 +684,69 @@ def calculate_roic_trend(stock):
 
 def process_ticker(args):
     """
-    Fetch all data for one ticker in a single pass and return both the
-    computed row AND the raw OHLCV history so the cache can serve any
-    combination of mfi_period / range_days without re-downloading.
+    Fetch all data for one ticker in a single optimised pass.
 
-    Strategy
-    --------
-    • Fetch 2 years of daily OHLCV once — covers the maximum range_days
-      (180 days) with plenty of warm-up bars for MA50/MFI/OBV.
-    • Compute MFI, OBV, PCV, range, and MA50 from that single DataFrame.
-    • Store the raw history in the result so the screener can recompute
-      these indicators client-side when the user tweaks sidebar settings.
+    Optimisations vs naive approach
+    --------------------------------
+    • stock.info        — 1 call  (price, sector, fundamentals, revenue/earnings growth)
+    • stock.history(2y) — 1 call  (OHLCV for ALL technical indicators)
+    • stock.financials  — 1 call  (fetched once, passed to all 4 compute functions)
+    • stock.balance_sheet — 1 call (shared across roic, roic_trend, piotroski)
+    • stock.cashflow    — 1 call  (shared across owner_earnings, piotroski)
+    Total: 5 HTTP requests per ticker  (down from up to 12 in naive version)
+
+    Raw OHLCV stored in _hist so MFI/range can be recomputed from cache with
+    any sidebar setting change — zero re-downloads needed.
     """
     t, mfi_period, range_days = args
     for attempt in range(3):
         try:
-            time.sleep(attempt * 1.5)
-            stock = yf.Ticker(t)
-            info  = stock.info
+            if attempt > 0:
+                time.sleep(attempt * 1.5)   # 1.5s, 3s — skip sleep on first attempt
 
+            stock = yf.Ticker(t)
+
+            # ── 1. Info — price, sector, fundamentals ─────────────
+            info = stock.info
             if not info or len(info) < 5:
                 return None
             if is_etf_or_fund(info):
                 return None
-
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             if price is None:
                 return None
 
-            # ── Fetch OHLCV once — 2 years covers all indicator windows ──
+            # ── 2. OHLCV history — single fetch, all indicators ───
             hist = stock.history(period="2y")
             if hist.empty:
                 hist = stock.history(period="1y")
             if hist.empty:
                 hist = stock.history(period="3mo")
 
-            # ── Compute all indicators from the single history DataFrame ──
-            vol_signals = get_volume_signals(hist, mfi_period)
-            range_data  = calculate_price_range(hist, range_days)
-
-            # MA50 — needs at least 50 bars; use all available history
+            # ── 3. Financial statements — fetched ONCE each ───────
             try:
-                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+                fin = stock.financials
             except Exception:
-                ma50 = None
+                fin = pd.DataFrame()
+            try:
+                bal = stock.balance_sheet
+            except Exception:
+                bal = pd.DataFrame()
+            try:
+                cf = stock.cashflow
+            except Exception:
+                cf = pd.DataFrame()
 
-            owner_earnings, oe_yield = get_owner_earnings(stock, info)
+            # ── 4. Compute all indicators — no additional API calls
+            vol_signals    = get_volume_signals(hist, mfi_period)
+            range_data     = calculate_price_range(hist, range_days)
+            ma50           = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+            owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+            roic           = calculate_roic(fin, bal)
+            roic_trend     = calculate_roic_trend(fin, bal)
+            piotroski      = calculate_piotroski(fin, bal, cf)
 
-            # Serialise history to a compact dict for caching
-            # (DataFrames survive session_state fine, but we store column arrays
-            #  to keep memory tight and avoid index serialisation issues)
+            # ── 5. Compact OHLCV cache ────────────────────────────
             hist_cache = {
                 "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
                 "open":   hist["Open"].tolist(),
@@ -744,7 +757,6 @@ def process_ticker(args):
             }
 
             return {
-                # ── Identifiers & fundamentals (never change with settings) ──
                 "Ticker":         t,
                 "Sector":         info.get("sector", "Unknown"),
                 "Price":          price,
@@ -752,12 +764,11 @@ def process_ticker(args):
                 "P/E":            info.get("trailingPE"),
                 "OwnerEarnings":  owner_earnings,
                 "OE_Yield":       oe_yield,
-                "ROIC":           calculate_roic(stock),
-                "ROIC_Trend":     calculate_roic_trend(stock),
+                "ROIC":           roic,
+                "ROIC_Trend":     roic_trend,
                 "RevenueGrowth":  info.get("revenueGrowth"),
                 "EarningsGrowth": info.get("earningsGrowth"),
-                "Piotroski":      calculate_piotroski(stock),
-                # ── Indicator values computed with current sidebar settings ──
+                "Piotroski":      piotroski,
                 "MA50":           ma50,
                 "OBV":            vol_signals["OBV"],
                 "MFI":            vol_signals["MFI"],
@@ -766,7 +777,6 @@ def process_ticker(args):
                 "RangeLow":       range_data["RangeLow"],
                 "RangePct":       range_data["RangePct"],
                 "RangePos":       range_data["RangePos"],
-                # ── Raw history — allows recomputing indicators client-side ──
                 "_hist":          hist_cache,
             }
         except Exception:
@@ -957,21 +967,34 @@ with tab_screener:
             f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: ~5 min"
         )
 
-        # Progress bar + threaded scan
+        # ── Threaded scan with as_completed for maximum throughput ──
+        # as_completed() processes futures as they FINISH (not submission order),
+        # so fast tickers don't get blocked behind slow ones.
+        # Progress bar throttled to every 2% to avoid st.progress() overhead.
         progress_bar = st.progress(0, text="Starting scan...")
-        results = []
-        total = len(tickers)
+        results  = []
+        total    = len(tickers)
+        done     = 0
+        last_pct = 0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t for t in tickers}
-            done = 0
-            for future in futures:
+            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t
+                       for t in tickers}
+            for future in as_completed(futures):
                 result = future.result()
                 if result:
                     results.append(result)
                 done += 1
                 pct = done / total
-                progress_bar.progress(pct, text=f"Scanning... {done}/{total} ({int(pct*100)}%)")
+                # Only redraw progress bar when it moves by ≥2% — reduces
+                # Streamlit overhead from ~500 redraws to ~50 for S&P 500
+                if int(pct * 100) >= last_pct + 2 or done == total:
+                    last_pct = int(pct * 100)
+                    found = len(results)
+                    progress_bar.progress(
+                        pct,
+                        text=f"Scanning... {done}/{total} tickers  ·  {found} passed filters  ({last_pct}%)"
+                    )
 
         progress_bar.empty()
 
