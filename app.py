@@ -447,6 +447,8 @@ with st.sidebar:
         _exch_name    = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
         _scan_tickers = len(_sc.get("results", []))
         _fin_tickers  = len(_fca)
+        # Count how many rows have raw history stored
+        _with_hist    = sum(1 for r in _sc.get("results", []) if r.get("_hist"))
 
         st.markdown("**💾 Cache Status**")
         ci1, ci2 = st.columns(2)
@@ -455,6 +457,9 @@ with st.sidebar:
         ci3, ci4 = st.columns(2)
         ci3.metric("Cache Size",   _sz)
         ci4.metric("Exchange",     _exch_name if _scan_tickers else "—")
+        if _with_hist:
+            st.caption(f"✅ {_with_hist}/{_scan_tickers} tickers have raw history — "
+                       f"MFI period & range window recompute instantly with no re-download.")
 
         if _sc.get("scanned_at"):
             st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
@@ -471,25 +476,29 @@ with st.sidebar:
 
 # ───────────────────────────────────────────────────────────────
 
-def get_volume_signals(stock, mfi_period):
+def get_volume_signals(hist_df, mfi_period):
     """
-    Returns a dict with three separate volume/buying-pressure scores, each 0.0–1.0:
+    Compute OBV / MFI / PCV from a pre-fetched OHLCV DataFrame.
 
     OBV  — On-Balance Volume trend over last 20 days (1.0 = rising, 0.0 = falling)
     MFI  — Money Flow Index scaled above 50 neutral (0.0–1.0)
     PCV  — Price-Confirmed Volume fraction on up-days, scaled above 50% baseline (0.0–1.0)
+
+    Accepts either a stock object (legacy) or a DataFrame directly.
     """
     default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
     try:
-        # Fetch 1y instead of 6mo — gives more data for thin/illiquid stocks
-        # and ensures enough bars for MFI even after rolling NaN warm-up
-        hist = stock.history(period="1y")
+        # Accept either a raw DataFrame or a yfinance Ticker object (fallback)
+        if isinstance(hist_df, pd.DataFrame):
+            hist = hist_df.copy()
+        else:
+            # Legacy path — stock object passed directly
+            hist = hist_df.history(period="1y")
+            if hist.empty or len(hist) < mfi_period + 5:
+                hist = hist_df.history(period="3mo")
+            if hist.empty or len(hist) < mfi_period + 5:
+                hist = hist_df.history(period="1mo")
 
-        # Fall back to shorter period if 1y unavailable (recent IPOs etc.)
-        if hist.empty or len(hist) < mfi_period + 5:
-            hist = stock.history(period="3mo")
-        if hist.empty or len(hist) < mfi_period + 5:
-            hist = stock.history(period="1mo")
         if hist.empty or len(hist) < 10:
             return default
 
@@ -554,9 +563,10 @@ def get_volume_signals(stock, mfi_period):
         return default
 
 
-def calculate_price_range(stock, range_days: int) -> dict:
+def calculate_price_range(hist_df, range_days: int) -> dict:
     """
     Calculates the price range over the last `range_days` trading days.
+    Accepts either a pre-fetched OHLCV DataFrame or a yfinance Ticker (legacy).
 
     Returns:
         RangeHigh  — highest closing price in the period
@@ -568,7 +578,10 @@ def calculate_price_range(stock, range_days: int) -> dict:
     """
     default = {"RangeHigh": None, "RangeLow": None, "RangePct": None, "RangePos": None}
     try:
-        hist = stock.history(period="1y")
+        if isinstance(hist_df, pd.DataFrame):
+            hist = hist_df
+        else:
+            hist = hist_df.history(period="1y")
         if hist.empty or len(hist) < range_days:
             return default
         window   = hist["Close"].iloc[-range_days:]
@@ -670,44 +683,71 @@ def calculate_roic_trend(stock):
 
 
 def process_ticker(args):
+    """
+    Fetch all data for one ticker in a single pass and return both the
+    computed row AND the raw OHLCV history so the cache can serve any
+    combination of mfi_period / range_days without re-downloading.
+
+    Strategy
+    --------
+    • Fetch 2 years of daily OHLCV once — covers the maximum range_days
+      (180 days) with plenty of warm-up bars for MA50/MFI/OBV.
+    • Compute MFI, OBV, PCV, range, and MA50 from that single DataFrame.
+    • Store the raw history in the result so the screener can recompute
+      these indicators client-side when the user tweaks sidebar settings.
+    """
     t, mfi_period, range_days = args
-    # Retry up to 3 times with backoff — yfinance can return empty data
-    # on the first attempt when running in cloud environments
     for attempt in range(3):
         try:
-            time.sleep(attempt * 1.5)   # 0s, 1.5s, 3s between retries
+            time.sleep(attempt * 1.5)
             stock = yf.Ticker(t)
             info  = stock.info
 
-            # yfinance returns an empty/minimal dict for invalid tickers
             if not info or len(info) < 5:
                 return None
-
-            # Exclude ETFs, index funds, trusts, and other non-company securities
             if is_etf_or_fund(info):
                 return None
 
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             if price is None:
-                return None   # skip tickers with no price data
+                return None
+
+            # ── Fetch OHLCV once — 2 years covers all indicator windows ──
+            hist = stock.history(period="2y")
+            if hist.empty:
+                hist = stock.history(period="1y")
+            if hist.empty:
+                hist = stock.history(period="3mo")
+
+            # ── Compute all indicators from the single history DataFrame ──
+            vol_signals = get_volume_signals(hist, mfi_period)
+            range_data  = calculate_price_range(hist, range_days)
+
+            # MA50 — needs at least 50 bars; use all available history
+            try:
+                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+            except Exception:
+                ma50 = None
 
             owner_earnings, oe_yield = get_owner_earnings(stock, info)
-            vol_signals  = get_volume_signals(stock, mfi_period)
-            range_data   = calculate_price_range(stock, range_days)
-            try:
-                hist = stock.history(period="3mo")
-                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-            except:
-                ma50 = None
+
+            # Serialise history to a compact dict for caching
+            # (DataFrames survive session_state fine, but we store column arrays
+            #  to keep memory tight and avoid index serialisation issues)
+            hist_cache = {
+                "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
+                "open":   hist["Open"].tolist(),
+                "high":   hist["High"].tolist(),
+                "low":    hist["Low"].tolist(),
+                "close":  hist["Close"].tolist(),
+                "volume": hist["Volume"].tolist(),
+            }
+
             return {
+                # ── Identifiers & fundamentals (never change with settings) ──
                 "Ticker":         t,
                 "Sector":         info.get("sector", "Unknown"),
                 "Price":          price,
-                "MA50":           ma50,
-                "RangeHigh":      range_data["RangeHigh"],
-                "RangeLow":       range_data["RangeLow"],
-                "RangePct":       range_data["RangePct"],
-                "RangePos":       range_data["RangePos"],
                 "MarketCap":      info.get("marketCap"),
                 "P/E":            info.get("trailingPE"),
                 "OwnerEarnings":  owner_earnings,
@@ -717,15 +757,71 @@ def process_ticker(args):
                 "RevenueGrowth":  info.get("revenueGrowth"),
                 "EarningsGrowth": info.get("earningsGrowth"),
                 "Piotroski":      calculate_piotroski(stock),
+                # ── Indicator values computed with current sidebar settings ──
+                "MA50":           ma50,
                 "OBV":            vol_signals["OBV"],
                 "MFI":            vol_signals["MFI"],
                 "PCV":            vol_signals["PCV"],
+                "RangeHigh":      range_data["RangeHigh"],
+                "RangeLow":       range_data["RangeLow"],
+                "RangePct":       range_data["RangePct"],
+                "RangePos":       range_data["RangePos"],
+                # ── Raw history — allows recomputing indicators client-side ──
+                "_hist":          hist_cache,
             }
         except Exception:
             if attempt == 2:
-                return None   # all 3 attempts failed
+                return None
             continue
     return None
+
+
+def _hist_from_cache(row: dict) -> pd.DataFrame:
+    """Reconstruct a history DataFrame from the compact cache dict stored in a result row."""
+    hc = row.get("_hist")
+    if not hc:
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame({
+            "Open":   hc["open"],
+            "High":   hc["high"],
+            "Low":    hc["low"],
+            "Close":  hc["close"],
+            "Volume": hc["volume"],
+        }, index=pd.to_datetime(hc["dates"]))
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def recompute_indicators(results: list, mfi_period: int, range_days: int) -> list:
+    """
+    Re-derive MFI, OBV, PCV, MA50, and range metrics from cached raw history
+    using the current sidebar settings — zero network requests.
+    Returns a new list of result dicts with updated indicator values.
+    """
+    updated = []
+    for row in results:
+        hist = _hist_from_cache(row)
+        if hist.empty:
+            updated.append(row)
+            continue
+        new_row = dict(row)
+        vol  = get_volume_signals(hist, mfi_period)
+        rng  = calculate_price_range(hist, range_days)
+        ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+        new_row.update({
+            "MA50":      ma50,
+            "OBV":       vol["OBV"],
+            "MFI":       vol["MFI"],
+            "PCV":       vol["PCV"],
+            "RangeHigh": rng["RangeHigh"],
+            "RangeLow":  rng["RangeLow"],
+            "RangePct":  rng["RangePct"],
+            "RangePos":  rng["RangePos"],
+        })
+        updated.append(new_row)
+    return updated
 
 # ───────────────────────────────────────────────────────────────
 # TICKER LOADERS
@@ -821,20 +917,24 @@ with tab_screener:
     sector_label  = sector if sector != "All Sectors" else "All Sectors"
 
     # ── Check if we already have cached scan data for this exchange ──
+    # Cache is valid as long as the exchange matches — mfi_period and range_days
+    # are now recomputed client-side from stored raw history (zero re-downloads).
     cache         = st.session_state.get("screener_cache", {})
     cache_valid   = (
         cache.get("exchange_key") == exchange_key and
-        cache.get("mfi_period")   == mfi_period   and
-        cache.get("range_days")   == range_days    and
         bool(cache.get("results"))
     )
 
     if cache_valid:
-        results = cache["results"]
+        raw_results = cache["results"]
+        # Recompute indicators with current sidebar settings from stored OHLCV —
+        # this is pure CPU math, no network calls.
+        results = recompute_indicators(raw_results, mfi_period, range_days)
         st.success(
             f"⚡ Using cached data from last scan "
             f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
-            f"filters re-applied instantly. Est. time: **~0 sec**. Click **Clear Cache & Rescan** to fetch fresh data."
+            f"indicators recomputed instantly from stored history. "
+            f"Click **Clear Cache & Rescan** to fetch fresh data from the web."
         )
         if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
             st.session_state.pop("screener_cache", None)
@@ -886,13 +986,16 @@ with tab_screener:
             st.stop()
 
         # ── Store results in session_state cache ──────────────────
+        # Raw OHLCV history is embedded in each result row (_hist key).
+        # mfi_period and range_days are NOT stored — indicators are
+        # recomputed on-the-fly from _hist whenever settings change.
         st.session_state["screener_cache"] = {
             "exchange_key": exchange_key,
-            "mfi_period":   mfi_period,
-            "range_days":   range_days,
             "results":      results,
             "scanned_at":   datetime.now().strftime("%H:%M:%S"),
         }
+        # Recompute immediately with current sidebar values
+        results = recompute_indicators(results, mfi_period, range_days)
 
     # Build DataFrame
     df = pd.DataFrame(results)
