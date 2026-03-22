@@ -1155,7 +1155,7 @@ with tab_screener:
         hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
         if "MFI" in hidden_cols and "MFI_Signal" in display.columns:
             hidden_cols.append("MFI_Signal")
-        display = display.drop(columns=hidden_cols, errors="ignore")
+        display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
         styled = display.style.applymap(color_score, subset=["Score"])
 
