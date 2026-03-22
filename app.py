@@ -174,7 +174,7 @@ def _clear_all_cache():
 _defaults = {
     "slider_max_price":   250,
     "slider_min_score":   2.0,
-    "tog_ma50":           True,
+    "tog_ma50":           "below",  # "off" | "below" | "above"
     "tog_range":          False,
     "slider_range_days":  30,
     "slider_range_pct":   10.0,
@@ -205,7 +205,7 @@ with st.sidebar:
         # ── Filter settings ──────────────────────────────────────
         st.session_state["slider_max_price"]   = 150    # Focus on lower-priced stocks with more % upside
         st.session_state["slider_min_score"]   = 0.0    # Let the metrics + range filter do the work
-        st.session_state["tog_ma50"]           = True   # Only stocks in pullback — below 50MA
+        st.session_state["tog_ma50"]           = "below"  # Only stocks in pullback — below 50MA
         st.session_state["tog_range"]          = True   # Must be in a tight range
         st.session_state["slider_range_days"]  = 20     # 20-day consolidation window
         st.session_state["slider_range_pct"]   = 8.0    # Max 8% range width — tight coil
@@ -247,7 +247,7 @@ with st.sidebar:
         # ── Filter settings ──────────────────────────────────────
         st.session_state["slider_max_price"]   = 200    # Wider price range — insiders buy mid-cap too
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = True   # Accumulation happens during pullbacks
+        st.session_state["tog_ma50"]           = "below"  # Accumulation happens during pullbacks
         st.session_state["tog_range"]          = True   # Insiders accumulate in a quiet range
         st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
         st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
@@ -321,11 +321,22 @@ with st.sidebar:
         help="Maximum number of stocks to display."
     )
 
-    use_ma50_filter = st.toggle(
-        "Only stocks BELOW 50-day MA",
-        help="When on, only shows stocks in a pullback (price < MA50).",
+    st.markdown("**50-Day Moving Average Filter**")
+    ma50_mode = st.radio(
+        "50-Day MA Filter",
+        options=["off", "below", "above"],
+        format_func=lambda x: {
+            "off":   "⬜ No MA50 filter",
+            "below": "🟢 Below 50-day MA  (pullbacks)",
+            "above": "🔵 Above 50-day MA  (uptrends)",
+        }[x],
         key="tog_ma50",
+        label_visibility="collapsed",
+        help="Filter stocks by their position relative to the 50-day moving average. "
+             "'Below' finds stocks in pullbacks/consolidation. "
+             "'Above' finds stocks already in an uptrend.",
     )
+    use_ma50_filter = ma50_mode
 
     st.divider()
     st.header("📦 Price Range Filter")
@@ -948,8 +959,10 @@ with tab_screener:
         above_score = df["Score"] >= min_score
     else:
         above_score = pd.Series(True, index=df.index)
-    if use_ma50_filter:
+    if use_ma50_filter == "below":
         below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] <= df["MA50"])
+    elif use_ma50_filter == "above":
+        below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] >= df["MA50"])
     else:
         below_ma50 = pd.Series(True, index=df.index)
 
