@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from openpyxl.utils import get_column_letter
 import yfinance as yf
 
@@ -172,14 +172,13 @@ def _clear_all_cache():
 # SESSION STATE DEFAULTS — set once on first load
 # ───────────────────────────────────────────────────────────────
 _defaults = {
-    "slider_max_price":   250,
-    "slider_min_score":   2.0,
-    "tog_ma50":           "below",  # "off" | "below" | "above"
-    "tog_range":          False,
-    "slider_range_days":  30,
-    "slider_range_pct":   10.0,
-    "slider_mfi_period":  14,
-    "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
+    "slider_max_price":  250,
+    "slider_min_score":  2.0,
+    "tog_ma50":          True,
+    "tog_range":         False,
+    "slider_range_days": 30,
+    "slider_range_pct":  10.0,
+    "slider_mfi_period": 14,
 }
 # Metric toggle/weight defaults
 for _k, _cfg in METRICS.items():
@@ -205,7 +204,7 @@ with st.sidebar:
         # ── Filter settings ──────────────────────────────────────
         st.session_state["slider_max_price"]   = 150    # Focus on lower-priced stocks with more % upside
         st.session_state["slider_min_score"]   = 0.0    # Let the metrics + range filter do the work
-        st.session_state["tog_ma50"]           = "below"  # Only stocks in pullback — below 50MA
+        st.session_state["tog_ma50"]           = True   # Only stocks in pullback — below 50MA
         st.session_state["tog_range"]          = True   # Must be in a tight range
         st.session_state["slider_range_days"]  = 20     # 20-day consolidation window
         st.session_state["slider_range_pct"]   = 8.0    # Max 8% range width — tight coil
@@ -247,7 +246,7 @@ with st.sidebar:
         # ── Filter settings ──────────────────────────────────────
         st.session_state["slider_max_price"]   = 200    # Wider price range — insiders buy mid-cap too
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"  # Insiders buying into strength — above 50MA
+        st.session_state["tog_ma50"]           = True   # Accumulation happens during pullbacks
         st.session_state["tog_range"]          = True   # Insiders accumulate in a quiet range
         st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
         st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
@@ -321,22 +320,11 @@ with st.sidebar:
         help="Maximum number of stocks to display."
     )
 
-    st.markdown("**50-Day Moving Average Filter**")
-    ma50_mode = st.radio(
-        "50-Day MA Filter",
-        options=["off", "below", "above"],
-        format_func=lambda x: {
-            "off":   "⬜ No MA50 filter",
-            "below": "🟢 Below 50-day MA  (pullbacks)",
-            "above": "🔵 Above 50-day MA  (uptrends)",
-        }[x],
+    use_ma50_filter = st.toggle(
+        "Only stocks BELOW 50-day MA",
+        help="When on, only shows stocks in a pullback (price < MA50).",
         key="tog_ma50",
-        label_visibility="collapsed",
-        help="Filter stocks by their position relative to the 50-day moving average. "
-             "'Below' finds stocks in pullbacks/consolidation. "
-             "'Above' finds stocks already in an uptrend.",
     )
-    use_ma50_filter = ma50_mode
 
     st.divider()
     st.header("📦 Price Range Filter")
@@ -447,8 +435,6 @@ with st.sidebar:
         _exch_name    = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
         _scan_tickers = len(_sc.get("results", []))
         _fin_tickers  = len(_fca)
-        # Count how many rows have raw history stored
-        _with_hist    = sum(1 for r in _sc.get("results", []) if r.get("_hist"))
 
         st.markdown("**💾 Cache Status**")
         ci1, ci2 = st.columns(2)
@@ -457,9 +443,6 @@ with st.sidebar:
         ci3, ci4 = st.columns(2)
         ci3.metric("Cache Size",   _sz)
         ci4.metric("Exchange",     _exch_name if _scan_tickers else "—")
-        if _with_hist:
-            st.caption(f"✅ {_with_hist}/{_scan_tickers} tickers have raw history — "
-                       f"MFI period & range window recompute instantly with no re-download.")
 
         if _sc.get("scanned_at"):
             st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
@@ -476,29 +459,25 @@ with st.sidebar:
 
 # ───────────────────────────────────────────────────────────────
 
-def get_volume_signals(hist_df, mfi_period):
+def get_volume_signals(stock, mfi_period):
     """
-    Compute OBV / MFI / PCV from a pre-fetched OHLCV DataFrame.
+    Returns a dict with three separate volume/buying-pressure scores, each 0.0–1.0:
 
     OBV  — On-Balance Volume trend over last 20 days (1.0 = rising, 0.0 = falling)
     MFI  — Money Flow Index scaled above 50 neutral (0.0–1.0)
     PCV  — Price-Confirmed Volume fraction on up-days, scaled above 50% baseline (0.0–1.0)
-
-    Accepts either a stock object (legacy) or a DataFrame directly.
     """
     default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
     try:
-        # Accept either a raw DataFrame or a yfinance Ticker object (fallback)
-        if isinstance(hist_df, pd.DataFrame):
-            hist = hist_df.copy()
-        else:
-            # Legacy path — stock object passed directly
-            hist = hist_df.history(period="1y")
-            if hist.empty or len(hist) < mfi_period + 5:
-                hist = hist_df.history(period="3mo")
-            if hist.empty or len(hist) < mfi_period + 5:
-                hist = hist_df.history(period="1mo")
+        # Fetch 1y instead of 6mo — gives more data for thin/illiquid stocks
+        # and ensures enough bars for MFI even after rolling NaN warm-up
+        hist = stock.history(period="1y")
 
+        # Fall back to shorter period if 1y unavailable (recent IPOs etc.)
+        if hist.empty or len(hist) < mfi_period + 5:
+            hist = stock.history(period="3mo")
+        if hist.empty or len(hist) < mfi_period + 5:
+            hist = stock.history(period="1mo")
         if hist.empty or len(hist) < 10:
             return default
 
@@ -563,10 +542,9 @@ def get_volume_signals(hist_df, mfi_period):
         return default
 
 
-def calculate_price_range(hist_df, range_days: int) -> dict:
+def calculate_price_range(stock, range_days: int) -> dict:
     """
     Calculates the price range over the last `range_days` trading days.
-    Accepts either a pre-fetched OHLCV DataFrame or a yfinance Ticker (legacy).
 
     Returns:
         RangeHigh  — highest closing price in the period
@@ -578,10 +556,7 @@ def calculate_price_range(hist_df, range_days: int) -> dict:
     """
     default = {"RangeHigh": None, "RangeLow": None, "RangePct": None, "RangePos": None}
     try:
-        if isinstance(hist_df, pd.DataFrame):
-            hist = hist_df
-        else:
-            hist = hist_df.history(period="1y")
+        hist = stock.history(period="1y")
         if hist.empty or len(hist) < range_days:
             return default
         window   = hist["Close"].iloc[-range_days:]
@@ -603,9 +578,9 @@ def calculate_price_range(hist_df, range_days: int) -> dict:
         return default
 
 
-def calculate_piotroski(fin, bal, cf):
-    """Accepts pre-fetched financials/balance/cashflow DataFrames — no extra API calls."""
+def calculate_piotroski(stock):
     try:
+        fin, bal, cf = stock.financials, stock.balance_sheet, stock.cashflow
         score = 0
         roa = fin.loc["Net Income"] / bal.loc["Total Assets"]
         if roa.iloc[0] > 0: score += 1
@@ -620,9 +595,9 @@ def calculate_piotroski(fin, bal, cf):
         return None
 
 
-def get_owner_earnings(cf, fin, info):
-    """Accepts pre-fetched cashflow/financials DataFrames — no extra API calls."""
+def get_owner_earnings(stock, info):
     try:
+        cf, fin = stock.cashflow, stock.financials
         oe = fin.loc["Net Income"].iloc[0] + cf.loc["Depreciation"].iloc[0] - abs(cf.loc["Capital Expenditure"].iloc[0])
         mc = info.get("marketCap")
         return oe, (oe / mc if mc else None)
@@ -642,9 +617,9 @@ def _get_bal_value(bal, *labels):
             return bal.loc[label]
     return None
 
-def calculate_roic(fin, bal):
-    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
+def calculate_roic(stock):
     try:
+        fin, bal = stock.financials, stock.balance_sheet
         ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
         if ebit_s is None: return None
         ebit = ebit_s.iloc[0]
@@ -662,9 +637,9 @@ def calculate_roic(fin, bal):
         return None
 
 
-def calculate_roic_trend(fin, bal):
-    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
+def calculate_roic_trend(stock):
     try:
+        fin, bal = stock.financials, stock.balance_sheet
         ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
         if ebit_s is None or len(ebit_s) < 2: return None
         assets_s = _get_bal_value(bal, "Total Assets", "TotalAssets")
@@ -683,155 +658,62 @@ def calculate_roic_trend(fin, bal):
 
 
 def process_ticker(args):
-    """
-    Fetch all data for one ticker in a single optimised pass.
-
-    Optimisations vs naive approach
-    --------------------------------
-    • stock.info        — 1 call  (price, sector, fundamentals, revenue/earnings growth)
-    • stock.history(2y) — 1 call  (OHLCV for ALL technical indicators)
-    • stock.financials  — 1 call  (fetched once, passed to all 4 compute functions)
-    • stock.balance_sheet — 1 call (shared across roic, roic_trend, piotroski)
-    • stock.cashflow    — 1 call  (shared across owner_earnings, piotroski)
-    Total: 5 HTTP requests per ticker  (down from up to 12 in naive version)
-
-    Raw OHLCV stored in _hist so MFI/range can be recomputed from cache with
-    any sidebar setting change — zero re-downloads needed.
-    """
     t, mfi_period, range_days = args
+    # Retry up to 3 times with backoff — yfinance can return empty data
+    # on the first attempt when running in cloud environments
     for attempt in range(3):
         try:
-            if attempt > 0:
-                time.sleep(attempt * 1.5)   # 1.5s, 3s — skip sleep on first attempt
-
+            time.sleep(attempt * 1.5)   # 0s, 1.5s, 3s between retries
             stock = yf.Ticker(t)
+            info  = stock.info
 
-            # ── 1. Info — price, sector, fundamentals ─────────────
-            info = stock.info
+            # yfinance returns an empty/minimal dict for invalid tickers
             if not info or len(info) < 5:
                 return None
+
+            # Exclude ETFs, index funds, trusts, and other non-company securities
             if is_etf_or_fund(info):
                 return None
+
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             if price is None:
-                return None
+                return None   # skip tickers with no price data
 
-            # ── 2. OHLCV history — single fetch, all indicators ───
-            hist = stock.history(period="2y")
-            if hist.empty:
-                hist = stock.history(period="1y")
-            if hist.empty:
+            owner_earnings, oe_yield = get_owner_earnings(stock, info)
+            vol_signals  = get_volume_signals(stock, mfi_period)
+            range_data   = calculate_price_range(stock, range_days)
+            try:
                 hist = stock.history(period="3mo")
-
-            # ── 3. Financial statements — fetched ONCE each ───────
-            try:
-                fin = stock.financials
-            except Exception:
-                fin = pd.DataFrame()
-            try:
-                bal = stock.balance_sheet
-            except Exception:
-                bal = pd.DataFrame()
-            try:
-                cf = stock.cashflow
-            except Exception:
-                cf = pd.DataFrame()
-
-            # ── 4. Compute all indicators — no additional API calls
-            vol_signals    = get_volume_signals(hist, mfi_period)
-            range_data     = calculate_price_range(hist, range_days)
-            ma50           = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-            owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
-            roic           = calculate_roic(fin, bal)
-            roic_trend     = calculate_roic_trend(fin, bal)
-            piotroski      = calculate_piotroski(fin, bal, cf)
-
-            # ── 5. Compact OHLCV cache ────────────────────────────
-            hist_cache = {
-                "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
-                "open":   hist["Open"].tolist(),
-                "high":   hist["High"].tolist(),
-                "low":    hist["Low"].tolist(),
-                "close":  hist["Close"].tolist(),
-                "volume": hist["Volume"].tolist(),
-            }
-
+                ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+            except:
+                ma50 = None
             return {
                 "Ticker":         t,
                 "Sector":         info.get("sector", "Unknown"),
                 "Price":          price,
-                "MarketCap":      info.get("marketCap"),
-                "P/E":            info.get("trailingPE"),
-                "OwnerEarnings":  owner_earnings,
-                "OE_Yield":       oe_yield,
-                "ROIC":           roic,
-                "ROIC_Trend":     roic_trend,
-                "RevenueGrowth":  info.get("revenueGrowth"),
-                "EarningsGrowth": info.get("earningsGrowth"),
-                "Piotroski":      piotroski,
                 "MA50":           ma50,
-                "OBV":            vol_signals["OBV"],
-                "MFI":            vol_signals["MFI"],
-                "PCV":            vol_signals["PCV"],
                 "RangeHigh":      range_data["RangeHigh"],
                 "RangeLow":       range_data["RangeLow"],
                 "RangePct":       range_data["RangePct"],
                 "RangePos":       range_data["RangePos"],
-                "_hist":          hist_cache,
+                "MarketCap":      info.get("marketCap"),
+                "P/E":            info.get("trailingPE"),
+                "OwnerEarnings":  owner_earnings,
+                "OE_Yield":       oe_yield,
+                "ROIC":           calculate_roic(stock),
+                "ROIC_Trend":     calculate_roic_trend(stock),
+                "RevenueGrowth":  info.get("revenueGrowth"),
+                "EarningsGrowth": info.get("earningsGrowth"),
+                "Piotroski":      calculate_piotroski(stock),
+                "OBV":            vol_signals["OBV"],
+                "MFI":            vol_signals["MFI"],
+                "PCV":            vol_signals["PCV"],
             }
         except Exception:
             if attempt == 2:
-                return None
+                return None   # all 3 attempts failed
             continue
     return None
-
-
-def _hist_from_cache(row: dict) -> pd.DataFrame:
-    """Reconstruct a history DataFrame from the compact cache dict stored in a result row."""
-    hc = row.get("_hist")
-    if not hc:
-        return pd.DataFrame()
-    try:
-        df = pd.DataFrame({
-            "Open":   hc["open"],
-            "High":   hc["high"],
-            "Low":    hc["low"],
-            "Close":  hc["close"],
-            "Volume": hc["volume"],
-        }, index=pd.to_datetime(hc["dates"]))
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def recompute_indicators(results: list, mfi_period: int, range_days: int) -> list:
-    """
-    Re-derive MFI, OBV, PCV, MA50, and range metrics from cached raw history
-    using the current sidebar settings — zero network requests.
-    Returns a new list of result dicts with updated indicator values.
-    """
-    updated = []
-    for row in results:
-        hist = _hist_from_cache(row)
-        if hist.empty:
-            updated.append(row)
-            continue
-        new_row = dict(row)
-        vol  = get_volume_signals(hist, mfi_period)
-        rng  = calculate_price_range(hist, range_days)
-        ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-        new_row.update({
-            "MA50":      ma50,
-            "OBV":       vol["OBV"],
-            "MFI":       vol["MFI"],
-            "PCV":       vol["PCV"],
-            "RangeHigh": rng["RangeHigh"],
-            "RangeLow":  rng["RangeLow"],
-            "RangePct":  rng["RangePct"],
-            "RangePos":  rng["RangePos"],
-        })
-        updated.append(new_row)
-    return updated
 
 # ───────────────────────────────────────────────────────────────
 # TICKER LOADERS
@@ -927,24 +809,20 @@ with tab_screener:
     sector_label  = sector if sector != "All Sectors" else "All Sectors"
 
     # ── Check if we already have cached scan data for this exchange ──
-    # Cache is valid as long as the exchange matches — mfi_period and range_days
-    # are now recomputed client-side from stored raw history (zero re-downloads).
     cache         = st.session_state.get("screener_cache", {})
     cache_valid   = (
         cache.get("exchange_key") == exchange_key and
+        cache.get("mfi_period")   == mfi_period   and
+        cache.get("range_days")   == range_days    and
         bool(cache.get("results"))
     )
 
     if cache_valid:
-        raw_results = cache["results"]
-        # Recompute indicators with current sidebar settings from stored OHLCV —
-        # this is pure CPU math, no network calls.
-        results = recompute_indicators(raw_results, mfi_period, range_days)
+        results = cache["results"]
         st.success(
             f"⚡ Using cached data from last scan "
             f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
-            f"indicators recomputed instantly from stored history. "
-            f"Click **Clear Cache & Rescan** to fetch fresh data from the web."
+            f"filters re-applied instantly. Est. time: **~0 sec**. Click **Clear Cache & Rescan** to fetch fresh data."
         )
         if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
             st.session_state.pop("screener_cache", None)
@@ -967,34 +845,21 @@ with tab_screener:
             f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: ~5 min"
         )
 
-        # ── Threaded scan with as_completed for maximum throughput ──
-        # as_completed() processes futures as they FINISH (not submission order),
-        # so fast tickers don't get blocked behind slow ones.
-        # Progress bar throttled to every 2% to avoid st.progress() overhead.
+        # Progress bar + threaded scan
         progress_bar = st.progress(0, text="Starting scan...")
-        results  = []
-        total    = len(tickers)
-        done     = 0
-        last_pct = 0
+        results = []
+        total = len(tickers)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t
-                       for t in tickers}
-            for future in as_completed(futures):
+            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t for t in tickers}
+            done = 0
+            for future in futures:
                 result = future.result()
                 if result:
                     results.append(result)
                 done += 1
                 pct = done / total
-                # Only redraw progress bar when it moves by ≥2% — reduces
-                # Streamlit overhead from ~500 redraws to ~50 for S&P 500
-                if int(pct * 100) >= last_pct + 2 or done == total:
-                    last_pct = int(pct * 100)
-                    found = len(results)
-                    progress_bar.progress(
-                        pct,
-                        text=f"Scanning... {done}/{total} tickers  ·  {found} passed filters  ({last_pct}%)"
-                    )
+                progress_bar.progress(pct, text=f"Scanning... {done}/{total} ({int(pct*100)}%)")
 
         progress_bar.empty()
 
@@ -1009,16 +874,13 @@ with tab_screener:
             st.stop()
 
         # ── Store results in session_state cache ──────────────────
-        # Raw OHLCV history is embedded in each result row (_hist key).
-        # mfi_period and range_days are NOT stored — indicators are
-        # recomputed on-the-fly from _hist whenever settings change.
         st.session_state["screener_cache"] = {
             "exchange_key": exchange_key,
+            "mfi_period":   mfi_period,
+            "range_days":   range_days,
             "results":      results,
             "scanned_at":   datetime.now().strftime("%H:%M:%S"),
         }
-        # Recompute immediately with current sidebar values
-        results = recompute_indicators(results, mfi_period, range_days)
 
     # Build DataFrame
     df = pd.DataFrame(results)
@@ -1085,10 +947,8 @@ with tab_screener:
         above_score = df["Score"] >= min_score
     else:
         above_score = pd.Series(True, index=df.index)
-    if use_ma50_filter == "below":
+    if use_ma50_filter:
         below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] <= df["MA50"])
-    elif use_ma50_filter == "above":
-        below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] >= df["MA50"])
     else:
         below_ma50 = pd.Series(True, index=df.index)
 
@@ -1155,7 +1015,7 @@ with tab_screener:
         hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
         if "MFI" in hidden_cols and "MFI_Signal" in display.columns:
             hidden_cols.append("MFI_Signal")
-        display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
+        display = display.drop(columns=hidden_cols, errors="ignore")
 
         styled = display.style.applymap(color_score, subset=["Score"])
 
@@ -1214,66 +1074,27 @@ with tab_analyze:
     st.subheader("🔍 Single Stock Analyzer")
     st.caption("Enter any ticker and select which metrics to run. Works on any stock — S&P 500, NYSE, NASDAQ, or international.")
 
-    a_col1, a_col2 = st.columns([1, 2])
+    # ── Input section — full width for mobile compatibility ──────
+    ticker_input = st.text_input(
+        "Stock Ticker",
+        placeholder="e.g. AAPL, MSFT, TSLA",
+        key="analyze_ticker_input",
+        help="Enter the ticker symbol exactly as it appears on the exchange."
+    ).strip().upper()
 
-    with a_col1:
-        # Pre-fill input when a history item is clicked.
-        _pending = st.session_state.pop("_pending_ticker", None)
-        if _pending:
-            st.session_state["analyze_ticker_input"] = _pending
-
-        ticker_input = st.text_input(
-            "Stock Ticker",
-            placeholder="e.g. AAPL, MSFT, TSLA",
-            key="analyze_ticker_input",
-            help="Enter the ticker symbol exactly as it appears on the exchange."
-        ).strip().upper()
-
-        st.markdown("**Select Metrics to Analyze**")
+    with st.expander("Select Metrics to Analyze", expanded=False):
         analyze_metrics = {}
-        for key, cfg in METRICS.items():
-            analyze_metrics[key] = st.checkbox(
-                cfg["label"], value=True,
-                key=f"analyze_{key}", help=cfg["desc"],
-            )
+        m_cols = st.columns(2)
+        for i, (key, cfg) in enumerate(METRICS.items()):
+            with m_cols[i % 2]:
+                analyze_metrics[key] = st.checkbox(
+                    cfg["label"], value=True,
+                    key=f"analyze_{key}", help=cfg["desc"],
+                )
 
-        analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
-
-        # ── Search History ────────────────────────────────────────
-        _history = st.session_state.get("analyze_history", [])
-        if _history:
-            st.divider()
-            st.markdown("**🕐 Recent Searches**")
-            _active = st.session_state.get("analyze_data", {}).get("ticker", "")
-            for _h in _history:
-                _is_active = _h["ticker"] == _active
-                _border = "2px solid #4CAF50" if _is_active else "1px solid #444"
-                _bg     = "rgba(76,175,80,0.08)" if _is_active else "transparent"
-                _col_a, _col_b = st.columns([5, 1])
-                with _col_a:
-                    st.markdown(
-                        f"<div style='border:{_border};border-radius:6px;padding:6px 10px;"
-                        f"background:{_bg};margin-bottom:4px;font-size:0.88em;line-height:1.3;'>"
-                        f"<span style='font-weight:600;font-size:1.0em;'>{_h['ticker']}</span><br>"
-                        f"<span style='color:#aaa;font-size:0.85em;'>{_h['name'][:38]}{'…' if len(_h['name'])>38 else ''}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-                with _col_b:
-                    if st.button("↗", key=f"hist_btn_{_h['ticker']}", help=f"Re-analyze {_h['ticker']}"):
-                        st.session_state["_pending_ticker"] = _h["ticker"]
-                        st.session_state["_rerun_ticker"]   = _h["ticker"]
-                        st.rerun()
-            if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
-                st.session_state["analyze_history"] = []
-                st.rerun()
+    analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True)
 
     # ── On Analyze click: fetch only what is missing from cache ──
-    _rerun_ticker = st.session_state.pop("_rerun_ticker", None)
-    if _rerun_ticker:
-        ticker_input  = _rerun_ticker
-        analyze_btn   = True
-
     if analyze_btn and ticker_input:
         _screener_cache  = st.session_state.get("screener_cache", {})
         _cached_results  = _screener_cache.get("results", [])
@@ -1360,7 +1181,7 @@ with tab_analyze:
                         "BRKA":  "BRK-A",
                         "BRKB":  "BRK-B",
                         "NVIDA": "NVDA (Nvidia)",
-                        "NVDIA": "NVDA (Nvidia)",
+                        "NVIDA": "NVDA (Nvidia)",
                         "NFLX":  "NFLX ✓ — double-check spelling",
                         "BABA":  "BABA ✓ — if this fails try 9988.HK (Hong Kong listing)",
                     }
@@ -1432,11 +1253,21 @@ with tab_analyze:
                             "OBV":            _cached_row.get("OBV"),
                             "MFI":            _cached_row.get("MFI"),
                             "PCV":            _cached_row.get("PCV"),
+                            "RangePosScore":  _cached_row.get("RangePosScore"),
                         }
                     else:
                         try:
                             _oe, _oey = get_owner_earnings(_stock, _info)
                             _vols     = get_volume_signals(_stock, mfi_period)
+                            # Calculate RangePosScore from price history
+                            if not _hist.empty and len(_hist) >= range_days:
+                                _rng_win  = _hist["Close"].iloc[-range_days:]
+                                _rng_h    = _rng_win.max(); _rng_l = _rng_win.min()
+                                _rng_span = _rng_h - _rng_l
+                                _rng_pos  = float(((_hist["Close"].iloc[-1] - _rng_l) / _rng_span)) if _rng_span > 0 else 0.5
+                                _rng_score = round(1 - _rng_pos, 4)
+                            else:
+                                _rng_score = None
                             _raw = {
                                 "OE_Yield":       _oey,
                                 "ROIC":           calculate_roic(_stock),
@@ -1447,6 +1278,7 @@ with tab_analyze:
                                 "OBV":            _vols["OBV"],
                                 "MFI":            _vols["MFI"],
                                 "PCV":            _vols["PCV"],
+                                "RangePosScore":  _rng_score,
                             }
                         except Exception:
                             _raw = _fc.get("raw", {})
@@ -1482,62 +1314,49 @@ with tab_analyze:
             "from_cache":  bool(_cached_row),
         }
 
-        # ── Update search history ─────────────────────────────────
-        _company_name = _info.get("longName") or _info.get("shortName") or ticker_input
-        _hist_entry   = {"ticker": ticker_input, "name": _company_name}
-        _history      = st.session_state.get("analyze_history", [])
-        _history      = [h for h in _history if h["ticker"] != ticker_input]
-        _history.insert(0, _hist_entry)
-        st.session_state["analyze_history"] = _history[:30]
-
     elif analyze_btn and not ticker_input:
         st.warning("Please enter a ticker symbol.")
 
-    # ── Render from session_state — persists across all reruns ──
-    with a_col2:
-        if "analyze_data" not in st.session_state:
-            st.markdown("""
-            **How to use:**
-            1. Type a ticker symbol on the left (e.g. `NVDA`)
-            2. Check the metrics you want to see
-            3. Click **Analyze**
+    # ── Render from session_state — full width for mobile ────────
+    if "analyze_data" not in st.session_state and not analyze_btn:
+        st.info("""
+        **How to use:**
+        1. Type a ticker symbol above (e.g. `NVDA`)
+        2. Expand **Select Metrics** to choose what to calculate
+        3. Click **🔬 Analyze**
 
-            Results show the raw value for each metric alongside a
-            color-coded signal: 🟢 Good · 🟡 Neutral · 🔴 Weak
+        Works on any publicly traded stock. Changing the chart time frame will not reset results.
+        """)
+    elif "analyze_data" in st.session_state:
+        try:
+            _d       = st.session_state["analyze_data"]
+            info     = _d["info"]
+            hist_1y  = _d["hist"]
+            fin_stmt = _d["fin"]
+            bal_stmt = _d["bal"]
+            cf_stmt  = _d["cf"]
+            raw      = _d["raw"]
+            sticker  = _d["ticker"]
+            selected = [k for k, v in _d["metrics_sel"].items() if v]
 
-            You can analyze **any publicly traded stock** — not just S&P 500.
-            Changing the chart time frame will **not** reset the analysis.
-            """)
-        else:
-            try:
-                _d       = st.session_state["analyze_data"]
-                info     = _d["info"]
-                hist_1y  = _d["hist"]
-                fin_stmt = _d["fin"]
-                bal_stmt = _d["bal"]
-                cf_stmt  = _d["cf"]
-                raw      = _d["raw"]
-                sticker  = _d["ticker"]
-                selected = [k for k, v in _d["metrics_sel"].items() if v]
+            name    = info.get("longName") or info.get("shortName") or sticker
+            price   = info.get("currentPrice") or info.get("regularMarketPrice")
+            mktcap  = info.get("marketCap")
 
-                name    = info.get("longName") or info.get("shortName") or sticker
-                price   = info.get("currentPrice") or info.get("regularMarketPrice")
-                mktcap  = info.get("marketCap")
+            st.markdown(f"## {name} &nbsp; `{sticker}`")
+            # Show data source
+            if _d.get("from_cache"):
+                st.caption("⚡ Metrics from screener cache · Financials cached locally — no API calls")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
+            h2.metric("Sector",   info.get("sector", "N/A"))
+            h3.metric("Industry", info.get("industry", "N/A"))
+            h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
+            st.divider()
 
-                st.markdown(f"## {name} &nbsp; `{sticker}`")
-                # Show data source
-                if _d.get("from_cache"):
-                    st.caption("⚡ Metrics from screener cache · Financials cached locally — no API calls")
-                h1, h2, h3, h4 = st.columns(4)
-                h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
-                h2.metric("Sector",   info.get("sector", "N/A"))
-                h3.metric("Industry", info.get("industry", "N/A"))
-                h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
-                st.divider()
-
-                if not selected:
-                    st.warning("No metrics were selected when Analyze was run.")
-                    st.stop()
+            if not selected:
+                st.warning("No metrics were selected when Analyze was run. Re-run with at least one metric enabled.")
+            else:
 
                 THRESHOLDS = {
                     "OE_Yield":       (0.05, 0.02, True),
@@ -1549,22 +1368,23 @@ with tab_analyze:
                     "OBV":            (0.8,  0.4,  True),
                     "MFI":            (0.6,  0.4,  True),
                     "PCV":            (0.5,  0.2,  True),
+                    "RangePosScore":  (0.7,  0.4,  True),
                 }
-
+    
                 def _sig(key, val):
                     if val is None or (isinstance(val, float) and np.isnan(val)): return "⚪"
                     g, n, hi = THRESHOLDS.get(key, (None, None, True))
                     if g is None: return "⚪"
                     if hi:  return "🟢" if val >= g else ("🟡" if val >= n else "🔴")
                     else:   return "🟢" if val <= g else ("🟡" if val <= n else "🔴")
-
+    
                 def _fv(key, val):
                     if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
                     if key in ("OE_Yield","RevenueGrowth","EarningsGrowth","ROIC","ROIC_Trend"): return f"{val:.2%}"
-                    if key in ("OBV","MFI","PCV"): return f"{val:.4f}"
+                    if key in ("OBV","MFI","PCV","RangePosScore"): return f"{val:.2f}"
                     if key == "Piotroski": return f"{int(val)} / 9"
                     return str(round(val, 4))
-
+    
                 def _fb(val):
                     if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
                     try:
@@ -1575,15 +1395,15 @@ with tab_analyze:
                         if abs(v)>=1e3:  return f"${v/1e3:.2f}K"
                         return f"${v:,.2f}"
                     except: return "N/A"
-
+    
                 def _fp(val):
                     try:    return f"{float(val):.2%}" if val is not None else "N/A"
                     except: return "N/A"
-
+    
                 def _fn(val, d=2):
                     try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
                     except: return "N/A"
-
+    
                 def irow(label, value, tip=None):
                     # tip renders as a small ℹ tooltip after the label
                     tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
@@ -1594,10 +1414,10 @@ with tab_analyze:
                         f"<span style='color:#aaa;'>{label}{tip_html}</span>"
                         f"<span style='font-weight:600;'>{value}</span></div>",
                         unsafe_allow_html=True)
-
+    
                 # ── Metric cards ─────────────────────────────────
                 st.markdown("### Metric Results")
-
+    
                 # Compute MFI signal for use in card and banner
                 _mfi_raw = raw.get("MFI")
                 def _mfi_label(v):
@@ -1608,9 +1428,9 @@ with tab_analyze:
                     if mfi >= 40: return "➡️ Neutral",      "#888888"
                     if mfi >= 20: return "📉 Selling",      "#f59e0b"
                     return         "🧊 Oversold",           "#60a5fa"
-
+    
                 _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
-
+    
                 # Show MFI signal banner if MFI is selected
                 if "MFI" in selected and _mfi_lbl:
                     _mfi_pct = f"{_mfi_raw*100:.1f}" if _mfi_raw is not None else "N/A"
@@ -1624,7 +1444,7 @@ with tab_analyze:
                         f"</div>",
                         unsafe_allow_html=True
                     )
-
+    
                 cols = st.columns(3)
                 for i, key in enumerate(selected):
                     cfg = METRICS[key]; val = raw.get(key)
@@ -1649,7 +1469,7 @@ with tab_analyze:
                             f"</div>",
                             unsafe_allow_html=True
                         )
-
+    
                 # ── MA50 ─────────────────────────────────────────
                 st.divider()
                 if not hist_1y.empty and len(hist_1y) >= 50:
@@ -1666,7 +1486,7 @@ with tab_analyze:
                                    "Negative = trading below the MA (potential value zone). "
                                    "Positive = trading above the MA (momentum zone)")
                     st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
-
+    
                 # ── Price Range ───────────────────────────────────
                 st.divider()
                 st.markdown("### 📦 Price Range Analysis")
@@ -1715,7 +1535,7 @@ with tab_analyze:
                     st.line_chart(cdf, use_container_width=True)
                 else:
                     st.warning("Not enough price history to calculate range.")
-
+    
                 # ── Weighted score ────────────────────────────────
                 st.divider()
                 ts = sum(
@@ -1724,12 +1544,12 @@ with tab_analyze:
                     if raw.get(k) is not None and not (isinstance(raw.get(k), float) and np.isnan(raw.get(k)))
                 )
                 st.metric("Weighted Score", f"{ts:.2f}")
-
+    
                 # ── Financial tabs ────────────────────────────────
                 st.divider()
                 st.markdown("## 📋 Full Financial Breakdown")
                 ft = st.tabs(["🏢 Overview","💰 Valuation","📈 Income","🏦 Balance Sheet","💵 Cash Flow","📊 Price History"])
-
+    
                 with ft[0]:
                     st.markdown("### 🏢 Company Overview")
                     c1, c2 = st.columns(2)
@@ -1760,7 +1580,7 @@ with tab_analyze:
                              "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
                     st.markdown("#### Business Summary")
                     st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
-
+    
                 with ft[1]:
                     st.markdown("### 💰 Valuation")
                     v1, v2 = st.columns(2)
@@ -1809,7 +1629,7 @@ with tab_analyze:
                               help="Dividend Yield — annual dividend as a % of share price. Higher = more income per dollar invested")
                     d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A",
                               help="Payout Ratio — percentage of net income paid out as dividends. Above 100% means paying more than it earns")
-
+    
                 with ft[2]:
                     st.markdown("### 📈 Income Statement (Annual)")
                     if fin_stmt is not None and not fin_stmt.empty:
@@ -1837,7 +1657,7 @@ with tab_analyze:
                               help="Net Profit Margin — Net Income ÷ Revenue. The % of every dollar of revenue that becomes profit")
                     i8.metric("Rev Growth", _fp(info.get("revenueGrowth")),
                               help="Revenue Growth — year-over-year percentage increase in total revenue")
-
+    
                 with ft[3]:
                     st.markdown("### 🏦 Balance Sheet (Annual)")
                     if bal_stmt is not None and not bal_stmt.empty:
@@ -1865,7 +1685,7 @@ with tab_analyze:
                               help="Current Ratio — Current Assets ÷ Current Liabilities. Above 1.0 means the company can cover its short-term debts. Above 2.0 is considered healthy")
                     b8.metric("Qck Ratio", _fn(info.get("quickRatio")),
                               help="Quick Ratio (Acid Test) — like Current Ratio but excludes inventory. Above 1.0 means the company can pay short-term debts without selling inventory")
-
+    
                 with ft[4]:
                     st.markdown("### 💵 Cash Flow (Annual)")
                     if cf_stmt is not None and not cf_stmt.empty:
@@ -1890,10 +1710,10 @@ with tab_analyze:
                                help="Return on Assets — Net Income ÷ Total Assets. Measures how efficiently a company uses its assets to generate profit. Above 5% is generally good")
                     cf6.metric("ROE", _fp(info.get("returnOnEquity")),
                                help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
-
+    
                 with ft[5]:
                     st.markdown("### 📊 Interactive Chart")
-
+    
                     # ── Chart controls row 1 ──────────────────────
                     cc1, cc2, cc3, cc4 = st.columns(4)
                     with cc1:
@@ -1919,7 +1739,7 @@ with tab_analyze:
                         # Restrict time period options based on interval
                         intraday_short = interval in ("1m", "5m")
                         intraday_mid   = interval in ("15m", "30m", "1h", "4h")
-
+    
                         if intraday_short:
                             period_opts = ["1d", "5d", "7d"]
                             period_def  = 1
@@ -1929,7 +1749,7 @@ with tab_analyze:
                         else:
                             period_opts = ["5d","1mo","3mo","6mo","1y","2y","5y","10y","Custom"]
                             period_def  = 4
-
+    
                         pc = st.selectbox(
                             "Time Period", period_opts,
                             index=period_def, key="price_history_period"
@@ -1938,7 +1758,7 @@ with tab_analyze:
                         chart_theme = st.selectbox(
                             "Theme", ["Dark","Light"], index=0, key="chart_theme"
                         )
-
+    
                     # ── Custom date range (daily+ only) ───────────
                     if pc == "Custom":
                         dr1, dr2 = st.columns(2)
@@ -1956,20 +1776,20 @@ with tab_analyze:
                                 max_value=pd.Timestamp.today(),
                                 key="chart_custom_end",
                             )
-
+    
                     st.markdown("**Overlays**")
                     ov1,ov2,ov3,ov4 = st.columns(4)
                     show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
                     show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
                     show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
                     show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
-
+    
                     st.markdown("**Sub-Charts**")
                     sc1,sc2,sc3 = st.columns(3)
                     show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
                     show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
                     show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
-
+    
                     # ── Fetch history with correct interval ───────
                     # yfinance interval/period compatibility:
                     #   1m        → max period "7d"
@@ -1977,7 +1797,7 @@ with tab_analyze:
                     #   4h        → not native; fetch 1h and resample
                     #   1d/1wk/1mo → any period
                     fetch_interval = "1h" if interval == "4h" else interval
-
+    
                     # Map display period → yfinance period string for fetch
                     period_fetch_map = {
                         "1d":"1d","5d":"5d","7d":"7d","1mo":"1mo","2mo":"2mo",
@@ -1985,7 +1805,7 @@ with tab_analyze:
                         "5y":"10y","10y":"max","Custom":"max",
                     }
                     fetch_period = period_fetch_map.get(pc, "2y")
-
+    
                     try:
                         _s = yf.Ticker(sticker)
                         if pc == "Custom":
@@ -1999,7 +1819,7 @@ with tab_analyze:
                     except Exception as _fe:
                         st.warning(f"Could not fetch {interval} data: {_fe}. Falling back to daily.")
                         hist_full = hist_1y
-
+    
                     # Resample 1h → 4h if needed
                     if interval == "4h" and not hist_full.empty:
                         hist_full = hist_full.resample("4h").agg({
@@ -2009,7 +1829,7 @@ with tab_analyze:
                             "Close": "last",
                             "Volume":"sum",
                         }).dropna()
-
+    
                     # Slice to display window for daily+ periods
                     period_days_map = {
                         "5d":5,"1mo":21,"3mo":63,"6mo":126,
@@ -2020,41 +1840,41 @@ with tab_analyze:
                         hd = hist_full.iloc[-dn:].copy() if len(hist_full) >= dn else hist_full.copy()
                     else:
                         hd = hist_full.copy()
-
+    
                     if not hd.empty:
                         import plotly.graph_objects as go
                         from plotly.subplots import make_subplots
-
+    
                         bg   = "#0e1117" if chart_theme == "Dark" else "#ffffff"
                         fg   = "#ffffff" if chart_theme == "Dark" else "#000000"
                         grid = "#1f2937" if chart_theme == "Dark" else "#e5e7eb"
-
+    
                         # ── Compute indicators ────────────────────
                         hd["EMA20"]  = hd["Close"].ewm(span=20,  adjust=False).mean()
                         hd["EMA50"]  = hd["Close"].ewm(span=50,  adjust=False).mean()
                         hd["EMA200"] = hd["Close"].ewm(span=200, adjust=False).mean()
-
+    
                         # Bollinger Bands (20-day, 2σ)
                         bb_mid        = hd["Close"].rolling(20).mean()
                         bb_std        = hd["Close"].rolling(20).std()
                         hd["BB_mid"]  = bb_mid
                         hd["BB_up"]   = bb_mid + 2 * bb_std
                         hd["BB_low"]  = bb_mid - 2 * bb_std
-
+    
                         # RSI (14-period)
                         delta  = hd["Close"].diff()
                         gain   = delta.clip(lower=0).rolling(14).mean()
                         loss   = (-delta.clip(upper=0)).rolling(14).mean()
                         rs     = gain / loss.replace(0, np.nan)
                         hd["RSI"] = 100 - (100 / (1 + rs))
-
+    
                         # MACD (12/26/9)
                         ema12       = hd["Close"].ewm(span=12, adjust=False).mean()
                         ema26       = hd["Close"].ewm(span=26, adjust=False).mean()
                         hd["MACD"]  = ema12 - ema26
                         hd["Signal"]= hd["MACD"].ewm(span=9, adjust=False).mean()
                         hd["Hist"]  = hd["MACD"] - hd["Signal"]
-
+    
                         # Heikin Ashi OHLC
                         ha = hd.copy()
                         ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
@@ -2062,16 +1882,16 @@ with tab_analyze:
                         ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
                         ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
                         ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
-
+    
                         # ── Build subplot layout ──────────────────
                         sub_charts = [s for s, show in [
                             ("Volume", show_vol), ("RSI", show_rsi), ("MACD", show_macd)
                         ] if show]
-
+    
                         n_rows   = 1 + len(sub_charts)
                         row_h    = [0.55] + [0.45 / max(len(sub_charts), 1)] * len(sub_charts) if sub_charts else [1.0]
                         sub_specs= [[{"secondary_y": False}]] * n_rows
-
+    
                         fig = make_subplots(
                             rows=n_rows, cols=1,
                             shared_xaxes=True,
@@ -2079,7 +1899,7 @@ with tab_analyze:
                             vertical_spacing=0.03,
                             specs=sub_specs,
                         )
-
+    
                         # ── Main price chart ──────────────────────
                         if chart_type == "Candlestick":
                             fig.add_trace(go.Candlestick(
@@ -2091,7 +1911,7 @@ with tab_analyze:
                                 increasing_fillcolor="#26a69a",
                                 decreasing_fillcolor="#ef5350",
                             ), row=1, col=1)
-
+    
                         elif chart_type == "Heikin Ashi":
                             fig.add_trace(go.Candlestick(
                                 x=ha.index, open=ha["HA_Open"], high=ha["HA_High"],
@@ -2102,13 +1922,13 @@ with tab_analyze:
                                 increasing_fillcolor="#26a69a",
                                 decreasing_fillcolor="#ef5350",
                             ), row=1, col=1)
-
+    
                         else:  # Line
                             fig.add_trace(go.Scatter(
                                 x=hd.index, y=hd["Close"],
                                 name="Close", line=dict(color="#2196f3", width=1.5)
                             ), row=1, col=1)
-
+    
                         # ── Overlays ──────────────────────────────
                         if show_ema20:
                             fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA20"],
@@ -2133,7 +1953,7 @@ with tab_analyze:
                             fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_mid"],
                                 name="BB Mid", line=dict(color="#94a3b8", width=1, dash="dash"),
                                 opacity=0.4), row=1, col=1)
-
+    
                         # ── Sub-charts ────────────────────────────
                         sub_row = 2
                         if show_vol:
@@ -2146,7 +1966,7 @@ with tab_analyze:
                             fig.update_yaxes(title_text="Volume", row=sub_row, col=1,
                                              title_font=dict(size=10), tickfont=dict(size=9))
                             sub_row += 1
-
+    
                         if show_rsi:
                             fig.add_trace(go.Scatter(x=hd.index, y=hd["RSI"],
                                 name="RSI", line=dict(color="#60a5fa", width=1.5)),
@@ -2159,7 +1979,7 @@ with tab_analyze:
                                              row=sub_row, col=1,
                                              title_font=dict(size=10), tickfont=dict(size=9))
                             sub_row += 1
-
+    
                         if show_macd:
                             hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
                                            for v in hd["Hist"].fillna(0)]
@@ -2174,7 +1994,7 @@ with tab_analyze:
                                 row=sub_row, col=1)
                             fig.update_yaxes(title_text="MACD", row=sub_row, col=1,
                                              title_font=dict(size=10), tickfont=dict(size=9))
-
+    
                         # ── Layout ────────────────────────────────
                         fig.update_layout(
                             height=600 + 120 * len(sub_charts),
@@ -2200,9 +2020,9 @@ with tab_analyze:
                         )
                         fig.update_yaxes(title_text="Price ($)", row=1, col=1,
                                          title_font=dict(size=10), tickfont=dict(size=9))
-
+    
                         st.plotly_chart(fig, use_container_width=True)
-
+    
                         # ── Period stats ──────────────────────────
                         s1, s2, s3, s4 = st.columns(4)
                         pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
@@ -2213,5 +2033,5 @@ with tab_analyze:
                     else:
                         st.info("No price history available.")
 
-            except Exception as e:
-                st.error(f"Error rendering analysis: {e}")
+        except Exception as e:
+            st.error(f"Error rendering analysis: {e}")
