@@ -180,6 +180,10 @@ _defaults = {
     "slider_range_pct":   10.0,
     "slider_mfi_period":  14,
     "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
+    "tog_pe_filter":      False,
+    "slider_pe_range":    (0, 50),
+    "tog_rev_filter":     False,
+    "slider_rev_min":     0,
 }
 # Metric toggle/weight defaults
 for _k, _cfg in METRICS.items():
@@ -362,6 +366,42 @@ with st.sidebar:
              "Lower = tighter range. 5–10% finds stocks in consolidation.",
         disabled=not use_range_filter,
         key="slider_range_pct",
+    )
+
+    st.divider()
+    st.header("📐 Valuation & Growth Filters")
+
+    use_pe_filter = st.toggle(
+        "Enable P/E Ratio Filter",
+        help="Only show stocks whose trailing P/E falls within the selected range. "
+             "Stocks with no P/E (negative earnings) are excluded when this is on.",
+        key="tog_pe_filter",
+    )
+    pe_min, pe_max = st.slider(
+        "P/E Ratio Range",
+        min_value=0, max_value=200, step=1,
+        value=st.session_state.get("slider_pe_range", (0, 50)),
+        disabled=not use_pe_filter,
+        help="Filter to stocks with a trailing P/E between these two values. "
+             "0–15 = value territory · 15–25 = fair value · 25–50 = growth premium · 50+ = high growth/speculative.",
+        key="slider_pe_range",
+    )
+
+    st.divider()
+    # TTM revenue growth filter in 15% increments
+    REV_GROWTH_STEPS = [0, 15, 30, 45, 60, 75, 90]
+    use_rev_filter = st.toggle(
+        "Enable TTM Revenue Growth Filter",
+        help="Only show stocks whose trailing-12-month revenue growth meets the minimum threshold.",
+        key="tog_rev_filter",
+    )
+    rev_min_idx = st.select_slider(
+        "Min TTM Revenue Growth",
+        options=REV_GROWTH_STEPS,
+        format_func=lambda x: f"{x}%+",
+        disabled=not use_rev_filter,
+        help="Minimum trailing-12-month revenue growth rate. Steps are in 15% increments.",
+        key="slider_rev_min",
     )
 
     st.divider()
@@ -1098,12 +1138,28 @@ with tab_screener:
     else:
         in_range = pd.Series(True, index=df.index)
 
+    # P/E ratio filter — exclude stocks outside the selected range
+    # Stocks with NaN P/E (no earnings) are excluded when the filter is active
+    if use_pe_filter:
+        pe_series = pd.to_numeric(df["P/E"], errors="coerce")
+        in_pe = pe_series.notna() & (pe_series >= pe_min) & (pe_series <= pe_max)
+    else:
+        in_pe = pd.Series(True, index=df.index)
+
+    # TTM Revenue Growth filter — minimum threshold in 15% increments
+    if use_rev_filter:
+        rev_series = pd.to_numeric(df["RevenueGrowth"], errors="coerce")
+        # RevenueGrowth is stored as a decimal (e.g. 0.15 = 15%)
+        in_rev = rev_series.notna() & (rev_series >= rev_min_idx / 100.0)
+    else:
+        in_rev = pd.Series(True, index=df.index)
+
     # Sort by Score when metrics are active, otherwise by RangePct (tightest range first)
     sort_col = "Score" if active_metrics else "RangePct"
     sort_asc  = not active_metrics   # ascending for RangePct (tighter = better), descending for Score
 
     screened = (
-        df[under_price & below_ma50 & above_score & in_range]
+        df[under_price & below_ma50 & above_score & in_range & in_pe & in_rev]
         .sort_values(sort_col, ascending=sort_asc, na_position="last")
         .head(top_n)
         .reset_index(drop=True)
