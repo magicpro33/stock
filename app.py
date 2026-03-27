@@ -1609,55 +1609,98 @@ with tab_screener:
             f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: ~5 min"
         )
 
-        # ── Threaded scan with as_completed for maximum throughput ──
-        # as_completed() processes futures as they FINISH (not submission order),
-        # so fast tickers don't get blocked behind slow ones.
-        # Progress bar throttled to every 2% to avoid st.progress() overhead.
-        progress_bar = st.progress(0, text="Starting scan...")
-        results  = []
-        total    = len(tickers)
-        done     = 0
-        last_pct = 0
+        # ── Dynamic-worker scan ───────────────────────────────────────
+        # ThreadPoolExecutor cannot resize mid-run, so we scan in batches.
+        # After each batch we measure the pass rate and adjust worker count:
+        #   pass rate ≥ 40% → healthy → ramp up (max 12)
+        #   pass rate 20–40% → OK → hold
+        #   pass rate 10–20% → slow → step down
+        #   pass rate < 10%  → throttled → halve workers + pause
+        #
+        # Batch size scales with worker count so each batch takes ~10–15 s.
+        # Status line updates after every batch with live worker count.
 
-        # Live connection status display during scan
-        _conn_status = st.empty()
+        progress_bar  = st.progress(0, text="Starting scan...")
+        _conn_status  = st.empty()
+        results       = []
+        total         = len(tickers)
+        done          = 0
+        last_pct      = 0
+        workers_now   = max_workers   # start from sidebar value
+        remaining     = list(tickers)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t
-                       for t in tickers}
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    results.append(result)
-                done += 1
-                pct   = done / total
-                found = len(results)
-                # Pass rate — low rate early on signals rate limiting
-                pass_rate = found / done if done > 0 else 0
+        # Sliding window: track pass rate over last N tickers processed
+        _window_done  = 0
+        _window_pass  = 0
+        _WINDOW       = 50            # evaluate every 50 tickers
 
-                if int(pct * 100) >= last_pct + 2 or done == total:
-                    last_pct = int(pct * 100)
+        while remaining:
+            # Batch size = workers × 8 so workers stay busy for several seconds
+            batch_size  = max(workers_now * 8, 20)
+            batch       = remaining[:batch_size]
+            remaining   = remaining[batch_size:]
 
-                    # Diagnose connection health from pass rate
-                    if done >= 20:   # enough samples to judge
-                        if pass_rate >= 0.35:
-                            _conn_icon = "🟢"
-                            _conn_text = f"Connection healthy · {pass_rate:.0%} pass rate"
-                        elif pass_rate >= 0.15:
-                            _conn_icon = "🟡"
-                            _conn_text = f"Slow / partial rate limiting · {pass_rate:.0%} pass rate"
-                        elif pass_rate >= 0.05:
-                            _conn_icon = "🔴"
-                            _conn_text = f"Heavy rate limiting · {pass_rate:.0%} pass rate — consider reducing workers"
-                        else:
-                            _conn_icon = "⛔"
-                            _conn_text = f"Near-total rate limit · {pass_rate:.0%} pass rate — stop and reduce workers"
-                        _conn_status.caption(f"{_conn_icon} {_conn_text}")
+            with ThreadPoolExecutor(max_workers=workers_now) as executor:
+                futures = {
+                    executor.submit(process_ticker, (t, mfi_period, range_days)): t
+                    for t in batch
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    passed = result is not None
+                    if passed:
+                        results.append(result)
+                    done          += 1
+                    _window_done  += 1
+                    _window_pass  += int(passed)
 
-                    progress_bar.progress(
-                        pct,
-                        text=f"Scanning... {done}/{total} tickers  ·  {found} returned data  ({last_pct}%)"
-                    )
+                    pct  = done / total
+                    found = len(results)
+
+                    if int(pct * 100) >= last_pct + 2 or done == total:
+                        last_pct = int(pct * 100)
+                        progress_bar.progress(
+                            min(pct, 1.0),
+                            text=(f"Scanning... {done}/{total} tickers  ·  "
+                                  f"{found} returned data  ·  "
+                                  f"{workers_now} workers  ({last_pct}%)")
+                        )
+
+            # ── Evaluate pass rate over last window and adjust workers ──
+            if _window_done >= _WINDOW:
+                pass_rate    = _window_pass / _window_done
+                _window_done = 0
+                _window_pass = 0
+
+                if pass_rate >= 0.40:
+                    # Healthy — ramp up (cap at 12 to stay safe on cloud)
+                    new_workers = min(workers_now + 2, 12)
+                    _icon = "🟢"
+                    _msg  = f"healthy ({pass_rate:.0%}) → ramping up"
+                elif pass_rate >= 0.20:
+                    # Good enough — hold steady
+                    new_workers = workers_now
+                    _icon = "🟢"
+                    _msg  = f"good ({pass_rate:.0%}) → holding at {workers_now}"
+                elif pass_rate >= 0.10:
+                    # Slowing — step down one
+                    new_workers = max(workers_now - 1, 2)
+                    _icon = "🟡"
+                    _msg  = f"slowing ({pass_rate:.0%}) → stepping down"
+                else:
+                    # Throttled — halve and pause to let rate limit reset
+                    new_workers = max(workers_now // 2, 1)
+                    _icon = "🔴"
+                    _msg  = f"throttled ({pass_rate:.0%}) → halving + pausing 15s"
+                    time.sleep(15)
+
+                workers_now = new_workers
+                # Persist adjusted value so sidebar shows current count
+                st.session_state["max_workers_val"] = workers_now
+                _conn_status.caption(
+                    f"{_icon} Workers: **{workers_now}** · {_msg} · "
+                    f"Total found: {len(results)}"
+                )
 
         progress_bar.empty()
         _conn_status.empty()
