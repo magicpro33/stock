@@ -192,12 +192,15 @@ EXCHANGES = {
 
 # Keywords used to detect and exclude non-company securities (ETFs, funds, trusts, etc.)
 # These are matched against the security's longName / shortName from yfinance.
+# ETF/fund keyword list — matched against longName/shortName (lowercase substring).
+# IMPORTANT: only include terms that CANNOT appear in legitimate company names.
+# Removed: "income", "trust", "preferred", "notes", "bond", "treasury", "index",
+#          "fund", "portfolio", "commodity" — these match real operating companies.
 ETF_KEYWORDS = [
-    "etf", "fund", "index", "trust", "ishares", "invesco", "vanguard",
-    "spdr", "proshares", "direxion", "wisdomtree", "vaneck", "schwab",
-    "fidelity select", "global x", "ark ", "pimco", "blackrock",
-    "portfolio", "income", "bond", "treasury", "commodity", "reit index",
-    "preferred", "notes", "debenture", "warrant", "certificate",
+    "etf", "ishares", "invesco", "vanguard", "spdr", "proshares",
+    "direxion", "wisdomtree", "vaneck", "schwab select",
+    "fidelity select", "global x", "ark ", "pimco",
+    "debenture", "warrant",
 ]
 
 # ───────────────────────────────────────────────────────────────
@@ -236,7 +239,7 @@ _defaults = {
     "slider_range_pct":   10.0,
     "slider_mfi_period":  14,
     "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
-    "max_workers_val":    5,
+    "max_workers_val":    5,   # safe default; presets set to 19
     "tog_pe_filter":      False,
     "slider_pe_range":    (0, 50),   # tuple: (min_pe, max_pe)
     "tog_rev_filter":     False,
@@ -280,7 +283,7 @@ with st.sidebar:
         # Turn off valuation filters — momentum setup doesn't require value conditions
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
-        st.session_state["max_workers_val"]    = 19
+        st.session_state["max_workers_val"]    = 8
 
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
@@ -339,7 +342,7 @@ with st.sidebar:
         st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
         st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
         st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
-        st.session_state["max_workers_val"]    = 19
+        st.session_state["max_workers_val"]    = 8
 
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
@@ -1015,12 +1018,18 @@ def process_ticker(args):
     for attempt in range(3):
         try:
             if attempt > 0:
-                time.sleep(attempt * 1.5)   # 1.5s, 3s — skip sleep on first attempt
+                # Exponential backoff with jitter — stagger retries across workers
+                import random
+                time.sleep(attempt * 2.0 + random.uniform(0, 1.0))
 
             stock = yf.Ticker(t)
 
             # ── 1. Info — price, sector, fundamentals ─────────────
             info = stock.info
+            # yfinance returns a minimal dict (< 5 keys) when rate-limited or
+            # when the ticker is invalid. Distinguish the two:
+            # rate-limited dicts often have exactly 1-2 keys like {"trailingPegRatio": None}
+            # invalid tickers return {} or {"regularMarketPrice": None}
             if not info or len(info) < 5:
                 return None
             if is_etf_or_fund(info):
@@ -1319,14 +1328,23 @@ def is_etf_or_fund(info: dict) -> bool:
     """
     Return True if the security is an ETF, index fund, trust, or other
     non-single-company product that should be excluded from the screener.
-    Checks yfinance quoteType first (most reliable), then falls back to
-    name keyword matching.
+
+    Priority order:
+    1. yfinance quoteType (most reliable — "etf", "mutualfund" etc.)
+    2. Name keyword matching (conservative list — no false positives on real companies)
     """
+    # quoteType is the most reliable signal — yfinance classifies it directly
     quote_type = (info.get("quoteType") or "").lower()
-    if quote_type in ("etf", "mutualfund", "index", "future", "option", "currency", "cryptocurrency"):
+    if quote_type in ("etf", "mutualfund", "index", "future", "option",
+                      "currency", "cryptocurrency"):
         return True
 
-    # Fallback — check name for known fund/ETF keywords
+    # EQUITY = definitely a company stock — never exclude based on name alone
+    if quote_type == "equity":
+        return False
+
+    # For anything else (or missing quoteType), check name keywords
+    # Use only unambiguous ETF brand names — NOT generic English words
     name = (info.get("longName") or info.get("shortName") or "").lower()
     return any(kw in name for kw in ETF_KEYWORDS)
 
