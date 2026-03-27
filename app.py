@@ -236,6 +236,7 @@ _defaults = {
     "slider_range_pct":   10.0,
     "slider_mfi_period":  14,
     "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
+    "max_workers_val":    5,
     "tog_pe_filter":      False,
     "slider_pe_range":    (0, 50),
     "tog_rev_filter":     False,
@@ -279,6 +280,7 @@ with st.sidebar:
         # Turn off valuation filters — momentum setup doesn't require value conditions
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
+        st.session_state["max_workers_val"]    = 19
 
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
@@ -337,6 +339,7 @@ with st.sidebar:
         st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
         st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
         st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
+        st.session_state["max_workers_val"]    = 19
 
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
@@ -348,13 +351,25 @@ with st.sidebar:
         st.session_state["tog_OBV"]  = True
         st.session_state["wt_OBV"]   = 4.0
 
-        # MFI ×3 — money flowing in confirms dollars behind the moves, not just share count
-        st.session_state["tog_MFI"]  = True
-        st.session_state["wt_MFI"]   = 3.0
+        # GoldenCross ×3 — insiders buy into confirmed long-term uptrends (50MA > 200MA)
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 3.0
+
+        # MFISweetSpot ×3 — sustained buying pressure without overbought risk
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 3.0
 
         # PCV ×3 — heavy up-day volume = insiders buying aggressively on certain days
         st.session_state["tog_PCV"]  = True
         st.session_state["wt_PCV"]   = 3.0
+
+        # NoBearDiv ×2 — price and MFI aligned higher = accumulation is genuine
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # MACD ×2 — momentum building confirms the accumulation is starting to move price
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 2.0
 
         # RangePosScore ×2 — insiders buy near the low, not after it's already moved
         st.session_state["tog_RangePosScore"] = True
@@ -363,6 +378,10 @@ with st.sidebar:
         # ROIC ×2 — insiders buy companies they know are earning well on capital
         st.session_state["tog_ROIC"] = True
         st.session_state["wt_ROIC"]  = 2.0
+
+        # RSI ×1 — confirm momentum is building without being overbought
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 1.0
 
         # EarningsGrowth ×1 — insiders know earnings direction ahead of the market
         st.session_state["tog_EarningsGrowth"] = True
@@ -560,7 +579,8 @@ with st.sidebar:
     st.header("🔧 Performance")
     max_workers = st.slider(
         "Parallel Workers",
-        min_value=1, max_value=20, value=5, step=1,
+        min_value=1, max_value=20, step=1,
+        key="max_workers_val",
         help="Lower values reduce rate-limiting errors on cloud. Recommended: 3–5 on Streamlit Cloud, 10+ on local PC."
     )
 
@@ -1477,12 +1497,20 @@ with tab_screener:
                 if pd.api.types.is_numeric_dtype(display[col]):
                     display[col] = display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
 
+        # Columns always hidden from display (still used in score calculations)
+        # ROIC, OBV, PCV, RSI, MACD, GoldenCross: used in scoring, hidden from table
+        # MFI: replaced by MFI_Signal label — hide numeric score
+        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI"}
+
         # Hide columns for metrics that are toggled off
-        # Keep MFI_Signal visible whenever MFI column is visible
         all_metric_keys = list(METRICS.keys())
         hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
-        if "MFI" in hidden_cols and "MFI_Signal" in display.columns:
-            hidden_cols.append("MFI_Signal")
+        # Add always-hidden cols
+        hidden_cols += [c for c in ALWAYS_HIDDEN if c in display.columns and c not in hidden_cols]
+        # MFI_Signal: show when MFI metric is toggled ON; hide when toggled off
+        if not metric_enabled.get("MFI", True):
+            if "MFI_Signal" in display.columns:
+                hidden_cols.append("MFI_Signal")
         display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
         styled = display.style.applymap(color_score, subset=["Score"])
