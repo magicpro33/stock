@@ -1165,9 +1165,90 @@ def recompute_indicators(results: list, mfi_period: int, range_days: int) -> lis
 # TICKER LOADERS
 # ───────────────────────────────────────────────────────────────
 
+def _nasdaq_api_all_tickers(exchange: str) -> list:
+    """
+    Fetch ALL tickers from the NASDAQ screener API using pagination.
+
+    The API silently caps each response at ~1000 rows regardless of the
+    limit= parameter. We read totalrecords from the first response then
+    page through with offset= until we have everything.
+
+    Falls back to SEC EDGAR company_tickers_exchange.json if the API fails
+    or returns suspiciously few results (< 500).
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    base    = (f"https://api.nasdaq.com/api/screener/stocks"
+               f"?tableonly=true&limit=1000&exchange={exchange}&offset=")
+
+    all_rows = []
+    try:
+        # ── First page — also tells us the total record count ──────
+        resp  = requests.get(base + "0", headers=headers, timeout=30)
+        resp.raise_for_status()
+        payload   = resp.json().get("data", {})
+        table     = payload.get("table", {})
+        total     = int(table.get("totalrecords", 0) or 0)
+        rows      = table.get("rows", [])
+        all_rows.extend(rows)
+
+        # ── Fetch remaining pages ──────────────────────────────────
+        offset = 1000
+        while offset < total:
+            r = requests.get(base + str(offset), headers=headers, timeout=30)
+            r.raise_for_status()
+            page_rows = r.json().get("data", {}).get("table", {}).get("rows", [])
+            if not page_rows:
+                break
+            all_rows.extend(page_rows)
+            offset += 1000
+
+        tickers = [r["symbol"].strip() for r in all_rows if r.get("symbol")]
+
+        # Sanity check — if we got far fewer than expected, try the fallback
+        if len(tickers) >= 500:
+            return tickers
+
+    except Exception:
+        pass   # fall through to SEC EDGAR
+
+    # ── Fallback: SEC EDGAR full exchange list ─────────────────────
+    # Returns ~9000 exchange-listed US companies in one JSON file.
+    # Field "exchange" is "NYSE", "Nasdaq", "OTC", etc.
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers_exchange.json",
+            headers={"User-Agent": "stockscreener/1.0 contact@example.com"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data    = resp.json()
+        # Structure: {"fields": [...], "data": [[cik, name, ticker, exchange], ...]}
+        fields  = data.get("fields", [])
+        rows    = data.get("data", [])
+        exch_i  = fields.index("exchange") if "exchange" in fields else 3
+        tick_i  = fields.index("ticker")   if "ticker"   in fields else 2
+        target  = "NYSE" if exchange == "nyse" else "Nasdaq"
+        tickers = [
+            row[tick_i].strip().replace(".", "-")
+            for row in rows
+            if len(row) > max(exch_i, tick_i)
+            and str(row[exch_i]).strip().lower() == target.lower()
+            and row[tick_i]
+        ]
+        return tickers
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=86400)   # cache for 24 hours so repeated runs are instant
 def load_tickers(exchange_key: str) -> list:
-    """Return a list of tickers for the chosen exchange."""
+    """
+    Return a deduplicated list of tickers for the chosen exchange.
+
+    NYSE / NASDAQ: paginated NASDAQ screener API (gets the full list, not
+    just the first ~1000), with SEC EDGAR as automatic fallback.
+    S&P 500: Wikipedia table (authoritative, ~503 tickers).
+    """
     if exchange_key == "sp500":
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -1175,20 +1256,8 @@ def load_tickers(exchange_key: str) -> list:
         df = pd.read_html(resp.text)[0]
         return df["Symbol"].str.replace(".", "-", regex=False).tolist()
 
-    elif exchange_key == "nyse":
-        # NASDAQ's free FTP-style screener API works for NYSE too
-        url  = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nyse"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-        resp.raise_for_status()
-        data = resp.json().get("data", {}).get("table", {}).get("rows", [])
-        return [r["symbol"].strip() for r in data if r.get("symbol")]
-
-    elif exchange_key == "nasdaq":
-        url  = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=5000&exchange=nasdaq"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-        resp.raise_for_status()
-        data = resp.json().get("data", {}).get("table", {}).get("rows", [])
-        return [r["symbol"].strip() for r in data if r.get("symbol")]
+    elif exchange_key in ("nyse", "nasdaq"):
+        return _nasdaq_api_all_tickers(exchange_key)
 
     return []
 
