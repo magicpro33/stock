@@ -1144,66 +1144,39 @@ def calculate_roic_trend(fin, bal):
         return None
 
 
-# Shared requests session with hard timeouts injected into yfinance.
-# Every HTTP request made through this session will abort at 8s.
-# Created once at module level so all worker threads share it.
-import requests as _requests
-_YF_SESSION = _requests.Session()
-_YF_SESSION.request = lambda method, url, **kw: (
-    _requests.Session.request(_YF_SESSION, method, url,
-                              timeout=kw.pop("timeout", 8), **kw)
-)
-
-
 def process_ticker(args):
     """
     Fetch all data for one ticker — optimised for minimum wall-clock time.
 
-    Speed improvements vs previous version
-    ----------------------------------------
-    • fast_info instead of .info  — single lightweight call for price/sector/
-      marketcap; avoids the slow full scrape for the initial validity check.
-    • 1y history instead of 2y   — enough for all indicators (200-bar golden
-      cross, 14-day MFI, 20-day OBV), half the download size.
-    • No sequential fallbacks     — try 1y only; if empty use 6mo once.
-    • HTTP timeout = 8s           — every underlying request hard-caps at 8s
-      via the shared _YF_SESSION; hangs can't exceed this.
-    • Single retry only           — on failure return None immediately rather
-      than sleeping and retrying; the dynamic batch engine handles recovery
-      by adjusting worker count.
-    • Fail fast                   — invalid/ETF tickers exit before making
-      any financial statement requests.
+    Speed notes
+    -----------
+    • stock.info         — 1 call for price/sector/fundamentals.
+    • stock.history(1y)  — 1 year is enough for all indicators; fall back
+                           to 6mo if empty.  Previously fetched 2y.
+    • Financials ×3      — fetched once each, shared across all compute fns.
+    • No retry loop      — failed tickers return None immediately; the
+                           dynamic batch engine adjusts worker count.
+    • Hard timeout       — future.result(timeout=12) in the scan loop kills
+                           any ticker that takes >12s wall-clock time.
+    NOTE: Do NOT inject a custom requests Session into yfinance — it breaks
+    the internal cookie/crumb authentication and causes all requests to fail.
     """
     t, mfi_period, range_days = args
     try:
-        stock = yf.Ticker(t, session=_YF_SESSION)
+        stock = yf.Ticker(t)
 
-        # ── 1. Fast info — price + basic validation (1 lightweight call) ──
-        try:
-            fi    = stock.fast_info
-            price = fi.last_price
-            # fast_info returns None values for invalid/delisted tickers
-            if not price or price <= 0:
-                return None
-            sector    = getattr(fi, "exchange", None)   # exchange as proxy; full sector from info later
-            mkt_cap   = getattr(fi, "market_cap", None)
-        except Exception:
-            return None
-
-        # ── 2. Full info — sector, fundamentals, growth rates ──────────
-        # Only fetched after fast_info confirms ticker is valid
+        # ── 1. Info — price, ETF check, sector, fundamentals ──────────
         try:
             info = stock.info or {}
         except Exception:
-            info = {}
+            return None
 
         if not info or len(info) < 5:
             return None
         if is_etf_or_fund(info):
             return None
 
-        # Prefer fast_info price (more current) then fall back to info
-        price = price or info.get("currentPrice") or info.get("regularMarketPrice")
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
         if not price:
             return None
 
@@ -1257,7 +1230,7 @@ def process_ticker(args):
             "Ticker":         t,
             "Sector":         info.get("sector", "Unknown"),
             "Price":          price,
-            "MarketCap":      info.get("marketCap") or mkt_cap,
+            "MarketCap":      info.get("marketCap"),
             "P/E":            info.get("trailingPE"),
             "OwnerEarnings":  owner_earnings,
             "OE_Yield":       oe_yield,
