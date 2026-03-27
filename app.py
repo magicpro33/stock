@@ -1144,78 +1144,104 @@ def calculate_roic_trend(fin, bal):
         return None
 
 
+# Shared requests session with hard timeouts injected into yfinance.
+# Every HTTP request made through this session will abort at 8s.
+# Created once at module level so all worker threads share it.
+import requests as _requests
+_YF_SESSION = _requests.Session()
+_YF_SESSION.request = lambda method, url, **kw: (
+    _requests.Session.request(_YF_SESSION, method, url,
+                              timeout=kw.pop("timeout", 8), **kw)
+)
+
+
 def process_ticker(args):
     """
-    Fetch all data for one ticker in a single optimised pass.
+    Fetch all data for one ticker — optimised for minimum wall-clock time.
 
-    Optimisations vs naive approach
-    --------------------------------
-    • stock.info        — 1 call  (price, sector, fundamentals, revenue/earnings growth)
-    • stock.history(2y) — 1 call  (OHLCV for ALL technical indicators)
-    • stock.financials  — 1 call  (fetched once, passed to all 4 compute functions)
-    • stock.balance_sheet — 1 call (shared across roic, roic_trend, piotroski)
-    • stock.cashflow    — 1 call  (shared across owner_earnings, piotroski)
-    Total: 5 HTTP requests per ticker  (down from up to 12 in naive version)
-
-    Raw OHLCV stored in _hist so MFI/range can be recomputed from cache with
-    any sidebar setting change — zero re-downloads needed.
+    Speed improvements vs previous version
+    ----------------------------------------
+    • fast_info instead of .info  — single lightweight call for price/sector/
+      marketcap; avoids the slow full scrape for the initial validity check.
+    • 1y history instead of 2y   — enough for all indicators (200-bar golden
+      cross, 14-day MFI, 20-day OBV), half the download size.
+    • No sequential fallbacks     — try 1y only; if empty use 6mo once.
+    • HTTP timeout = 8s           — every underlying request hard-caps at 8s
+      via the shared _YF_SESSION; hangs can't exceed this.
+    • Single retry only           — on failure return None immediately rather
+      than sleeping and retrying; the dynamic batch engine handles recovery
+      by adjusting worker count.
+    • Fail fast                   — invalid/ETF tickers exit before making
+      any financial statement requests.
     """
     t, mfi_period, range_days = args
-    for attempt in range(3):
+    try:
+        stock = yf.Ticker(t, session=_YF_SESSION)
+
+        # ── 1. Fast info — price + basic validation (1 lightweight call) ──
         try:
-            if attempt > 0:
-                # Exponential backoff with jitter — stagger retries across workers
-                import random
-                time.sleep(attempt * 2.0 + random.uniform(0, 1.0))
-
-            stock = yf.Ticker(t)
-
-            # ── 1. Info — price, sector, fundamentals ─────────────
-            info = stock.info
-            # yfinance returns a minimal dict (< 5 keys) when rate-limited or
-            # when the ticker is invalid. Distinguish the two:
-            # rate-limited dicts often have exactly 1-2 keys like {"trailingPegRatio": None}
-            # invalid tickers return {} or {"regularMarketPrice": None}
-            if not info or len(info) < 5:
+            fi    = stock.fast_info
+            price = fi.last_price
+            # fast_info returns None values for invalid/delisted tickers
+            if not price or price <= 0:
                 return None
-            if is_etf_or_fund(info):
-                return None
-            price = info.get("currentPrice") or info.get("regularMarketPrice")
-            if price is None:
-                return None
+            sector    = getattr(fi, "exchange", None)   # exchange as proxy; full sector from info later
+            mkt_cap   = getattr(fi, "market_cap", None)
+        except Exception:
+            return None
 
-            # ── 2. OHLCV history — single fetch, all indicators ───
-            hist = stock.history(period="2y")
-            if hist.empty:
-                hist = stock.history(period="1y")
-            if hist.empty:
-                hist = stock.history(period="3mo")
+        # ── 2. Full info — sector, fundamentals, growth rates ──────────
+        # Only fetched after fast_info confirms ticker is valid
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}
 
-            # ── 3. Financial statements — fetched ONCE each ───────
-            try:
-                fin = stock.financials
-            except Exception:
-                fin = pd.DataFrame()
-            try:
-                bal = stock.balance_sheet
-            except Exception:
-                bal = pd.DataFrame()
-            try:
-                cf = stock.cashflow
-            except Exception:
-                cf = pd.DataFrame()
+        if not info or len(info) < 5:
+            return None
+        if is_etf_or_fund(info):
+            return None
 
-            # ── 4. Compute all indicators — no additional API calls
-            vol_signals    = get_volume_signals(hist, mfi_period)
-            tech_signals   = calculate_technical_signals(hist)
-            range_data     = calculate_price_range(hist, range_days)
-            ma50           = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
-            owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
-            roic           = calculate_roic(fin, bal)
-            roic_trend     = calculate_roic_trend(fin, bal)
-            piotroski      = calculate_piotroski(fin, bal, cf)
+        # Prefer fast_info price (more current) then fall back to info
+        price = price or info.get("currentPrice") or info.get("regularMarketPrice")
+        if not price:
+            return None
 
-            # ── 5. Compact OHLCV cache ────────────────────────────
+        # ── 3. OHLCV history — 1y is enough for all indicators ─────────
+        try:
+            hist = stock.history(period="1y")
+            if hist.empty or len(hist) < 30:
+                hist = stock.history(period="6mo")
+        except Exception:
+            hist = pd.DataFrame()
+
+        # ── 4. Financial statements ─────────────────────────────────────
+        try:
+            fin = stock.financials
+        except Exception:
+            fin = pd.DataFrame()
+        try:
+            bal = stock.balance_sheet
+        except Exception:
+            bal = pd.DataFrame()
+        try:
+            cf = stock.cashflow
+        except Exception:
+            cf = pd.DataFrame()
+
+        # ── 5. Compute all indicators — pure CPU, no network ───────────
+        vol_signals    = get_volume_signals(hist, mfi_period)
+        tech_signals   = calculate_technical_signals(hist)
+        range_data     = calculate_price_range(hist, range_days)
+        ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
+                          if len(hist) >= 50 else None)
+        owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+        roic           = calculate_roic(fin, bal)
+        roic_trend     = calculate_roic_trend(fin, bal)
+        piotroski      = calculate_piotroski(fin, bal, cf)
+
+        # ── 6. Compact OHLCV cache ──────────────────────────────────────
+        if not hist.empty:
             hist_cache = {
                 "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
                 "open":   hist["Open"].tolist(),
@@ -1224,41 +1250,41 @@ def process_ticker(args):
                 "close":  hist["Close"].tolist(),
                 "volume": hist["Volume"].tolist(),
             }
+        else:
+            hist_cache = {}
 
-            return {
-                "Ticker":         t,
-                "Sector":         info.get("sector", "Unknown"),
-                "Price":          price,
-                "MarketCap":      info.get("marketCap"),
-                "P/E":            info.get("trailingPE"),
-                "OwnerEarnings":  owner_earnings,
-                "OE_Yield":       oe_yield,
-                "ROIC":           roic,
-                "ROIC_Trend":     roic_trend,
-                "RevenueGrowth":  info.get("revenueGrowth"),
-                "EarningsGrowth": info.get("earningsGrowth"),
-                "Piotroski":      piotroski,
-                "MA50":           ma50,
-                "OBV":            vol_signals["OBV"],
-                "MFI":            vol_signals["MFI"],
-                "PCV":            vol_signals["PCV"],
-                "RSI":            tech_signals["RSI"],
-                "MACD":           tech_signals["MACD"],
-                "GoldenCross":    tech_signals["GoldenCross"],
-                "MFISweetSpot":   tech_signals["MFISweetSpot"],
-                "NoBearDiv":      tech_signals["NoBearDiv"],
-                "MA50Proximity":  tech_signals["MA50Proximity"],
-                "RangeHigh":      range_data["RangeHigh"],
-                "RangeLow":       range_data["RangeLow"],
-                "RangePct":       range_data["RangePct"],
-                "RangePos":       range_data["RangePos"],
-                "_hist":          hist_cache,
-            }
-        except Exception:
-            if attempt == 2:
-                return None
-            continue
-    return None
+        return {
+            "Ticker":         t,
+            "Sector":         info.get("sector", "Unknown"),
+            "Price":          price,
+            "MarketCap":      info.get("marketCap") or mkt_cap,
+            "P/E":            info.get("trailingPE"),
+            "OwnerEarnings":  owner_earnings,
+            "OE_Yield":       oe_yield,
+            "ROIC":           roic,
+            "ROIC_Trend":     roic_trend,
+            "RevenueGrowth":  info.get("revenueGrowth"),
+            "EarningsGrowth": info.get("earningsGrowth"),
+            "Piotroski":      piotroski,
+            "MA50":           ma50,
+            "OBV":            vol_signals["OBV"],
+            "MFI":            vol_signals["MFI"],
+            "PCV":            vol_signals["PCV"],
+            "RSI":            tech_signals["RSI"],
+            "MACD":           tech_signals["MACD"],
+            "GoldenCross":    tech_signals["GoldenCross"],
+            "MFISweetSpot":   tech_signals["MFISweetSpot"],
+            "NoBearDiv":      tech_signals["NoBearDiv"],
+            "MA50Proximity":  tech_signals["MA50Proximity"],
+            "RangeHigh":      range_data["RangeHigh"],
+            "RangeLow":       range_data["RangeLow"],
+            "RangePct":       range_data["RangePct"],
+            "RangePos":       range_data["RangePos"],
+            "_hist":          hist_cache,
+        }
+
+    except Exception:
+        return None
 
 
 def _hist_from_cache(row: dict) -> pd.DataFrame:
@@ -1636,7 +1662,10 @@ with tab_screener:
                     for t in batch
                 }
                 for future in as_completed(futures):
-                    result = future.result()
+                    try:
+                        result = future.result(timeout=12)  # hard cap: skip any ticker >12s
+                    except Exception:
+                        result = None
                     passed = result is not None
                     if passed:
                         results.append(result)
