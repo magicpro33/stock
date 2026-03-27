@@ -1492,6 +1492,24 @@ with tab_screener:
     df = pd.DataFrame(results)
     df.replace(["N/A", "None", "-", ""], pd.NA, inplace=True)
 
+    # ── Ensure ALL expected columns exist — fills missing ones with 0/NaN ──
+    # This prevents KeyError crashes when cached data predates new metrics
+    # or when recompute_indicators couldn't rebuild them (missing _hist).
+    _zero_cols = ["OBV", "MFI", "PCV", "RSI", "MACD", "GoldenCross",
+                  "MFISweetSpot", "NoBearDiv", "MA50Proximity",
+                  "OE_Yield", "ROIC", "ROIC_Trend", "Piotroski",
+                  "RevenueGrowth", "EarningsGrowth", "RangePct",
+                  "RangePos", "RangeHigh", "RangeLow", "MA50"]
+    for _c in _zero_cols:
+        if _c not in df.columns:
+            df[_c] = 0.0
+    for _c in ["Price", "MarketCap", "P/E", "OwnerEarnings"]:
+        if _c not in df.columns:
+            df[_c] = np.nan
+    for _c in ["Ticker", "Sector"]:
+        if _c not in df.columns:
+            df[_c] = ""
+
     numeric_cols = ["Price", "MA50", "RangeHigh", "RangeLow", "RangePct", "RangePos",
                     "MarketCap", "P/E", "OwnerEarnings", "OE_Yield",
                     "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
@@ -1507,80 +1525,77 @@ with tab_screener:
         if vol_col in df.columns:
             df[vol_col] = df[vol_col].fillna(0)
 
-    # ── Sector filter — applied here using yfinance sector (authoritative) ──
+    # ── Sector filter ──────────────────────────────────────────────
     if sector != "All Sectors":
         df = df[df["Sector"].str.strip().str.lower() == sector.strip().lower()]
         if df.empty:
             st.error(f"No results found for sector: **{sector}**. The sector name may differ from yfinance labels.")
             st.stop()
 
-    df["P/E"]           = df["P/E"].round(2)
-    df["OE_Yield"]      = df["OE_Yield"].round(2)
-    df["ROIC"]          = df["ROIC"].round(2)
-    df["ROIC_Trend"]    = df["ROIC_Trend"].round(2)
-    df["OBV"]           = df["OBV"].round(2)
-    df["MFI"]           = df["MFI"].round(2)
-    # MFI signal label based on raw score (0–1 = MFI 0–100)
+    # Safe round helper — only rounds if column exists and is numeric
+    def _safe_round(col, decimals=2):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(decimals)
+
+    _safe_round("P/E");  _safe_round("OE_Yield"); _safe_round("ROIC")
+    _safe_round("ROIC_Trend"); _safe_round("OBV"); _safe_round("MFI")
+    _safe_round("PCV"); _safe_round("MA50"); _safe_round("RangeHigh")
+    _safe_round("RangeLow"); _safe_round("RangePct"); _safe_round("RangePos", 4)
+
+    # MFI signal label
     def _mfi_signal(v):
         if pd.isna(v):   return "—"
-        mfi = v * 100    # convert back to 0–100 scale for labelling
+        mfi = v * 100
         if mfi >= 80:    return "🔥 Overbought"
         if mfi >= 60:    return "📈 Buying"
         if mfi >= 40:    return "➡️ Neutral"
         if mfi >= 20:    return "📉 Selling"
         return "🧊 Oversold"
     df["MFI_Signal"] = df["MFI"].apply(_mfi_signal)
-    df["PCV"]           = df["PCV"].round(2)
-    df["MA50"]          = pd.to_numeric(df["MA50"], errors="coerce").round(2)
-    df["RangeHigh"]     = pd.to_numeric(df["RangeHigh"], errors="coerce").round(2)
-    df["RangeLow"]      = pd.to_numeric(df["RangeLow"],  errors="coerce").round(2)
-    df["RangePct"]      = pd.to_numeric(df["RangePct"],  errors="coerce").round(2)
-    df["RangePos"]      = pd.to_numeric(df["RangePos"],  errors="coerce").round(4)
-    # RangePosScore = 1 - RangePos: price at range LOW = 1.0 (best), at HIGH = 0.0
+
+    # RangePosScore = 1 − RangePos
     df["RangePosScore"] = (1 - df["RangePos"].fillna(0.5)).round(4)
 
-    # Dynamic score — use sidebar weight sliders, skip disabled metrics
+    # ── Dynamic score — safe column access, never KeyErrors ───────
     score = pd.Series(0.0, index=df.index)
     for key in METRICS:
         if metric_enabled.get(key, False):
             w = metric_weight.get(key, METRICS[key]["weight"])
-            score += df[key].fillna(0) * w
+            if key in df.columns:
+                score += pd.to_numeric(df[key], errors="coerce").fillna(0) * w
+            # If column is missing, contributes 0 — doesn't crash
     df["Score"] = score.round(2)
 
-    # Apply filters
+    # ── Apply filters — all use safe NaN-aware boolean masks ──────
     under_price = df["Price"].isna() | (df["Price"] <= max_price)
-    # Only apply score threshold when at least one metric is active —
-    # if all metrics are off the score is 0 for everything, so filtering by score
-    # would return nothing. Instead sort by RangePct (tightest range first).
+
     if active_metrics:
         above_score = df["Score"] >= min_score
     else:
         above_score = pd.Series(True, index=df.index)
+
+    ma50_col = pd.to_numeric(df.get("MA50", pd.Series(np.nan, index=df.index)), errors="coerce")
     if use_ma50_filter == "below":
-        below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] <= df["MA50"])
+        below_ma50 = df["Price"].isna() | ma50_col.isna() | (df["Price"] <= ma50_col)
     elif use_ma50_filter == "above":
-        below_ma50 = df["Price"].isna() | df["MA50"].isna() | (df["Price"] >= df["MA50"])
+        below_ma50 = df["Price"].isna() | ma50_col.isna() | (df["Price"] >= ma50_col)
     else:
         below_ma50 = pd.Series(True, index=df.index)
 
-    # Price range filter — keep only stocks whose range width is within max_range_pct
     if use_range_filter:
-        in_range = df["RangePct"].isna() | (df["RangePct"] <= range_max_pct)
+        rng_col = pd.to_numeric(df.get("RangePct", pd.Series(np.nan, index=df.index)), errors="coerce")
+        in_range = rng_col.isna() | (rng_col <= range_max_pct)
     else:
         in_range = pd.Series(True, index=df.index)
 
-    # P/E ratio filter — exclude stocks outside the selected range
-    # Stocks with NaN P/E (no earnings) are excluded when the filter is active
     if use_pe_filter:
-        pe_series = pd.to_numeric(df["P/E"], errors="coerce")
+        pe_series = pd.to_numeric(df.get("P/E", pd.Series(np.nan, index=df.index)), errors="coerce")
         in_pe = pe_series.notna() & (pe_series >= pe_min) & (pe_series <= pe_max)
     else:
         in_pe = pd.Series(True, index=df.index)
 
-    # TTM Revenue Growth filter — minimum threshold in 15% increments
     if use_rev_filter:
-        rev_series = pd.to_numeric(df["RevenueGrowth"], errors="coerce")
-        # RevenueGrowth is stored as a decimal (e.g. 0.15 = 15%)
+        rev_series = pd.to_numeric(df.get("RevenueGrowth", pd.Series(np.nan, index=df.index)), errors="coerce")
         in_rev = rev_series.notna() & (rev_series >= rev_min_idx / 100.0)
     else:
         in_rev = pd.Series(True, index=df.index)
