@@ -1625,6 +1625,78 @@ with tab_screener:
     col3.metric("Avg Score",       f"{screened['Score'].mean():.2f}" if not screened.empty else "—")
     col4.metric("Top Score",       f"{screened['Score'].max():.2f}"  if not screened.empty else "—")
 
+    # ── Filter diagnostic panel — shows exactly why stocks are blocked ──
+    if screened.empty and not df.empty:
+        with st.expander("🔬 Filter Diagnostics — why are 0 stocks passing?", expanded=True):
+            st.markdown("**Live filter counts** — how many stocks survive each gate:")
+            diag_cols = st.columns(3)
+
+            _up  = under_price.sum()
+            _bm  = below_ma50.sum()
+            _as  = above_score.sum()
+            _ir  = in_range.sum()
+            _ip  = in_pe.sum()
+            _iv  = in_rev.sum()
+            _tot = len(df)
+
+            diag_cols[0].metric("Price filter",     f"{_up}/{_tot}",
+                help=f"max_price={max_price}")
+            diag_cols[1].metric("MA50 filter",      f"{_bm}/{_tot}",
+                help=f"mode={use_ma50_filter}")
+            diag_cols[2].metric("Score filter",     f"{_as}/{_tot}",
+                help=f"min_score={min_score:.1f}")
+
+            diag_cols2 = st.columns(3)
+            diag_cols2[0].metric("Range filter",    f"{_ir}/{_tot}",
+                help=f"enabled={use_range_filter}")
+            diag_cols2[1].metric("P/E filter",      f"{_ip}/{_tot}",
+                help=f"enabled={use_pe_filter}")
+            diag_cols2[2].metric("Rev Growth filter", f"{_iv}/{_tot}",
+                help=f"enabled={use_rev_filter}")
+
+            st.markdown("**Combined pass rates** (each gate applied cumulatively):")
+            cum1 = (under_price).sum()
+            cum2 = (under_price & below_ma50).sum()
+            cum3 = (under_price & below_ma50 & above_score).sum()
+            cum4 = (under_price & below_ma50 & above_score & in_range).sum()
+            cum5 = (under_price & below_ma50 & above_score & in_range & in_pe).sum()
+            cum6 = (under_price & below_ma50 & above_score & in_range & in_pe & in_rev).sum()
+            st.markdown(
+                f"After price: **{cum1}** → "
+                f"After MA50: **{cum2}** → "
+                f"After score: **{cum3}** → "
+                f"After range: **{cum4}** → "
+                f"After P/E: **{cum5}** → "
+                f"After rev growth: **{cum6}**"
+            )
+
+            st.markdown("**Sample of top 5 stocks and their scores:**")
+            _sample = df.nlargest(5, "Score")[
+                ["Ticker", "Price", "MA50", "Score"] +
+                [k for k in active_metrics if k in df.columns][:4]
+            ].copy()
+            st.dataframe(_sample, use_container_width=True)
+
+            st.markdown("**Current filter settings:**")
+            st.json({
+                "max_price":         max_price,
+                "min_score":         min_score,
+                "use_ma50_filter":   use_ma50_filter,
+                "use_range_filter":  use_range_filter,
+                "range_max_pct":     range_max_pct if use_range_filter else "off",
+                "use_pe_filter":     use_pe_filter,
+                "pe_range":          f"{pe_min}–{pe_max}" if use_pe_filter else "off",
+                "use_rev_filter":    use_rev_filter,
+                "active_metrics":    active_metrics,
+                "scores_min":        float(df["Score"].min()),
+                "scores_max":        float(df["Score"].max()),
+                "scores_mean":       float(df["Score"].mean()),
+                "price_min":         float(df["Price"].dropna().min()) if not df["Price"].dropna().empty else "N/A",
+                "price_max":         float(df["Price"].dropna().max()) if not df["Price"].dropna().empty else "N/A",
+                "ma50_above_count":  int((df["Price"] >= df["MA50"]).sum()),
+                "ma50_below_count":  int((df["Price"] < df["MA50"]).sum()),
+            })
+
     st.divider()
 
     if screened.empty:
