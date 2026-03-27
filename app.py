@@ -1167,58 +1167,59 @@ def recompute_indicators(results: list, mfi_period: int, range_days: int) -> lis
 
 def _fetch_exchange_tickers(exchange: str) -> list:
     """
-    Fetch ALL tickers for NYSE or NASDAQ using three independent sources,
-    tried in order. Returns as soon as one source gives a credible full list.
+    Fetch ALL tickers for NYSE or NASDAQ.
 
-    Source 1 — NASDAQ FTP CSV (most complete, ~8000 tickers across both exchanges)
-    Source 2 — NASDAQ screener API with proper pagination + comma-safe int parsing
-    Source 3 — SEC EDGAR company_tickers_exchange.json (authoritative fallback)
+    Source 1 — NASDAQ Trader symbol directory (official, pipe-delimited, no pagination)
+      nasdaqlisted.txt  ~3 300 NASDAQ tickers in one request
+      otherlisted.txt   ~3 000 NYSE/AMEX/Arca tickers in one request
+    Source 2 — NASDAQ screener API, paginated with explicit offset loop
+    Source 3 — SEC EDGAR company_tickers_exchange.json
     """
-    headers  = {"User-Agent": "Mozilla/5.0"}
-    exch_up  = exchange.upper()   # "NYSE" or "NASDAQ"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; stockscreener/2.0)",
+        "Accept":     "text/plain,application/json,*/*",
+    }
 
-    # ── Source 1: NASDAQ FTP-style CSV files ──────────────────────
-    # These are the same files used by most financial data providers.
-    # nasdaqlisted.txt  — all NASDAQ-listed securities
-    # otherlisted.txt   — all non-NASDAQ exchange securities (includes NYSE, AMEX)
+    # ── Source 1: NASDAQ Trader symbol directory (correct domain) ──
+    # www.nasdaqtrader.com/dynamic/SymDir/ — official NASDAQ data feeds
+    # Single GET, no pagination, pipe-delimited, ETF + test-issue flags built in.
     try:
         if exchange == "nasdaq":
-            url = "https://ftp.namedservices.nasdaq.com/symboldirectory/nasdaqlisted.txt"
+            url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
         else:
-            url = "https://ftp.namedservices.nasdaq.com/symboldirectory/otherlisted.txt"
+            url = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
-        lines = resp.text.strip().splitlines()
+        lines = [l for l in resp.text.strip().splitlines() if l.strip()]
 
-        # Format: Symbol|Security Name|Market Category|...|ETF|...|Test Issue
-        # Header is first line, last line is a file-creation timestamp
         if len(lines) > 2:
             header = [h.strip() for h in lines[0].split("|")]
-            sym_i  = header.index("Symbol")   if "Symbol"   in header else 0
-            etf_i  = header.index("ETF")      if "ETF"      in header else None
+            sym_i  = header.index("Symbol")     if "Symbol"     in header else 0
+            etf_i  = header.index("ETF")        if "ETF"        in header else None
             test_i = header.index("Test Issue") if "Test Issue" in header else None
-            exch_i = header.index("Exchange") if "Exchange" in header else None
+            exch_i = header.index("Exchange")   if "Exchange"   in header else None
 
             tickers = []
-            for line in lines[1:-1]:   # skip header + trailing timestamp line
+            for line in lines[1:]:
+                # Last line is a file-creation date stamp — skip it
+                if line.startswith("File Creation Time"):
+                    continue
                 parts = line.split("|")
                 if len(parts) <= sym_i:
                     continue
                 sym = parts[sym_i].strip()
                 if not sym or sym == "Symbol":
                     continue
-                # Skip ETFs
-                if etf_i is not None and len(parts) > etf_i and parts[etf_i].strip() == "Y":
+                if etf_i  is not None and len(parts) > etf_i  and parts[etf_i].strip()  == "Y":
                     continue
-                # Skip test issues
                 if test_i is not None and len(parts) > test_i and parts[test_i].strip() == "Y":
                     continue
-                # For otherlisted, filter to the right exchange
-                if exch_i is not None and exchange != "nasdaq":
+                # otherlisted: filter by exchange code
+                # N = NYSE, A = NYSE American (AMEX), P = NYSE Arca, Z = BATS, V = Investors Exchange
+                if exch_i is not None and exchange == "nyse":
                     exch_val = parts[exch_i].strip() if len(parts) > exch_i else ""
-                    # NYSE = "N", NYSE American (AMEX) = "A", NYSE Arca = "P"
-                    if exchange == "nyse" and exch_val not in ("N", "A", "P"):
+                    if exch_val not in ("N", "A", "P", "Z", "V"):
                         continue
                 tickers.append(sym.replace(".", "-"))
 
@@ -1227,7 +1228,9 @@ def _fetch_exchange_tickers(exchange: str) -> list:
     except Exception:
         pass
 
-    # ── Source 2: NASDAQ screener API with full pagination ────────
+    # ── Source 2: NASDAQ screener API, fully paginated ────────────
+    # Read totalrecords, then loop through all offset pages explicitly.
+    # Do NOT break on empty page_rows — always loop to total.
     try:
         base = (f"https://api.nasdaq.com/api/screener/stocks"
                 f"?tableonly=true&limit=1000&exchange={exchange}&offset=")
@@ -1237,21 +1240,21 @@ def _fetch_exchange_tickers(exchange: str) -> list:
         resp.raise_for_status()
         table = resp.json().get("data", {}).get("table", {}) or {}
 
-        # totalrecords is a STRING and may contain commas e.g. "2,456"
+        # totalrecords arrives as a string, sometimes with commas
         raw_total = str(table.get("totalrecords") or "0")
         total     = int(raw_total.replace(",", "").strip() or "0")
-        rows      = table.get("rows") or []
-        all_rows.extend(rows)
+        first_rows = table.get("rows") or []
+        all_rows.extend(first_rows)
 
-        offset = 1000
-        while offset < total:
-            pr = requests.get(base + str(offset), headers=headers, timeout=30)
-            pr.raise_for_status()
-            page_rows = (pr.json().get("data", {}).get("table", {}) or {}).get("rows") or []
-            if not page_rows:
-                break
-            all_rows.extend(page_rows)
-            offset += 1000
+        # Fetch every remaining page — do NOT break early on empty response
+        for offset in range(1000, total, 1000):
+            try:
+                pr = requests.get(base + str(offset), headers=headers, timeout=30)
+                pr.raise_for_status()
+                page_rows = (pr.json().get("data", {}).get("table", {}) or {}).get("rows") or []
+                all_rows.extend(page_rows)
+            except Exception:
+                continue   # skip one bad page, keep going
 
         tickers = [row["symbol"].strip() for row in all_rows
                    if isinstance(row, dict) and row.get("symbol")]
@@ -1260,11 +1263,11 @@ def _fetch_exchange_tickers(exchange: str) -> list:
     except Exception:
         pass
 
-    # ── Source 3: SEC EDGAR full exchange list ────────────────────
+    # ── Source 3: SEC EDGAR company_tickers_exchange.json ─────────
     try:
         resp = requests.get(
             "https://www.sec.gov/files/company_tickers_exchange.json",
-            headers={"User-Agent": "stockscreener/1.0 contact@example.com"},
+            headers={"User-Agent": "stockscreener/2.0 contact@example.com"},
             timeout=30,
         )
         resp.raise_for_status()
@@ -1290,10 +1293,7 @@ def _fetch_exchange_tickers(exchange: str) -> list:
 def load_tickers(exchange_key: str) -> list:
     """
     Return a deduplicated list of tickers for the chosen exchange.
-
-    NYSE / NASDAQ: paginated NASDAQ screener API (gets the full list, not
-    just the first ~1000), with SEC EDGAR as automatic fallback.
-    S&P 500: Wikipedia table (authoritative, ~503 tickers).
+    Results cached for 24 hours — clear cache if count looks wrong.
     """
     if exchange_key == "sp500":
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -1303,7 +1303,15 @@ def load_tickers(exchange_key: str) -> list:
         return df["Symbol"].str.replace(".", "-", regex=False).tolist()
 
     elif exchange_key in ("nyse", "nasdaq"):
-        return _fetch_exchange_tickers(exchange_key)
+        tickers = _fetch_exchange_tickers(exchange_key)
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        return unique
 
     return []
 
