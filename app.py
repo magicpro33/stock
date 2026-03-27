@@ -1165,55 +1165,102 @@ def recompute_indicators(results: list, mfi_period: int, range_days: int) -> lis
 # TICKER LOADERS
 # ───────────────────────────────────────────────────────────────
 
-def _nasdaq_api_all_tickers(exchange: str) -> list:
+def _fetch_exchange_tickers(exchange: str) -> list:
     """
-    Fetch ALL tickers from the NASDAQ screener API using pagination.
+    Fetch ALL tickers for NYSE or NASDAQ using three independent sources,
+    tried in order. Returns as soon as one source gives a credible full list.
 
-    The API silently caps each response at ~1000 rows regardless of the
-    limit= parameter. We read totalrecords from the first response then
-    page through with offset= until we have everything.
-
-    Falls back to SEC EDGAR company_tickers_exchange.json if the API fails
-    or returns suspiciously few results (< 500).
+    Source 1 — NASDAQ FTP CSV (most complete, ~8000 tickers across both exchanges)
+    Source 2 — NASDAQ screener API with proper pagination + comma-safe int parsing
+    Source 3 — SEC EDGAR company_tickers_exchange.json (authoritative fallback)
     """
-    headers = {"User-Agent": "Mozilla/5.0"}
-    base    = (f"https://api.nasdaq.com/api/screener/stocks"
-               f"?tableonly=true&limit=1000&exchange={exchange}&offset=")
+    headers  = {"User-Agent": "Mozilla/5.0"}
+    exch_up  = exchange.upper()   # "NYSE" or "NASDAQ"
 
-    all_rows = []
+    # ── Source 1: NASDAQ FTP-style CSV files ──────────────────────
+    # These are the same files used by most financial data providers.
+    # nasdaqlisted.txt  — all NASDAQ-listed securities
+    # otherlisted.txt   — all non-NASDAQ exchange securities (includes NYSE, AMEX)
     try:
-        # ── First page — also tells us the total record count ──────
+        if exchange == "nasdaq":
+            url = "https://ftp.namedservices.nasdaq.com/symboldirectory/nasdaqlisted.txt"
+        else:
+            url = "https://ftp.namedservices.nasdaq.com/symboldirectory/otherlisted.txt"
+
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        lines = resp.text.strip().splitlines()
+
+        # Format: Symbol|Security Name|Market Category|...|ETF|...|Test Issue
+        # Header is first line, last line is a file-creation timestamp
+        if len(lines) > 2:
+            header = [h.strip() for h in lines[0].split("|")]
+            sym_i  = header.index("Symbol")   if "Symbol"   in header else 0
+            etf_i  = header.index("ETF")      if "ETF"      in header else None
+            test_i = header.index("Test Issue") if "Test Issue" in header else None
+            exch_i = header.index("Exchange") if "Exchange" in header else None
+
+            tickers = []
+            for line in lines[1:-1]:   # skip header + trailing timestamp line
+                parts = line.split("|")
+                if len(parts) <= sym_i:
+                    continue
+                sym = parts[sym_i].strip()
+                if not sym or sym == "Symbol":
+                    continue
+                # Skip ETFs
+                if etf_i is not None and len(parts) > etf_i and parts[etf_i].strip() == "Y":
+                    continue
+                # Skip test issues
+                if test_i is not None and len(parts) > test_i and parts[test_i].strip() == "Y":
+                    continue
+                # For otherlisted, filter to the right exchange
+                if exch_i is not None and exchange != "nasdaq":
+                    exch_val = parts[exch_i].strip() if len(parts) > exch_i else ""
+                    # NYSE = "N", NYSE American (AMEX) = "A", NYSE Arca = "P"
+                    if exchange == "nyse" and exch_val not in ("N", "A", "P"):
+                        continue
+                tickers.append(sym.replace(".", "-"))
+
+            if len(tickers) >= 500:
+                return tickers
+    except Exception:
+        pass
+
+    # ── Source 2: NASDAQ screener API with full pagination ────────
+    try:
+        base = (f"https://api.nasdaq.com/api/screener/stocks"
+                f"?tableonly=true&limit=1000&exchange={exchange}&offset=")
+        all_rows = []
+
         resp  = requests.get(base + "0", headers=headers, timeout=30)
         resp.raise_for_status()
-        payload   = resp.json().get("data", {})
-        table     = payload.get("table", {})
-        total     = int(table.get("totalrecords", 0) or 0)
-        rows      = table.get("rows", [])
+        table = resp.json().get("data", {}).get("table", {}) or {}
+
+        # totalrecords is a STRING and may contain commas e.g. "2,456"
+        raw_total = str(table.get("totalrecords") or "0")
+        total     = int(raw_total.replace(",", "").strip() or "0")
+        rows      = table.get("rows") or []
         all_rows.extend(rows)
 
-        # ── Fetch remaining pages ──────────────────────────────────
         offset = 1000
         while offset < total:
-            r = requests.get(base + str(offset), headers=headers, timeout=30)
-            r.raise_for_status()
-            page_rows = r.json().get("data", {}).get("table", {}).get("rows", [])
+            pr = requests.get(base + str(offset), headers=headers, timeout=30)
+            pr.raise_for_status()
+            page_rows = (pr.json().get("data", {}).get("table", {}) or {}).get("rows") or []
             if not page_rows:
                 break
             all_rows.extend(page_rows)
             offset += 1000
 
-        tickers = [r["symbol"].strip() for r in all_rows if r.get("symbol")]
-
-        # Sanity check — if we got far fewer than expected, try the fallback
+        tickers = [row["symbol"].strip() for row in all_rows
+                   if isinstance(row, dict) and row.get("symbol")]
         if len(tickers) >= 500:
             return tickers
-
     except Exception:
-        pass   # fall through to SEC EDGAR
+        pass
 
-    # ── Fallback: SEC EDGAR full exchange list ─────────────────────
-    # Returns ~9000 exchange-listed US companies in one JSON file.
-    # Field "exchange" is "NYSE", "Nasdaq", "OTC", etc.
+    # ── Source 3: SEC EDGAR full exchange list ────────────────────
     try:
         resp = requests.get(
             "https://www.sec.gov/files/company_tickers_exchange.json",
@@ -1221,13 +1268,12 @@ def _nasdaq_api_all_tickers(exchange: str) -> list:
             timeout=30,
         )
         resp.raise_for_status()
-        data    = resp.json()
-        # Structure: {"fields": [...], "data": [[cik, name, ticker, exchange], ...]}
-        fields  = data.get("fields", [])
-        rows    = data.get("data", [])
-        exch_i  = fields.index("exchange") if "exchange" in fields else 3
-        tick_i  = fields.index("ticker")   if "ticker"   in fields else 2
-        target  = "NYSE" if exchange == "nyse" else "Nasdaq"
+        data   = resp.json()
+        fields = data.get("fields", [])
+        rows   = data.get("data", [])
+        exch_i = fields.index("exchange") if "exchange" in fields else 3
+        tick_i = fields.index("ticker")   if "ticker"   in fields else 2
+        target = "NYSE" if exchange == "nyse" else "Nasdaq"
         tickers = [
             row[tick_i].strip().replace(".", "-")
             for row in rows
@@ -1257,7 +1303,7 @@ def load_tickers(exchange_key: str) -> list:
         return df["Symbol"].str.replace(".", "-", regex=False).tolist()
 
     elif exchange_key in ("nyse", "nasdaq"):
-        return _nasdaq_api_all_tickers(exchange_key)
+        return _fetch_exchange_tickers(exchange_key)
 
     return []
 
@@ -1366,6 +1412,16 @@ with tab_screener:
         if not tickers:
             st.error(f"No tickers returned for {exchange}. Try again later.")
             st.stop()
+
+        # Warn if count looks suspiciously low (pagination may have failed)
+        expected_min = {"sp500": 400, "nyse": 1500, "nasdaq": 2000}
+        if len(tickers) < expected_min.get(exchange_key, 400):
+            st.warning(
+                f"⚠️ Only **{len(tickers)}** tickers loaded for {exchange} "
+                f"(expected {expected_min.get(exchange_key, '?')}+). "
+                f"The ticker source may be rate-limited — results will be incomplete. "
+                f"Try clearing the 24hr cache and reloading."
+            )
 
         st.info(
             f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
