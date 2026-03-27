@@ -316,7 +316,7 @@ _defaults = {
     "slider_range_pct":   10.0,
     "slider_mfi_period":  14,
     "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
-    "max_workers_val":    5,   # safe default; presets set to 19
+    "max_workers_val":    12,  # starting value; auto-adjusts during scan
     "tog_pe_filter":      False,
     "slider_pe_range":    (0, 50),   # tuple: (min_pe, max_pe)
     "tog_rev_filter":     False,
@@ -360,8 +360,6 @@ with st.sidebar:
         # Turn off valuation filters — momentum setup doesn't require value conditions
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
-        st.session_state["max_workers_val"]    = 8
-
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
@@ -419,8 +417,6 @@ with st.sidebar:
         st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
         st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
         st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
-        st.session_state["max_workers_val"]    = 8
-
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
@@ -656,12 +652,10 @@ with st.sidebar:
 
     st.divider()
     st.header("🔧 Performance")
-    max_workers = st.slider(
-        "Parallel Workers",
-        min_value=1, max_value=20, step=1,
-        key="max_workers_val",
-        help="Lower values reduce rate-limiting errors on cloud. Recommended: 3–5 on Streamlit Cloud, 10+ on local PC."
-    )
+    # Workers are auto-managed during scanning — starts at 12 and adjusts
+    # up/down based on live pass rate. Displayed here for visibility only.
+    max_workers = st.session_state.get("max_workers_val", 12)
+    st.caption(f"⚙️ Workers: **{max_workers}** (auto-adjusts during scan · starts at 12)")
 
     mfi_period = st.slider(
         "MFI Period (days)",
@@ -725,11 +719,7 @@ with st.sidebar:
 
         elif _fix == "reduce_workers":
             st.caption("⚡ **Fix:** Reduce parallel workers to lower request pressure.")
-            if st.button("⬇️ Set Workers to 3", use_container_width=True,
-                         key="fix_slow_btn"):
-                st.session_state["max_workers_val"] = 3
-                st.session_state.pop("_yf_health", None)
-                st.rerun()
+            st.caption("The scanner will auto-reduce workers if slowness is detected.")
 
         elif _fix == "timeout":
             st.caption("🔄 **Fix:** Retry — transient timeout, server may be temporarily overloaded.")
@@ -1739,7 +1729,7 @@ with tab_screener:
                 st.error(
                     "⚠️ **No data returned** — all tickers failed.\n\n"
                     "**Fixes:**\n"
-                    "1. Reduce **Parallel Workers** to 3–5 in the sidebar\n"
+                    "1. Wait 60 seconds for the rate limit to reset, then rescan\n"
                     "2. Wait 60 seconds for yfinance rate limits to reset\n"
                     "3. Try **S&P 500** instead of NYSE/NASDAQ"
                 )
