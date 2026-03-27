@@ -203,6 +203,83 @@ ETF_KEYWORDS = [
     "debenture", "warrant",
 ]
 
+def check_yfinance_health() -> dict:
+    """
+    Make a lightweight test request to yfinance to classify the current
+    connection status. Returns a dict:
+        status  : "fast" | "slow" | "rate_limited" | "timeout" | "blocked" | "unknown"
+        latency : float (seconds) or None
+        message : human-readable description
+        fix     : short action string
+    """
+    import time as _time
+    result = {"status": "unknown", "latency": None, "message": "", "fix": ""}
+    try:
+        t0   = _time.time()
+        info = yf.Ticker("AAPL").fast_info   # lightest possible yfinance call
+        # fast_info is a property — access one field to force the request
+        _ = info.last_price
+        latency = round(_time.time() - t0, 2)
+        result["latency"] = latency
+
+        if _ is None:
+            result.update({
+                "status":  "rate_limited",
+                "message": "yfinance returned empty data — likely rate limited.",
+                "fix":     "wait",
+            })
+        elif latency < 1.5:
+            result.update({
+                "status":  "fast",
+                "message": f"Connection healthy ({latency}s response time).",
+                "fix":     "none",
+            })
+        elif latency < 5.0:
+            result.update({
+                "status":  "slow",
+                "message": f"Connection slow ({latency}s response time). "
+                           "Reduce parallel workers to avoid overloading yfinance.",
+                "fix":     "reduce_workers",
+            })
+        else:
+            result.update({
+                "status":  "slow",
+                "message": f"Very slow response ({latency}s). High server load or network issue.",
+                "fix":     "reduce_workers",
+            })
+
+    except Exception as e:
+        err = str(e).lower()
+        latency = round(_time.time() - t0, 2) if 't0' in dir() else None
+        result["latency"] = latency
+        if "timeout" in err or "timed out" in err or "read timed out" in err:
+            result.update({
+                "status":  "timeout",
+                "message": "Connection timed out — yfinance server not responding.",
+                "fix":     "retry",
+            })
+        elif "429" in err or "rate" in err or "too many" in err:
+            result.update({
+                "status":  "rate_limited",
+                "message": "Rate limit hit (HTTP 429) — too many requests sent too fast.",
+                "fix":     "wait",
+            })
+        elif "connection" in err or "network" in err or "resolve" in err or "refused" in err:
+            result.update({
+                "status":  "blocked",
+                "message": "Network connection failed — Streamlit Cloud may be blocking yfinance.",
+                "fix":     "sp500",
+            })
+        else:
+            result.update({
+                "status":  "unknown",
+                "message": f"Unexpected error: {str(e)[:80]}",
+                "fix":     "retry",
+            })
+    return result
+
+
+
 # ───────────────────────────────────────────────────────────────
 # CACHE HELPERS — must be defined before sidebar renders
 # ───────────────────────────────────────────────────────────────
@@ -1075,82 +1152,6 @@ def calculate_roic_trend(fin, bal):
         return (r0 - r1) if (r0 is not None and r1 is not None) else None
     except:
         return None
-
-
-def check_yfinance_health() -> dict:
-    """
-    Make a lightweight test request to yfinance to classify the current
-    connection status. Returns a dict:
-        status  : "fast" | "slow" | "rate_limited" | "timeout" | "blocked" | "unknown"
-        latency : float (seconds) or None
-        message : human-readable description
-        fix     : short action string
-    """
-    import time as _time
-    result = {"status": "unknown", "latency": None, "message": "", "fix": ""}
-    try:
-        t0   = _time.time()
-        info = yf.Ticker("AAPL").fast_info   # lightest possible yfinance call
-        # fast_info is a property — access one field to force the request
-        _ = info.last_price
-        latency = round(_time.time() - t0, 2)
-        result["latency"] = latency
-
-        if _ is None:
-            result.update({
-                "status":  "rate_limited",
-                "message": "yfinance returned empty data — likely rate limited.",
-                "fix":     "wait",
-            })
-        elif latency < 1.5:
-            result.update({
-                "status":  "fast",
-                "message": f"Connection healthy ({latency}s response time).",
-                "fix":     "none",
-            })
-        elif latency < 5.0:
-            result.update({
-                "status":  "slow",
-                "message": f"Connection slow ({latency}s response time). "
-                           "Reduce parallel workers to avoid overloading yfinance.",
-                "fix":     "reduce_workers",
-            })
-        else:
-            result.update({
-                "status":  "slow",
-                "message": f"Very slow response ({latency}s). High server load or network issue.",
-                "fix":     "reduce_workers",
-            })
-
-    except Exception as e:
-        err = str(e).lower()
-        latency = round(_time.time() - t0, 2) if 't0' in dir() else None
-        result["latency"] = latency
-        if "timeout" in err or "timed out" in err or "read timed out" in err:
-            result.update({
-                "status":  "timeout",
-                "message": "Connection timed out — yfinance server not responding.",
-                "fix":     "retry",
-            })
-        elif "429" in err or "rate" in err or "too many" in err:
-            result.update({
-                "status":  "rate_limited",
-                "message": "Rate limit hit (HTTP 429) — too many requests sent too fast.",
-                "fix":     "wait",
-            })
-        elif "connection" in err or "network" in err or "resolve" in err or "refused" in err:
-            result.update({
-                "status":  "blocked",
-                "message": "Network connection failed — Streamlit Cloud may be blocking yfinance.",
-                "fix":     "sp500",
-            })
-        else:
-            result.update({
-                "status":  "unknown",
-                "message": f"Unexpected error: {str(e)[:80]}",
-                "fix":     "retry",
-            })
-    return result
 
 
 def process_ticker(args):
