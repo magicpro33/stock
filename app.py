@@ -111,6 +111,62 @@ METRICS = {
                    "price is at the top of the range (already extended). Use this with the "
                    "Price Range Filter to find stocks coiling at the bottom of a tight range.",
     },
+    "RSI": {
+        "label":   "RSI (Momentum Zone)",
+        "weight":  2,
+        "desc":    "14-day Relative Strength Index scored for continuation potential. "
+                   "1.0 = RSI 55–70 (sweet spot: uptrend confirmed, not overbought). "
+                   "0.6 = RSI 50–55 (momentum building). "
+                   "0.2 = RSI 70–80 (caution: extended). "
+                   "0.0 = RSI >80 (overbought/reversal risk) or <50 (no uptrend).",
+    },
+    "MACD": {
+        "label":   "MACD Momentum",
+        "weight":  2,
+        "desc":    "MACD histogram score — measures short-term momentum acceleration. "
+                   "1.0 = histogram positive AND growing (momentum accelerating upward). "
+                   "0.6 = histogram positive but shrinking (momentum slowing). "
+                   "0.2 = histogram just crossed zero (early signal). "
+                   "0.0 = histogram negative (downward momentum). "
+                   "MACD line = 12-day EMA minus 26-day EMA. Signal = 9-day EMA of MACD.",
+    },
+    "GoldenCross": {
+        "label":   "Golden Cross",
+        "weight":  3,
+        "desc":    "Golden Cross = 50-day MA is above the 200-day MA (long-term uptrend confirmed). "
+                   "1.0 = 50MA > 200MA (golden cross in effect — institutional buy signal). "
+                   "0.5 = 50MA within 2% of 200MA (about to cross — early setup). "
+                   "0.0 = 50MA < 200MA (death cross — downtrend). "
+                   "Requires at least 200 bars of history.",
+    },
+    "MFISweetSpot": {
+        "label":   "MFI Sweet Spot",
+        "weight":  2,
+        "desc":    "MFI scored specifically for continuation potential (not just high flow). "
+                   "1.0 = MFI 55–75: buying pressure without overbought risk — ideal for continuation. "
+                   "0.7 = MFI 75–80: strong inflow but approaching caution zone. "
+                   "0.3 = MFI 80–90: overbought — reversal risk elevated. "
+                   "0.0 = MFI >90 or <50: extreme overbought or no buying pressure.",
+    },
+    "NoBearDiv": {
+        "label":   "No Bearish Divergence",
+        "weight":  2,
+        "desc":    "Checks that price highs and MFI highs are aligned (no bearish divergence). "
+                   "1.0 = price and MFI both making higher highs — momentum confirmed. "
+                   "0.5 = no clear divergence signal either way. "
+                   "0.0 = bearish divergence detected: price made new high but MFI did not "
+                   "(rally losing conviction — often precedes a reversal). "
+                   "Measured over the last 20 trading days.",
+    },
+    "MA50Proximity": {
+        "label":   "MA50 Proximity",
+        "weight":  1,
+        "desc":    "How close price is to the 50-day MA — rewards stocks near but above it. "
+                   "1.0 = price 0–5% above MA50 (just reclaimed or sitting on support — low risk entry). "
+                   "0.7 = price 5–10% above MA50 (healthy uptrend, not extended). "
+                   "0.3 = price 10–20% above MA50 (extended — higher entry risk). "
+                   "0.0 = price >20% above MA50 (very extended) or below MA50.",
+    },
 }
 
 ALL_SECTORS = [
@@ -191,6 +247,10 @@ for _k, _cfg in METRICS.items():
     _defaults[f"wt_{_k}"]  = float(_cfg["weight"])
 # RangePosScore off by default — only meaningful when range filter is on
 _defaults["tog_RangePosScore"] = False
+# New technical metrics — off by default so existing users aren't disrupted
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+    _defaults[f"tog_{_k}"] = False
+    _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
 
 for _key, _val in _defaults.items():
     if _key not in st.session_state:
@@ -204,40 +264,61 @@ with st.sidebar:
 
     # ── Magic Stock preset button ────────────────────────────────
     if st.button("✨ Magic Stock", use_container_width=True,
-                 help="Optimized for breakout setups: finds stocks in a tight range near support "
-                      "with rising buying pressure — coiled and ready to move higher."):
+                 help="Finds stocks with the full continuation signal stack: "
+                      "MFI in sweet spot (55–75), rising OBV, MACD accelerating, "
+                      "golden cross confirmed, no bearish divergence, "
+                      "price near MA50 support. The ideal 'going higher' setup."):
         # ── Filter settings ──────────────────────────────────────
-        st.session_state["slider_max_price"]   = 150    # Focus on lower-priced stocks with more % upside
-        st.session_state["slider_min_score"]   = 0.0    # Let the metrics + range filter do the work
-        st.session_state["tog_ma50"]           = "below"  # Only stocks in pullback — below 50MA
-        st.session_state["tog_range"]          = True   # Must be in a tight range
-        st.session_state["slider_range_days"]  = 20     # 20-day consolidation window
-        st.session_state["slider_range_pct"]   = 8.0    # Max 8% range width — tight coil
-        st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
+        st.session_state["slider_max_price"]   = 500    # Don't cap price — quality stocks can be expensive
+        st.session_state["slider_min_score"]   = 0.0    # Let the metric weights do the filtering
+        st.session_state["tog_ma50"]           = "above"  # Must be in uptrend — above 50MA
+        st.session_state["tog_range"]          = False  # Range filter off — we want trending stocks
+        st.session_state["slider_range_days"]  = 20
+        st.session_state["slider_range_pct"]   = 15.0
+        st.session_state["slider_mfi_period"]  = 14
+        # Turn off valuation filters — momentum setup doesn't require value conditions
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
 
         # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # ── Turn on breakout-specific metrics with tuned weights ──
-        # RangePosScore ×4 — CORE signal: price near range low = maximum coiled energy
-        st.session_state["tog_RangePosScore"] = True
-        st.session_state["wt_RangePosScore"]  = 4.0
+        # ── The full "going higher" signal stack ──────────────────
+        # GoldenCross ×4 — 50MA above 200MA = institutional uptrend confirmed
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 4.0
 
-        # OBV ×3 — institutions quietly accumulating while price is flat
+        # MFISweetSpot ×4 — MFI 55–75: buying pressure without overbought risk
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 4.0
+
+        # NoBearDiv ×3 — price and MFI both making higher highs = momentum confirmed
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 3.0
+
+        # OBV ×3 — rising OBV = institutions accumulating, not distributing
         st.session_state["tog_OBV"]  = True
         st.session_state["wt_OBV"]   = 3.0
 
-        # MFI ×3 — money flowing in even at the low = buyers stepping up at support
-        st.session_state["tog_MFI"]  = True
-        st.session_state["wt_MFI"]   = 3.0
+        # MACD ×3 — histogram positive and accelerating = short-term momentum confirmed
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
 
-        # PCV ×2 — up-day volume dominant = stealth buying accumulation
+        # RSI ×2 — RSI 55–70: uptrend confirmed, room to run before overbought
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 2.0
+
+        # MA50Proximity ×2 — price near MA50 support = low-risk entry, not extended
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 2.0
+
+        # PCV ×2 — dominant up-day volume = buyers in control
         st.session_state["tog_PCV"]  = True
         st.session_state["wt_PCV"]   = 2.0
 
-        # ROIC ×1 — basic quality filter: only fundamentally sound businesses
+        # ROIC ×1 — quality filter: only fundamentally sound businesses
         st.session_state["tog_ROIC"] = True
         st.session_state["wt_ROIC"]  = 1.0
 
@@ -443,6 +524,22 @@ with st.sidebar:
             )
         st.caption(cfg["desc"])
 
+    # ── Technical / momentum metrics ─────────────────────────
+    st.markdown("**Technical & Momentum**")
+    for key in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
     # ── Range position metric ─────────────────────────────────
     st.markdown("**Range & Breakout Setup**")
     for key in ["RangePosScore"]:
@@ -600,6 +697,163 @@ def get_volume_signals(hist_df, mfi_period):
             "PCV": round(pcv_score, 4),
         }
     except:
+        return default
+
+
+def calculate_technical_signals(hist: pd.DataFrame) -> dict:
+    """
+    Compute RSI, MACD, Golden Cross, MFI Sweet Spot, No-Bearish-Divergence,
+    and MA50 Proximity from a pre-fetched OHLCV DataFrame.
+    All scores are 0.0–1.0. Returns zeros on insufficient data.
+    """
+    default = {
+        "RSI":           0.0,
+        "MACD":          0.0,
+        "GoldenCross":   0.0,
+        "MFISweetSpot":  0.0,
+        "NoBearDiv":     0.5,
+        "MA50Proximity": 0.0,
+    }
+    try:
+        if hist.empty or len(hist) < 26:
+            return default
+
+        close = hist["Close"].dropna()
+        if len(close) < 26:
+            return default
+
+        # ── RSI (14-period) ──────────────────────────────────────
+        rsi_score = 0.0
+        try:
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / loss.replace(0, np.nan)
+            rsi_s = 100 - (100 / (1 + rs))
+            rsi_val = rsi_s.dropna().iloc[-1] if not rsi_s.dropna().empty else None
+            if rsi_val is not None:
+                if   55 <= rsi_val <= 70: rsi_score = 1.0   # sweet spot
+                elif 50 <= rsi_val <  55: rsi_score = 0.6   # building
+                elif 70 <  rsi_val <= 80: rsi_score = 0.2   # extended
+                else:                     rsi_score = 0.0   # overbought or no trend
+        except Exception:
+            pass
+
+        # ── MACD (12/26/9) ───────────────────────────────────────
+        macd_score = 0.0
+        try:
+            ema12   = close.ewm(span=12, adjust=False).mean()
+            ema26   = close.ewm(span=26, adjust=False).mean()
+            macd_ln = ema12 - ema26
+            signal  = macd_ln.ewm(span=9, adjust=False).mean()
+            hist_m  = macd_ln - signal
+            if len(hist_m.dropna()) >= 2:
+                h_now  = hist_m.dropna().iloc[-1]
+                h_prev = hist_m.dropna().iloc[-2]
+                if h_now > 0 and h_now > h_prev:   macd_score = 1.0  # positive & accelerating
+                elif h_now > 0:                     macd_score = 0.6  # positive but decelerating
+                elif h_now > h_prev:                macd_score = 0.2  # negative but improving
+                else:                               macd_score = 0.0
+        except Exception:
+            pass
+
+        # ── Golden Cross (50MA vs 200MA) ─────────────────────────
+        golden_score = 0.0
+        try:
+            if len(close) >= 200:
+                ma50  = close.rolling(50).mean().iloc[-1]
+                ma200 = close.rolling(200).mean().iloc[-1]
+                if pd.notnull(ma50) and pd.notnull(ma200) and ma200 > 0:
+                    diff_pct = (ma50 - ma200) / ma200
+                    if   diff_pct >  0.02: golden_score = 1.0   # golden cross confirmed
+                    elif diff_pct >= -0.02: golden_score = 0.5  # within 2% — imminent
+                    else:                  golden_score = 0.0   # death cross
+        except Exception:
+            pass
+
+        # ── MFI Sweet Spot ───────────────────────────────────────
+        mfi_sweet = 0.0
+        try:
+            high_s = hist["High"].dropna()
+            low_s  = hist["Low"].dropna()
+            vol_s  = hist["Volume"].dropna()
+            # Align all series
+            idx = close.index.intersection(high_s.index).intersection(low_s.index).intersection(vol_s.index)
+            c2, h2, l2, v2 = close[idx], high_s[idx], low_s[idx], vol_s[idx]
+            v2 = v2.where(v2 > 0)
+            tp  = (h2 + l2 + c2) / 3
+            rmf = tp * v2
+            tp_diff = tp.diff()
+            period = 14
+            pos_mf = rmf.where(tp_diff > 0, 0).rolling(period).sum()
+            neg_mf = rmf.where(tp_diff < 0, 0).rolling(period).sum()
+            mfr2   = pos_mf / neg_mf.replace(0, np.nan)
+            mfi2   = 100 - (100 / (1 + mfr2))
+            mfi_v  = mfi2.dropna().iloc[-1] if not mfi2.dropna().empty else None
+            if mfi_v is not None:
+                if   55 <= mfi_v <= 75: mfi_sweet = 1.0
+                elif 75 <  mfi_v <= 80: mfi_sweet = 0.7
+                elif 80 <  mfi_v <= 90: mfi_sweet = 0.3
+                else:                   mfi_sweet = 0.0
+        except Exception:
+            pass
+
+        # ── No Bearish Divergence (20-day window) ────────────────
+        no_bear_div = 0.5  # neutral default
+        try:
+            window = 20
+            if len(close) >= window * 2:
+                # Split recent history into two halves
+                mid   = len(close) - window
+                c_old = close.iloc[mid - window : mid]
+                c_new = close.iloc[mid:]
+                price_higher = c_new.max() > c_old.max()
+
+                # Recompute MFI for divergence check
+                high_s = hist["High"]
+                low_s  = hist["Low"]
+                vol_s  = hist["Volume"]
+                tp_d   = (high_s + low_s + close) / 3
+                rmf_d  = (tp_d * vol_s).where(vol_s > 0)
+                tpd_d  = tp_d.diff()
+                pos_d  = rmf_d.where(tpd_d > 0, 0).rolling(14).sum()
+                neg_d  = rmf_d.where(tpd_d < 0, 0).rolling(14).sum()
+                mfr_d  = pos_d / neg_d.replace(0, np.nan)
+                mfi_d  = (100 - (100 / (1 + mfr_d))).dropna()
+                if len(mfi_d) >= window * 2:
+                    mfi_old = mfi_d.iloc[-(window * 2):-window]
+                    mfi_new = mfi_d.iloc[-window:]
+                    mfi_higher = mfi_new.max() > mfi_old.max()
+                    if price_higher and mfi_higher:     no_bear_div = 1.0  # both higher — confirmed
+                    elif price_higher and not mfi_higher: no_bear_div = 0.0  # bearish divergence
+                    else:                               no_bear_div = 0.5
+        except Exception:
+            pass
+
+        # ── MA50 Proximity ────────────────────────────────────────
+        ma50_prox = 0.0
+        try:
+            if len(close) >= 50:
+                ma50_v  = close.rolling(50).mean().iloc[-1]
+                price_v = close.iloc[-1]
+                if pd.notnull(ma50_v) and ma50_v > 0:
+                    pct_above = (price_v - ma50_v) / ma50_v
+                    if   0.0  <= pct_above <= 0.05: ma50_prox = 1.0
+                    elif 0.05 <  pct_above <= 0.10: ma50_prox = 0.7
+                    elif 0.10 <  pct_above <= 0.20: ma50_prox = 0.3
+                    else:                            ma50_prox = 0.0  # extended or below
+        except Exception:
+            pass
+
+        return {
+            "RSI":           round(rsi_score,    4),
+            "MACD":          round(macd_score,   4),
+            "GoldenCross":   round(golden_score, 4),
+            "MFISweetSpot":  round(mfi_sweet,    4),
+            "NoBearDiv":     round(no_bear_div,  4),
+            "MA50Proximity": round(ma50_prox,    4),
+        }
+    except Exception:
         return default
 
 
@@ -779,6 +1033,7 @@ def process_ticker(args):
 
             # ── 4. Compute all indicators — no additional API calls
             vol_signals    = get_volume_signals(hist, mfi_period)
+            tech_signals   = calculate_technical_signals(hist)
             range_data     = calculate_price_range(hist, range_days)
             ma50           = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -813,6 +1068,12 @@ def process_ticker(args):
                 "OBV":            vol_signals["OBV"],
                 "MFI":            vol_signals["MFI"],
                 "PCV":            vol_signals["PCV"],
+                "RSI":            tech_signals["RSI"],
+                "MACD":           tech_signals["MACD"],
+                "GoldenCross":    tech_signals["GoldenCross"],
+                "MFISweetSpot":   tech_signals["MFISweetSpot"],
+                "NoBearDiv":      tech_signals["NoBearDiv"],
+                "MA50Proximity":  tech_signals["MA50Proximity"],
                 "RangeHigh":      range_data["RangeHigh"],
                 "RangeLow":       range_data["RangeLow"],
                 "RangePct":       range_data["RangePct"],
@@ -860,15 +1121,22 @@ def recompute_indicators(results: list, mfi_period: int, range_days: int) -> lis
         vol  = get_volume_signals(hist, mfi_period)
         rng  = calculate_price_range(hist, range_days)
         ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+        tech = calculate_technical_signals(hist)
         new_row.update({
-            "MA50":      ma50,
-            "OBV":       vol["OBV"],
-            "MFI":       vol["MFI"],
-            "PCV":       vol["PCV"],
-            "RangeHigh": rng["RangeHigh"],
-            "RangeLow":  rng["RangeLow"],
-            "RangePct":  rng["RangePct"],
-            "RangePos":  rng["RangePos"],
+            "MA50":          ma50,
+            "OBV":           vol["OBV"],
+            "MFI":           vol["MFI"],
+            "PCV":           vol["PCV"],
+            "RSI":           tech["RSI"],
+            "MACD":          tech["MACD"],
+            "GoldenCross":   tech["GoldenCross"],
+            "MFISweetSpot":  tech["MFISweetSpot"],
+            "NoBearDiv":     tech["NoBearDiv"],
+            "MA50Proximity": tech["MA50Proximity"],
+            "RangeHigh":     rng["RangeHigh"],
+            "RangeLow":      rng["RangeLow"],
+            "RangePct":      rng["RangePct"],
+            "RangePos":      rng["RangePos"],
         })
         updated.append(new_row)
     return updated
@@ -1067,14 +1335,17 @@ with tab_screener:
     numeric_cols = ["Price", "MA50", "RangeHigh", "RangeLow", "RangePct", "RangePos",
                     "MarketCap", "P/E", "OwnerEarnings", "OE_Yield",
                     "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
-                    "Piotroski", "OBV", "MFI", "PCV"]
+                    "Piotroski", "OBV", "MFI", "PCV",
+                    "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["ROIC_Trend"] = df["ROIC_Trend"].fillna(np.nan)
-    for vol_col in ["OBV", "MFI", "PCV"]:
-        df[vol_col] = df[vol_col].fillna(0)
+    for vol_col in ["OBV", "MFI", "PCV", "RSI", "MACD", "GoldenCross",
+                    "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        if vol_col in df.columns:
+            df[vol_col] = df[vol_col].fillna(0)
 
     # ── Sector filter — applied here using yfinance sector (authoritative) ──
     if sector != "All Sectors":
@@ -1199,7 +1470,8 @@ with tab_screener:
         # Exclude: dollar columns, percentage columns, and range cols already formatted as strings
         skip_cols = {"Ticker", "Sector", "MarketCap", "OwnerEarnings",
                      "RevenueGrowth", "EarningsGrowth", "RangePct", "RangePos",
-                     "MFI_Signal", "OE_Yield", "ROIC", "ROIC_Trend"}
+                     "MFI_Signal", "OE_Yield", "ROIC", "ROIC_Trend",
+                     "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"}
         for col in display.columns:
             if col not in skip_cols:
                 if pd.api.types.is_numeric_dtype(display[col]):
@@ -1587,15 +1859,22 @@ with tab_analyze:
                 st.stop()
 
             THRESHOLDS = {
-                "OE_Yield":       (0.05, 0.02, True),
-                "ROIC":           (0.15, 0.08, True),
-                "ROIC_Trend":     (0.02, 0.0,  True),
-                "RevenueGrowth":  (0.10, 0.05, True),
-                "EarningsGrowth": (0.10, 0.05, True),
-                "Piotroski":      (7,    4,    True),
-                "OBV":            (0.8,  0.4,  True),
-                "MFI":            (0.6,  0.4,  True),
-                "PCV":            (0.5,  0.2,  True),
+                "OE_Yield":       (0.05,  0.02, True),
+                "ROIC":           (0.15,  0.08, True),
+                "ROIC_Trend":     (0.02,  0.0,  True),
+                "RevenueGrowth":  (0.10,  0.05, True),
+                "EarningsGrowth": (0.10,  0.05, True),
+                "Piotroski":      (7,     4,    True),
+                "OBV":            (0.8,   0.4,  True),
+                "MFI":            (0.6,   0.4,  True),
+                "PCV":            (0.5,   0.2,  True),
+                "RSI":            (0.9,   0.5,  True),
+                "MACD":           (0.9,   0.5,  True),
+                "GoldenCross":    (0.9,   0.4,  True),
+                "MFISweetSpot":   (0.9,   0.5,  True),
+                "NoBearDiv":      (0.9,   0.4,  True),
+                "MA50Proximity":  (0.9,   0.5,  True),
+                "RangePosScore":  (0.75,  0.4,  True),
             }
 
             def _sig(key, val):
