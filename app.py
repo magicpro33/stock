@@ -238,7 +238,7 @@ _defaults = {
     "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
     "max_workers_val":    5,
     "tog_pe_filter":      False,
-    "slider_pe_range":    (0, 50),
+    "slider_pe_range":    (0, 50),   # tuple: (min_pe, max_pe)
     "tog_rev_filter":     False,
     "slider_rev_min":     0,
 }
@@ -480,7 +480,6 @@ with st.sidebar:
     pe_min, pe_max = st.slider(
         "P/E Ratio Range",
         min_value=0, max_value=200, step=1,
-        value=st.session_state.get("slider_pe_range", (0, 50)),
         disabled=not use_pe_filter,
         help="Filter to stocks with a trailing P/E between these two values. "
              "0–15 = value territory · 15–25 = fair value · 25–50 = growth premium · 50+ = high growth/speculative.",
