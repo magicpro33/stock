@@ -1208,10 +1208,18 @@ def is_etf_or_fund(info: dict) -> bool:
     name = (info.get("longName") or info.get("shortName") or "").lower()
     return any(kw in name for kw in ETF_KEYWORDS)
 
-def build_excel(screened: pd.DataFrame) -> bytes:
+def build_excel(display: pd.DataFrame) -> bytes:
+    """Write the display DataFrame (already filtered to visible columns) to Excel.
+    Strips any remaining internal columns just in case."""
+    # Belt-and-suspenders: drop internal/hidden columns that should never appear
+    INTERNAL_COLS = {"_hist", "RangeHigh", "RangeLow", "RangePos",
+                     "ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross",
+                     "MFI", "MFISweetSpot", "NoBearDiv"}
+    df_out = display.drop(columns=[c for c in INTERNAL_COLS if c in display.columns],
+                          errors="ignore")
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        screened.to_excel(writer, index=False, sheet_name="Stock_Picks")
+        df_out.to_excel(writer, index=False, sheet_name="Stock_Picks")
         sheet = writer.book["Stock_Picks"]
         col_map = {cell.value: get_column_letter(cell.column) for cell in sheet[1]}
         for col_name in ["RevenueGrowth", "EarningsGrowth"]:
@@ -1223,7 +1231,7 @@ def build_excel(screened: pd.DataFrame) -> bytes:
             for cell in sheet[col_map["OwnerEarnings"]][1:]:
                 if cell.value is not None:
                     cell.number_format = "$#,##0"
-        for idx, col in enumerate(screened.columns, 1):
+        for idx, col in enumerate(df_out.columns, 1):
             col_letter = get_column_letter(idx)
             max_len = max([len(str(c.value)) for c in sheet[col_letter] if c.value] + [len(col)])
             sheet.column_dimensions[col_letter].width = max_len + 2
@@ -1500,7 +1508,7 @@ with tab_screener:
         # Columns always hidden from display (still used in score calculations)
         # ROIC, OBV, PCV, RSI, MACD, GoldenCross: used in scoring, hidden from table
         # MFI: replaced by MFI_Signal label — hide numeric score
-        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI"}
+        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv"}
 
         # Hide columns for metrics that are toggled off
         all_metric_keys = list(METRICS.keys())
@@ -1520,7 +1528,7 @@ with tab_screener:
 
         # Download button
         st.divider()
-        excel_bytes = build_excel(screened)
+        excel_bytes = build_excel(display)
         st.download_button(
             label="⬇️ Download Excel",
             data=excel_bytes,
