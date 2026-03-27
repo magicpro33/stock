@@ -594,6 +594,85 @@ with st.sidebar:
     )
 
     st.divider()
+    st.markdown("**📡 yfinance Connection**")
+
+    # ── Live health check ─────────────────────────────────────────
+    _do_check = st.button("🔍 Check Connection", use_container_width=True,
+                          help="Test the yfinance data connection before scanning.")
+    if _do_check or st.session_state.get("_yf_health"):
+        if _do_check:
+            with st.spinner("Testing connection..."):
+                _health = check_yfinance_health()
+            st.session_state["_yf_health"] = _health
+        else:
+            _health = st.session_state["_yf_health"]
+
+        _st  = _health["status"]
+        _lat = _health["latency"]
+        _msg = _health["message"]
+        _fix = _health["fix"]
+
+        # ── Status indicator ──────────────────────────────────────
+        _STATUS_UI = {
+            "fast":         ("🟢", "Healthy",      "success"),
+            "slow":         ("🟡", "Slow",          "warning"),
+            "rate_limited": ("🔴", "Rate Limited",  "error"),
+            "timeout":      ("🔴", "Timed Out",     "error"),
+            "blocked":      ("⛔", "Blocked",       "error"),
+            "unknown":      ("⚪", "Unknown",       "warning"),
+        }
+        _icon, _label, _sev = _STATUS_UI.get(_st, ("⚪", _st, "warning"))
+        _lat_str = f" · {_lat}s" if _lat is not None else ""
+
+        if _sev == "success":
+            st.success(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+        elif _sev == "warning":
+            st.warning(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+        else:
+            st.error(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+
+        # ── Fix buttons ───────────────────────────────────────────
+        if _fix == "wait":
+            st.caption("⏳ **Fix:** Wait 30–60 seconds for the rate limit to reset, then scan again.")
+            if st.button("⏱️ Wait 30s then Re-check", use_container_width=True,
+                         key="fix_wait_btn"):
+                import time as _t; _t.sleep(30)
+                _health = check_yfinance_health()
+                st.session_state["_yf_health"] = _health
+                st.rerun()
+            if st.button("⬇️ Reduce Workers to 3", use_container_width=True,
+                         key="fix_reduce_btn"):
+                st.session_state["max_workers_val"] = 3
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        elif _fix == "reduce_workers":
+            st.caption("⚡ **Fix:** Reduce parallel workers to lower request pressure.")
+            if st.button("⬇️ Set Workers to 3", use_container_width=True,
+                         key="fix_slow_btn"):
+                st.session_state["max_workers_val"] = 3
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        elif _fix == "timeout":
+            st.caption("🔄 **Fix:** Retry — transient timeout, server may be temporarily overloaded.")
+            if st.button("🔄 Re-check Connection", use_container_width=True,
+                         key="fix_timeout_btn"):
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        elif _fix == "sp500":
+            st.caption("🔄 **Fix:** Switch to S&P 500 (smaller universe), or wait for network to recover.")
+            if st.button("📊 Switch to S&P 500", use_container_width=True,
+                         key="fix_sp500_btn"):
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        if st.button("✕ Clear Status", use_container_width=True, key="clear_health_btn"):
+            st.session_state.pop("_yf_health", None)
+            st.rerun()
+
+    st.divider()
     run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary")
 
     # ── Cache status panel ────────────────────────────────────────
@@ -996,6 +1075,82 @@ def calculate_roic_trend(fin, bal):
         return (r0 - r1) if (r0 is not None and r1 is not None) else None
     except:
         return None
+
+
+def check_yfinance_health() -> dict:
+    """
+    Make a lightweight test request to yfinance to classify the current
+    connection status. Returns a dict:
+        status  : "fast" | "slow" | "rate_limited" | "timeout" | "blocked" | "unknown"
+        latency : float (seconds) or None
+        message : human-readable description
+        fix     : short action string
+    """
+    import time as _time
+    result = {"status": "unknown", "latency": None, "message": "", "fix": ""}
+    try:
+        t0   = _time.time()
+        info = yf.Ticker("AAPL").fast_info   # lightest possible yfinance call
+        # fast_info is a property — access one field to force the request
+        _ = info.last_price
+        latency = round(_time.time() - t0, 2)
+        result["latency"] = latency
+
+        if _ is None:
+            result.update({
+                "status":  "rate_limited",
+                "message": "yfinance returned empty data — likely rate limited.",
+                "fix":     "wait",
+            })
+        elif latency < 1.5:
+            result.update({
+                "status":  "fast",
+                "message": f"Connection healthy ({latency}s response time).",
+                "fix":     "none",
+            })
+        elif latency < 5.0:
+            result.update({
+                "status":  "slow",
+                "message": f"Connection slow ({latency}s response time). "
+                           "Reduce parallel workers to avoid overloading yfinance.",
+                "fix":     "reduce_workers",
+            })
+        else:
+            result.update({
+                "status":  "slow",
+                "message": f"Very slow response ({latency}s). High server load or network issue.",
+                "fix":     "reduce_workers",
+            })
+
+    except Exception as e:
+        err = str(e).lower()
+        latency = round(_time.time() - t0, 2) if 't0' in dir() else None
+        result["latency"] = latency
+        if "timeout" in err or "timed out" in err or "read timed out" in err:
+            result.update({
+                "status":  "timeout",
+                "message": "Connection timed out — yfinance server not responding.",
+                "fix":     "retry",
+            })
+        elif "429" in err or "rate" in err or "too many" in err:
+            result.update({
+                "status":  "rate_limited",
+                "message": "Rate limit hit (HTTP 429) — too many requests sent too fast.",
+                "fix":     "wait",
+            })
+        elif "connection" in err or "network" in err or "resolve" in err or "refused" in err:
+            result.update({
+                "status":  "blocked",
+                "message": "Network connection failed — Streamlit Cloud may be blocking yfinance.",
+                "fix":     "sp500",
+            })
+        else:
+            result.update({
+                "status":  "unknown",
+                "message": f"Unexpected error: {str(e)[:80]}",
+                "fix":     "retry",
+            })
+    return result
 
 
 def process_ticker(args):
@@ -1463,6 +1618,9 @@ with tab_screener:
         done     = 0
         last_pct = 0
 
+        # Live connection status display during scan
+        _conn_status = st.empty()
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_ticker, (t, mfi_period, range_days)): t
                        for t in tickers}
@@ -1471,27 +1629,77 @@ with tab_screener:
                 if result:
                     results.append(result)
                 done += 1
-                pct = done / total
-                # Only redraw progress bar when it moves by ≥2% — reduces
-                # Streamlit overhead from ~500 redraws to ~50 for S&P 500
+                pct   = done / total
+                found = len(results)
+                # Pass rate — low rate early on signals rate limiting
+                pass_rate = found / done if done > 0 else 0
+
                 if int(pct * 100) >= last_pct + 2 or done == total:
                     last_pct = int(pct * 100)
-                    found = len(results)
+
+                    # Diagnose connection health from pass rate
+                    if done >= 20:   # enough samples to judge
+                        if pass_rate >= 0.35:
+                            _conn_icon = "🟢"
+                            _conn_text = f"Connection healthy · {pass_rate:.0%} pass rate"
+                        elif pass_rate >= 0.15:
+                            _conn_icon = "🟡"
+                            _conn_text = f"Slow / partial rate limiting · {pass_rate:.0%} pass rate"
+                        elif pass_rate >= 0.05:
+                            _conn_icon = "🔴"
+                            _conn_text = f"Heavy rate limiting · {pass_rate:.0%} pass rate — consider reducing workers"
+                        else:
+                            _conn_icon = "⛔"
+                            _conn_text = f"Near-total rate limit · {pass_rate:.0%} pass rate — stop and reduce workers"
+                        _conn_status.caption(f"{_conn_icon} {_conn_text}")
+
                     progress_bar.progress(
                         pct,
-                        text=f"Scanning... {done}/{total} tickers  ·  {found} passed filters  ({last_pct}%)"
+                        text=f"Scanning... {done}/{total} tickers  ·  {found} returned data  ({last_pct}%)"
                     )
 
         progress_bar.empty()
+        _conn_status.empty()
 
         if not results:
-            st.error(
-                "No results returned. This is usually caused by yfinance rate limiting on Streamlit Cloud. "
-                "Try these fixes:\n\n"
-                "1. **Reduce Parallel Workers** to 3 in the sidebar and run again\n"
-                "2. **Wait 60 seconds** and try again — rate limits reset quickly\n"
-                "3. If it keeps failing, try scanning a **single sector** instead of all sectors to reduce the number of requests"
-            )
+            # Run a quick health check to give specific advice
+            with st.spinner("Diagnosing connection issue..."):
+                _diag = check_yfinance_health()
+            _diag_st = _diag["status"]
+
+            if _diag_st in ("rate_limited", "slow"):
+                st.error(
+                    "🔴 **Rate Limited** — yfinance blocked the scan requests. "
+                    "Too many parallel workers sent too many requests too fast.\n\n"
+                    "**Fixes (try in order):**\n"
+                    "1. Use the **Check Connection** button in the sidebar → click **Reduce Workers to 3**\n"
+                    "2. Wait 60 seconds and run again\n"
+                    "3. Switch to **S&P 500** (fewer tickers = fewer requests)"
+                )
+            elif _diag_st == "timeout":
+                st.error(
+                    "⏱️ **Connection Timed Out** — yfinance servers are not responding.\n\n"
+                    "**Fixes:**\n"
+                    "1. Wait 30–60 seconds and try again\n"
+                    "2. Check your internet connection"
+                )
+            elif _diag_st == "blocked":
+                st.error(
+                    "⛔ **Connection Blocked** — the network cannot reach yfinance.\n\n"
+                    "**Fixes:**\n"
+                    "1. Switch to **S&P 500** only (smaller, more reliable)\n"
+                    "2. If on Streamlit Cloud, the outbound network may have restrictions — "
+                    "try running locally instead"
+                )
+            else:
+                st.error(
+                    "⚠️ **No data returned** — all tickers failed.\n\n"
+                    "**Fixes:**\n"
+                    "1. Reduce **Parallel Workers** to 3–5 in the sidebar\n"
+                    "2. Wait 60 seconds for yfinance rate limits to reset\n"
+                    "3. Try **S&P 500** instead of NYSE/NASDAQ"
+                )
+            st.session_state["_yf_health"] = _diag
             st.stop()
 
         # ── Store results in session_state cache ──────────────────
