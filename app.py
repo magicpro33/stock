@@ -780,6 +780,44 @@ with st.sidebar:
                    "Cache is stored in your browser session and clears automatically when the tab is closed.")
 
 # ───────────────────────────────────────────────────────────────
+# PRE-COMPUTED DATA LOADER
+# ───────────────────────────────────────────────────────────────
+
+import gzip, json as _json, pathlib as _pathlib
+
+_DATA_FILE = _pathlib.Path(__file__).parent / "data" / "stock_data.json.gz"
+_META_FILE = _pathlib.Path(__file__).parent / "data" / "scan_meta.json"
+
+@st.cache_data(ttl=3600)   # reload at most once per hour
+def load_precomputed_data() -> tuple:
+    """
+    Load the nightly pre-computed stock data from data/stock_data.json.gz.
+    Returns (results_list, meta_dict) or (None, None) if file doesn't exist.
+    """
+    if not _DATA_FILE.exists():
+        return None, None
+    try:
+        with gzip.open(_DATA_FILE, "rt", encoding="utf-8") as f:
+            results = _json.load(f)
+        meta = {}
+        if _META_FILE.exists():
+            with open(_META_FILE) as f:
+                meta = _json.load(f)
+        return results, meta
+    except Exception as e:
+        return None, None
+
+def get_precomputed_for_exchange(exchange_key: str) -> list:
+    """Filter pre-computed results to a specific exchange."""
+    results, _ = load_precomputed_data()
+    if not results:
+        return []
+    if exchange_key == "sp500":
+        # S&P 500 tickers are tagged with "sp500" in _exchanges list
+        return [r for r in results if "sp500" in r.get("_exchanges", [])]
+    return [r for r in results if exchange_key in r.get("_exchanges", [])]
+
+# ───────────────────────────────────────────────────────────────
 
 def get_volume_signals(hist_df, mfi_period):
     """
@@ -1547,29 +1585,66 @@ with tab_screener:
     exchange_key  = EXCHANGES[exchange]
     sector_label  = sector if sector != "All Sectors" else "All Sectors"
 
-    # ── Check if we already have cached scan data for this exchange ──
-    # Cache is valid as long as the exchange matches — mfi_period and range_days
-    # are now recomputed client-side from stored raw history (zero re-downloads).
-    cache         = st.session_state.get("screener_cache", {})
-    cache_valid   = (
+    # ── Priority 1: Pre-computed nightly data file ───────────────────
+    # Check if data/stock_data.json.gz exists (written by nightly GitHub Action).
+    # This is the fastest path — no live scanning needed at all.
+    _precomp_results, _precomp_meta = load_precomputed_data()
+    _precomp_for_exchange = get_precomputed_for_exchange(exchange_key) if _precomp_results else []
+    _using_precomp = bool(_precomp_for_exchange)
+
+    # ── Priority 2: Live session cache ───────────────────────────────
+    # Falls back to this if nightly file doesn't exist yet.
+    cache       = st.session_state.get("screener_cache", {})
+    cache_valid = (
+        not _using_precomp and
         cache.get("exchange_key") == exchange_key and
         bool(cache.get("results"))
     )
 
-    if cache_valid:
-        raw_results = cache["results"]
-        # Recompute indicators with current sidebar settings from stored OHLCV —
-        # this is pure CPU math, no network calls.
-        results = recompute_indicators(raw_results, mfi_period, range_days)
+    if _using_precomp:
+        raw_results = _precomp_for_exchange
+        results     = recompute_indicators(raw_results, mfi_period, range_days)
+        _scan_time  = _precomp_meta.get("scanned_at_utc", "unknown")
+        _n_stocks   = len(results)
+        _elapsed    = _precomp_meta.get("elapsed_minutes", "?")
         st.success(
-            f"⚡ Using cached data from last scan "
+            f"⚡ **Pre-computed data loaded** — {_n_stocks} stocks · "
+            f"Last updated: {_scan_time} · "
+            f"Scan took {_elapsed} min overnight · "
+            f"Indicators recomputed instantly from stored history."
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("🔄 Force Live Rescan", key="force_rescan_btn",
+                     help="Bypass the nightly data and run a live scan right now. Takes 5–30 min."):
+            st.session_state["_force_live_scan"] = True
+            st.rerun()
+        if c2.button("🗑️ Clear Session Cache", key="clear_cache_btn"):
+            st.session_state.pop("screener_cache", None)
+            st.rerun()
+
+    elif cache_valid:
+        raw_results = cache["results"]
+        results     = recompute_indicators(raw_results, mfi_period, range_days)
+        st.success(
+            f"⚡ Using live session cache "
             f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
-            f"indicators recomputed instantly from stored history. "
-            f"Click **Clear Cache & Rescan** to fetch fresh data from the web."
+            f"indicators recomputed instantly. "
+            f"Click **Clear Cache & Rescan** to fetch fresh data."
         )
         if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
             st.session_state.pop("screener_cache", None)
             st.rerun()
+
+    # Force live scan flag overrides pre-computed data
+    if st.session_state.pop("_force_live_scan", False):
+        _using_precomp = False
+        cache_valid    = False
+
+    if not _using_precomp and not cache_valid:
+        pass   # falls through to live scan block below
+
+    if _using_precomp or cache_valid:
+        pass   # skip live scan — jump to DataFrame build
     else:
         # Load tickers for selected exchange (cached for 24hrs)
         with st.spinner(f"Loading {exchange} tickers..."):
