@@ -534,6 +534,52 @@ def calculate_roic_trend(fin, bal):
         return None
 
 
+# ── Short interest ───────────────────────────────────────────────────────────
+
+def calculate_short_squeeze(info: dict) -> dict:
+    """Compute short interest metrics from yfinance info dict. No extra API calls."""
+    default = {
+        "ShortPctFloat":    None,
+        "DaysToCover":      None,
+        "ShortChange":      None,
+        "ShortSqueeze":     0.0,
+        "ShortPctFloatRaw": None,
+    }
+    try:
+        spf   = info.get("shortPercentOfFloat")
+        dtc   = info.get("shortRatio")
+        ss    = info.get("sharesShort")
+        ss_pm = info.get("sharesShortPriorMonth")
+
+        short_change = None
+        if ss and ss_pm and ss_pm > 0:
+            short_change = round((ss - ss_pm) / ss_pm, 4)
+
+        squeeze = 0.0
+        if spf is not None:
+            spf_pct = spf * 100
+            if spf_pct >= 20:   squeeze += 0.5
+            elif spf_pct >= 10: squeeze += 0.3
+            elif spf_pct >= 5:  squeeze += 0.15
+        if dtc is not None:
+            if dtc >= 10:   squeeze += 0.3
+            elif dtc >= 5:  squeeze += 0.2
+            elif dtc >= 3:  squeeze += 0.1
+        if short_change is not None and short_change < -0.05:
+            squeeze += 0.2
+        squeeze = min(round(squeeze, 4), 1.0)
+
+        return {
+            "ShortPctFloat":    round(spf, 4) if spf is not None else None,
+            "DaysToCover":      round(dtc, 1) if dtc is not None else None,
+            "ShortChange":      short_change,
+            "ShortSqueeze":     squeeze,
+            "ShortPctFloatRaw": round(spf * 100, 1) if spf is not None else None,
+        }
+    except Exception:
+        return default
+
+
 # ── Per-ticker worker ─────────────────────────────────────────────────────────
 
 def process_ticker(args):
@@ -584,6 +630,7 @@ def process_ticker(args):
             vol_signals  = get_volume_signals(hist, mfi_period)
             tech_signals = calculate_technical_signals(hist)
             range_data   = calculate_price_range(hist, range_days)
+            short_data   = calculate_short_squeeze(info)
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                             if len(hist) >= 50 else None)
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -626,6 +673,11 @@ def process_ticker(args):
                 "RangeLow":       range_data["RangeLow"],
                 "RangePct":       range_data["RangePct"],
                 "RangePos":       range_data["RangePos"],
+                "ShortPctFloat":  short_data["ShortPctFloat"],
+                "ShortPctFloatRaw": short_data["ShortPctFloatRaw"],
+                "DaysToCover":    short_data["DaysToCover"],
+                "ShortChange":    short_data["ShortChange"],
+                "ShortSqueeze":   short_data["ShortSqueeze"],
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
