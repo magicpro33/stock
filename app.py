@@ -1579,6 +1579,25 @@ def color_score(val):
 # ───────────────────────────────────────────────────────────────
 
 with tab_screener:
+
+ # ── Nightly data status banner (always visible) ───────────────
+ _pc_results, _pc_meta = load_precomputed_data()
+ if _pc_results:
+    _pc_time  = _pc_meta.get("scanned_at_utc", "unknown")
+    _pc_count = len(_pc_results)
+    st.info(
+        f"📦 **Nightly data available** · {_pc_count:,} stocks · "
+        f"Last updated: {_pc_time} · "
+        f"Run Screener to apply filters instantly — no live download needed."
+    )
+ else:
+    st.warning(
+        "⏳ **No pre-computed data yet.** The nightly scan hasn't run yet or "
+        "`data/stock_data.json.gz` doesn't exist in your repo. "
+        "**Trigger a manual run:** GitHub → Actions → Nightly Stock Scan → Run workflow. "
+        "Until then, the screener will do a live scan (slow)."
+    )
+
  if run_btn:
     active_metrics = [k for k, v in metric_enabled.items() if v]
 
