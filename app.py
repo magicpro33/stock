@@ -167,6 +167,17 @@ METRICS = {
                    "0.3 = price 10–20% above MA50 (extended — higher entry risk). "
                    "0.0 = price >20% above MA50 (very extended) or below MA50.",
     },
+    "ShortSqueeze": {
+        "label":   "Short Squeeze Score",
+        "weight":  3,
+        "desc":    "Composite short squeeze setup score. Rewards stocks with high short interest "
+                   "(fuel for a squeeze) AND rising price momentum (the trigger). "
+                   "1.0 = short float >20% + days-to-cover >5 + price above MA50 (maximum squeeze potential). "
+                   "0.7 = short float 10–20% OR days-to-cover 3–5 (elevated short interest). "
+                   "0.3 = short float 5–10% (moderate short interest). "
+                   "0.0 = short float <5% (little short interest — squeeze unlikely). "
+                   "Short interest data from Yahoo Finance / FINRA (updated twice monthly).",
+    },
 }
 
 ALL_SECTORS = [
@@ -329,7 +340,7 @@ for _k, _cfg in METRICS.items():
 # RangePosScore off by default — only meaningful when range filter is on
 _defaults["tog_RangePosScore"] = False
 # New technical metrics — off by default so existing users aren't disrupted
-for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze"]:
     _defaults[f"tog_{_k}"] = False
     _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
 
@@ -404,7 +415,35 @@ with st.sidebar:
 
         st.rerun()
 
-    # ── Insider Buying preset button ─────────────────────────────
+    # ── Short Squeeze preset button ──────────────────────────────
+    if st.button("🎯 Short Squeeze", use_container_width=True, key="preset_short_squeeze",
+                 help="Finds stocks with high short interest that are starting to move up. "
+                      "High short float = lots of fuel. Rising price + volume = the trigger. "
+                      "Shorts are forced to cover, accelerating the move."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"   # price must be recovering
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+        # Short squeeze core signals
+        st.session_state["tog_ShortSqueeze"] = True
+        st.session_state["wt_ShortSqueeze"]  = 5.0   # primary signal
+        st.session_state["tog_OBV"]          = True
+        st.session_state["wt_OBV"]           = 3.0   # volume confirming move
+        st.session_state["tog_RSI"]          = True
+        st.session_state["wt_RSI"]           = 2.0   # momentum building
+        st.session_state["tog_MACD"]         = True
+        st.session_state["wt_MACD"]          = 2.0   # acceleration
+        st.session_state["tog_GoldenCross"]  = True
+        st.session_state["wt_GoldenCross"]   = 1.0   # longer-term trend support
+        st.rerun()
+
+    # ── Insider Buying preset button ──────────────────────────────
     if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
                  help="Searches for stocks showing signs of institutional/insider accumulation: "
                       "rising OBV while price is flat, strong money flow, dominant up-day volume. "
@@ -624,6 +663,22 @@ with st.sidebar:
     # ── Technical / momentum metrics ─────────────────────────
     st.markdown("**Technical & Momentum**")
     for key in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Short interest metrics ────────────────────────────────
+    st.markdown("**Short Interest**")
+    for key in ["ShortSqueeze"]:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -1241,6 +1296,71 @@ def calculate_roic_trend(fin, bal):
         return None
 
 
+def calculate_short_squeeze(info: dict) -> dict:
+    """
+    Compute short interest metrics and a composite squeeze score from yfinance info.
+    All data comes from stock.info — no extra API calls needed.
+
+    Returns dict with:
+        ShortPctFloat   : % of float sold short (0.0–1.0)
+        DaysToCover     : short ratio (days of avg volume to cover all shorts)
+        ShortChange     : change vs prior month (positive = more shorts, negative = covering)
+        ShortSqueeze    : composite score 0.0–1.0
+        ShortPctFloatRaw: raw % as a displayable float (e.g. 0.23 = 23%)
+    """
+    default = {
+        "ShortPctFloat":    None,
+        "DaysToCover":      None,
+        "ShortChange":      None,
+        "ShortSqueeze":     0.0,
+        "ShortPctFloatRaw": None,
+    }
+    try:
+        spf   = info.get("shortPercentOfFloat")   # 0.0–1.0 (e.g. 0.23 = 23%)
+        dtc   = info.get("shortRatio")             # days to cover
+        ss    = info.get("sharesShort")            # current shares short
+        ss_pm = info.get("sharesShortPriorMonth")  # prior month shares short
+
+        # Short change: positive = shorts increasing, negative = covering
+        short_change = None
+        if ss and ss_pm and ss_pm > 0:
+            short_change = round((ss - ss_pm) / ss_pm, 4)
+
+        # Composite squeeze score
+        squeeze = 0.0
+        if spf is not None:
+            spf_pct = spf * 100   # convert to percentage
+            if spf_pct >= 20:
+                squeeze += 0.5    # heavy short interest — lots of fuel
+            elif spf_pct >= 10:
+                squeeze += 0.3
+            elif spf_pct >= 5:
+                squeeze += 0.15
+
+        if dtc is not None:
+            if dtc >= 10:
+                squeeze += 0.3    # shorts very trapped — can't exit quickly
+            elif dtc >= 5:
+                squeeze += 0.2
+            elif dtc >= 3:
+                squeeze += 0.1
+
+        if short_change is not None and short_change < -0.05:
+            squeeze += 0.2        # shorts actively covering = squeeze in progress
+
+        squeeze = min(round(squeeze, 4), 1.0)
+
+        return {
+            "ShortPctFloat":    round(spf, 4) if spf is not None else None,
+            "DaysToCover":      round(dtc, 1) if dtc is not None else None,
+            "ShortChange":      short_change,
+            "ShortSqueeze":     squeeze,
+            "ShortPctFloatRaw": round(spf * 100, 1) if spf is not None else None,
+        }
+    except Exception:
+        return default
+
+
 def process_ticker(args):
     """
     Fetch all data for one ticker — optimised for minimum wall-clock time.
@@ -1303,6 +1423,7 @@ def process_ticker(args):
         vol_signals    = get_volume_signals(hist, mfi_period)
         tech_signals   = calculate_technical_signals(hist)
         range_data     = calculate_price_range(hist, range_days)
+        short_data     = calculate_short_squeeze(info)
         ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                           if len(hist) >= 50 else None)
         owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -1350,6 +1471,11 @@ def process_ticker(args):
             "RangeLow":       range_data["RangeLow"],
             "RangePct":       range_data["RangePct"],
             "RangePos":       range_data["RangePos"],
+            "ShortPctFloat":  short_data["ShortPctFloat"],
+            "ShortPctFloatRaw": short_data["ShortPctFloatRaw"],
+            "DaysToCover":    short_data["DaysToCover"],
+            "ShortChange":    short_data["ShortChange"],
+            "ShortSqueeze":   short_data["ShortSqueeze"],
             "_hist":          hist_cache,
         }
 
@@ -1923,7 +2049,9 @@ with tab_screener:
                   "MFISweetSpot", "NoBearDiv", "MA50Proximity",
                   "OE_Yield", "ROIC", "ROIC_Trend", "Piotroski",
                   "RevenueGrowth", "EarningsGrowth", "RangePct",
-                  "RangePos", "RangeHigh", "RangeLow", "MA50"]
+                  "RangePos", "RangeHigh", "RangeLow", "MA50",
+                  "ShortSqueeze", "ShortPctFloat", "ShortPctFloatRaw",
+                  "DaysToCover", "ShortChange"]
     for _c in _zero_cols:
         if _c not in df.columns:
             df[_c] = 0.0
@@ -1938,7 +2066,8 @@ with tab_screener:
                     "MarketCap", "P/E", "OwnerEarnings", "OE_Yield",
                     "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
                     "Piotroski", "OBV", "MFI", "PCV",
-                    "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]
+                    "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity",
+                    "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -2129,6 +2258,19 @@ with tab_screener:
         # Format display columns
         display = screened.copy()
         display["MarketCap"]      = display["MarketCap"].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "")
+        # Short interest display formatting
+        if "ShortPctFloatRaw" in display.columns:
+            display["Short % Float"] = display["ShortPctFloatRaw"].apply(
+                lambda x: f"{x:.1f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DaysToCover" in display.columns:
+            display["Days to Cover"] = display["DaysToCover"].apply(
+                lambda x: f"{x:.1f}" if pd.notnull(x) and x else "—"
+            )
+        if "ShortChange" in display.columns:
+            display["Short Chg"] = display["ShortChange"].apply(
+                lambda x: (f"▲ {x:.1%}" if x > 0 else f"▼ {abs(x):.1%}") if pd.notnull(x) and x is not None else "—"
+            )
         display["OwnerEarnings"]  = display["OwnerEarnings"].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "")
         display["RevenueGrowth"]  = display["RevenueGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
         display["EarningsGrowth"] = display["EarningsGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
@@ -2151,7 +2293,8 @@ with tab_screener:
         # Columns always hidden from display (still used in score calculations)
         # ROIC, OBV, PCV, RSI, MACD, GoldenCross: used in scoring, hidden from table
         # MFI: replaced by MFI_Signal label — hide numeric score
-        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv"}
+        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv",
+                         "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze"}
 
         # Hide columns for metrics that are toggled off
         all_metric_keys = list(METRICS.keys())
@@ -2162,6 +2305,11 @@ with tab_screener:
         if not metric_enabled.get("MFI", True):
             if "MFI_Signal" in display.columns:
                 hidden_cols.append("MFI_Signal")
+        # Short interest columns: show when ShortSqueeze is enabled
+        if not metric_enabled.get("ShortSqueeze", False):
+            for _sc in ["Short % Float", "Days to Cover", "Short Chg"]:
+                if _sc in display.columns:
+                    hidden_cols.append(_sc)
         display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
         styled = display.style.map(color_score, subset=["Score"])
@@ -2456,6 +2604,10 @@ with tab_analyze:
                             "MFISweetSpot":   _cached_row.get("MFISweetSpot"),
                             "NoBearDiv":      _cached_row.get("NoBearDiv"),
                             "MA50Proximity":  _cached_row.get("MA50Proximity"),
+                            "ShortPctFloatRaw": _cached_row.get("ShortPctFloatRaw"),
+                            "DaysToCover":    _cached_row.get("DaysToCover"),
+                            "ShortChange":    _cached_row.get("ShortChange"),
+                            "ShortSqueeze":   _cached_row.get("ShortSqueeze"),
                         }
                     else:
                         try:
@@ -2469,6 +2621,7 @@ with tab_analyze:
                             _oe, _oey  = get_owner_earnings(_cf_r, _fin_r, _info)
                             _vols      = get_volume_signals(_hist_r, _mfi_p)
                             _tech      = calculate_technical_signals(_hist_r)
+                            _short = calculate_short_squeeze(_info)
                             _raw = {
                                 "OE_Yield":       _oey,
                                 "ROIC":           calculate_roic(_fin_r, _bal_r),
@@ -2485,6 +2638,10 @@ with tab_analyze:
                                 "MFISweetSpot":   _tech["MFISweetSpot"],
                                 "NoBearDiv":      _tech["NoBearDiv"],
                                 "MA50Proximity":  _tech["MA50Proximity"],
+                                "ShortPctFloatRaw": _short["ShortPctFloatRaw"],
+                                "DaysToCover":    _short["DaysToCover"],
+                                "ShortChange":    _short["ShortChange"],
+                                "ShortSqueeze":   _short["ShortSqueeze"],
                             }
                         except Exception:
                             _raw = _fc.get("raw", {})
@@ -2508,6 +2665,13 @@ with tab_analyze:
             "cf":   _cf,   "raw":  _raw,
         })
 
+        # Add short interest data directly to analyze_data for display
+        _short_display = {
+            "ShortPctFloatRaw": _raw.get("ShortPctFloatRaw"),
+            "DaysToCover":      _raw.get("DaysToCover"),
+            "ShortChange":      _raw.get("ShortChange"),
+            "ShortSqueeze":     _raw.get("ShortSqueeze"),
+        }
         st.session_state["analyze_data"] = {
             "ticker":      ticker_input,
             "info":        _info,
@@ -2516,6 +2680,7 @@ with tab_analyze:
             "bal":         _bal,
             "cf":          _cf,
             "raw":         _raw,
+            "short":       _short_display,
             "metrics_sel": dict(analyze_metrics),
             "from_cache":  bool(_cached_row),
         }
@@ -2701,6 +2866,63 @@ with tab_analyze:
                                "Negative = trading below the MA (potential value zone). "
                                "Positive = trading above the MA (momentum zone)")
                 st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
+
+            # ── Short Interest ────────────────────────────────
+            st.divider()
+            st.markdown("### 🎯 Short Interest")
+            _sd = st.session_state.get("analyze_data", {}).get("short", {})
+            _spf  = _sd.get("ShortPctFloatRaw")
+            _dtc  = _sd.get("DaysToCover")
+            _schg = _sd.get("ShortChange")
+            _ssq  = _sd.get("ShortSqueeze", 0)
+            if _spf is not None or _dtc is not None:
+                si1, si2, si3, si4 = st.columns(4)
+                si1.metric(
+                    "Short % of Float",
+                    f"{_spf:.1f}%" if _spf is not None else "N/A",
+                    help="Percentage of the float currently sold short. "
+                         "Above 10% = elevated. Above 20% = heavily shorted. Above 30% = extreme. "
+                         "Higher = more potential fuel for a short squeeze."
+                )
+                si2.metric(
+                    "Days to Cover",
+                    f"{_dtc:.1f}" if _dtc is not None else "N/A",
+                    help="How many days of average trading volume it would take all short sellers to exit. "
+                         "Also called Short Ratio. Above 5 = shorts are trapped. "
+                         "Above 10 = very difficult to exit quickly — high squeeze risk."
+                )
+                _schg_str = (f"▲ {_schg:.1%}" if _schg and _schg > 0
+                             else f"▼ {abs(_schg):.1%}" if _schg and _schg < 0
+                             else "N/A")
+                si3.metric(
+                    "Short Change MoM",
+                    _schg_str,
+                    help="Month-over-month change in shares short. "
+                         "▲ = shorts increasing (more bearish bets being placed). "
+                         "▼ = shorts covering (potential squeeze in progress)."
+                )
+                _squeeze_pct = f"{_ssq*100:.0f}%" if _ssq else "0%"
+                si4.metric(
+                    "Squeeze Score",
+                    _squeeze_pct,
+                    help="Composite short squeeze setup score (0–100%). "
+                         "Combines short float %, days-to-cover, and short covering momentum. "
+                         "Above 60% = strong squeeze setup. Above 80% = extreme."
+                )
+                # Visual squeeze meter
+                _bar_filled = int((_ssq or 0) * 20)
+                _bar = "█" * _bar_filled + "░" * (20 - _bar_filled)
+                if _ssq and _ssq >= 0.7:
+                    st.error(f"🔥 **High Squeeze Risk** [{_bar}] {_squeeze_pct} — heavy short interest with squeeze conditions present")
+                elif _ssq and _ssq >= 0.4:
+                    st.warning(f"⚡ **Elevated Short Interest** [{_bar}] {_squeeze_pct} — watch for squeeze trigger")
+                elif _spf and _spf >= 5:
+                    st.info(f"📊 **Moderate Short Interest** [{_bar}] {_squeeze_pct} — some short interest present")
+                else:
+                    st.success(f"✅ **Low Short Interest** [{_bar}] {_squeeze_pct} — minimal squeeze risk")
+                st.caption("Short interest data from Yahoo Finance / FINRA. Updated twice monthly.")
+            else:
+                st.info("Short interest data not available for this ticker.")
 
             # ── Price Range ───────────────────────────────────
             st.divider()
