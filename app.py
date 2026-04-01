@@ -782,81 +782,28 @@ with st.sidebar:
 # ───────────────────────────────────────────────────────────────
 # PRE-COMPUTED DATA LOADER
 # ───────────────────────────────────────────────────────────────
-# Loads nightly stock data from GitHub raw content URL.
-# This means the app always reads the latest committed file without
-# needing a Streamlit Cloud reboot — the nightly GitHub Action commits
-# new data and the app picks it up on the next cache refresh (5 min).
-#
-# Set GITHUB_REPO in Streamlit Cloud secrets:
-#   GITHUB_REPO = "your-username/your-repo-name"
-#   (e.g. "magicpro33/stock")
-# ───────────────────────────────────────────────────────────────
 
-import gzip, json as _json, pathlib as _pathlib, io as _io
+import gzip, json as _json, pathlib as _pathlib
 
 _DATA_FILE = _pathlib.Path(__file__).parent / "data" / "stock_data.json.gz"
 _META_FILE = _pathlib.Path(__file__).parent / "data" / "scan_meta.json"
 
-def _get_github_repo() -> str:
-    """Read the GitHub repo name from Streamlit secrets or environment."""
+def _data_file_mtime() -> float:
+    """Return the data file's modification timestamp, or 0 if it doesn't exist.
+    Used as a cache-busting parameter — when the nightly job writes a new file,
+    the mtime changes and Streamlit re-loads automatically on the next request."""
     try:
-        return st.secrets.get("GITHUB_REPO", "")
+        return _DATA_FILE.stat().st_mtime
     except Exception:
-        return os.environ.get("GITHUB_REPO", "")
+        return 0.0
 
-def _fetch_github_meta() -> dict:
+@st.cache_data(ttl=300)   # check for new file every 5 minutes at most
+def load_precomputed_data(mtime: float = 0.0) -> tuple:
     """
-    Fetch scan_meta.json from GitHub raw content to check if new data exists.
-    Returns the meta dict, or {} on failure.
-    TTL is intentionally short — we want to detect new nightly commits quickly.
+    Load the nightly pre-computed stock data from data/stock_data.json.gz.
+    Returns (results_list, meta_dict) or (None, None) if file doesn't exist.
+    The mtime parameter acts as a cache-buster — a new file triggers a reload.
     """
-    repo = _get_github_repo()
-    if not repo:
-        return {}
-    try:
-        url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
-        resp = requests.get(url, timeout=10,
-                            headers={"Cache-Control": "no-cache"})
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return {}
-
-@st.cache_data(ttl=300)   # re-check GitHub every 5 minutes
-def load_precomputed_data(cache_key: str = "") -> tuple:
-    """
-    Load nightly stock data. Strategy:
-    1. Try GitHub raw URL (always latest committed data, no reboot needed)
-    2. Fall back to local file (for local dev / first deploy before any scan)
-
-    cache_key is the scanned_at timestamp from meta — changes when new data
-    is committed, which busts the Streamlit cache and forces a fresh load.
-    """
-    repo = _get_github_repo()
-
-    # ── Try GitHub raw URL first ──────────────────────────────────
-    if repo:
-        try:
-            url  = (f"https://raw.githubusercontent.com/{repo}/main"
-                    f"/data/stock_data.json.gz")
-            resp = requests.get(url, timeout=60,
-                                headers={"Cache-Control": "no-cache"})
-            if resp.status_code == 200:
-                results = _json.loads(
-                    gzip.decompress(resp.content).decode("utf-8")
-                )
-                # Also fetch meta
-                meta_url  = (f"https://raw.githubusercontent.com/{repo}/main"
-                             f"/data/scan_meta.json")
-                meta_resp = requests.get(meta_url, timeout=10,
-                                         headers={"Cache-Control": "no-cache"})
-                meta = meta_resp.json() if meta_resp.status_code == 200 else {}
-                return results, meta
-        except Exception:
-            pass   # fall through to local file
-
-    # ── Fall back to local file ───────────────────────────────────
     if not _DATA_FILE.exists():
         return None, None
     try:
@@ -870,20 +817,9 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
     except Exception:
         return None, None
 
-
-def _get_cache_key() -> str:
-    """
-    Return the scanned_at timestamp from GitHub meta.
-    Used as cache_key in load_precomputed_data — when a new nightly scan
-    commits updated data, the timestamp changes and busts the 5-min cache.
-    """
-    meta = _fetch_github_meta()
-    return meta.get("scanned_at_utc", "")
-
-
 def get_precomputed_for_exchange(exchange_key: str) -> list:
     """Filter pre-computed results to a specific exchange."""
-    results, _ = load_precomputed_data(cache_key=_get_cache_key())
+    results, _ = load_precomputed_data(mtime=_data_file_mtime())
     if not results:
         return []
     if exchange_key == "sp500":
@@ -1654,7 +1590,7 @@ def color_score(val):
 with tab_screener:
 
  # ── Nightly data status banner (always visible) ───────────────
- _pc_results, _pc_meta = load_precomputed_data(cache_key=_get_cache_key())
+ _pc_results, _pc_meta = load_precomputed_data(mtime=_data_file_mtime())
  if _pc_results:
     _pc_time  = _pc_meta.get("scanned_at_utc", "unknown")
     _pc_count = len(_pc_results)
@@ -1664,21 +1600,12 @@ with tab_screener:
         f"Run Screener to apply filters instantly — no live download needed."
     )
  else:
-    _repo = _get_github_repo()
-    if not _repo:
-        st.error(
-            "⚙️ **One-time setup needed:** Add your GitHub repo name to Streamlit secrets so the app "
-            "can fetch nightly data automatically.\n\n"
-            "Go to: **Streamlit Cloud → your app → Settings → Secrets** and add:\n\n"
-            "```\nGITHUB_REPO = \"your-username/your-repo-name\"\n```\n\n"
-            "Then trigger the first scan: GitHub → Actions → Nightly Stock Scan → Run workflow."
-        )
-    else:
-        st.warning(
-            f"⏳ **No pre-computed data yet** · repo: `{_repo}` · "
-            "Trigger a manual run: GitHub → Actions → Nightly Stock Scan → Run workflow. "
-            "Until then the screener will do a live scan."
-        )
+    st.warning(
+        "⏳ **No pre-computed data yet.** The nightly scan hasn't run yet or "
+        "`data/stock_data.json.gz` doesn't exist in your repo. "
+        "**Trigger a manual run:** GitHub → Actions → Nightly Stock Scan → Run workflow. "
+        "Until then, the screener will do a live scan (slow)."
+    )
 
  if run_btn:
     active_metrics = [k for k, v in metric_enabled.items() if v]
@@ -1689,7 +1616,7 @@ with tab_screener:
     # ── Priority 1: Pre-computed nightly data file ───────────────────
     # Check if data/stock_data.json.gz exists (written by nightly GitHub Action).
     # This is the fastest path — no live scanning needed at all.
-    _precomp_results, _precomp_meta = load_precomputed_data(cache_key=_get_cache_key())
+    _precomp_results, _precomp_meta = load_precomputed_data(mtime=_data_file_mtime())
     _precomp_for_exchange = get_precomputed_for_exchange(exchange_key) if _precomp_results else []
     _using_precomp = bool(_precomp_for_exchange)
 
@@ -2300,7 +2227,7 @@ with tab_analyze:
 
         # Also check the nightly pre-computed data if session cache has nothing
         if not _cached_row:
-            _nightly_results, _ = load_precomputed_data(cache_key=_get_cache_key())
+            _nightly_results, _ = load_precomputed_data(mtime=_data_file_mtime())
             if _nightly_results:
                 _cached_row = next(
                     (r for r in _nightly_results if r.get("Ticker") == ticker_input), None
