@@ -788,11 +788,21 @@ import gzip, json as _json, pathlib as _pathlib
 _DATA_FILE = _pathlib.Path(__file__).parent / "data" / "stock_data.json.gz"
 _META_FILE = _pathlib.Path(__file__).parent / "data" / "scan_meta.json"
 
-@st.cache_data(ttl=3600)   # reload at most once per hour
-def load_precomputed_data() -> tuple:
+def _data_file_mtime() -> float:
+    """Return the data file's modification timestamp, or 0 if it doesn't exist.
+    Used as a cache-busting parameter — when the nightly job writes a new file,
+    the mtime changes and Streamlit re-loads automatically on the next request."""
+    try:
+        return _DATA_FILE.stat().st_mtime
+    except Exception:
+        return 0.0
+
+@st.cache_data(ttl=300)   # check for new file every 5 minutes at most
+def load_precomputed_data(mtime: float = 0.0) -> tuple:
     """
     Load the nightly pre-computed stock data from data/stock_data.json.gz.
     Returns (results_list, meta_dict) or (None, None) if file doesn't exist.
+    The mtime parameter acts as a cache-buster — a new file triggers a reload.
     """
     if not _DATA_FILE.exists():
         return None, None
@@ -804,16 +814,15 @@ def load_precomputed_data() -> tuple:
             with open(_META_FILE) as f:
                 meta = _json.load(f)
         return results, meta
-    except Exception as e:
+    except Exception:
         return None, None
 
 def get_precomputed_for_exchange(exchange_key: str) -> list:
     """Filter pre-computed results to a specific exchange."""
-    results, _ = load_precomputed_data()
+    results, _ = load_precomputed_data(mtime=_data_file_mtime())
     if not results:
         return []
     if exchange_key == "sp500":
-        # S&P 500 tickers are tagged with "sp500" in _exchanges list
         return [r for r in results if "sp500" in r.get("_exchanges", [])]
     return [r for r in results if exchange_key in r.get("_exchanges", [])]
 
@@ -1581,7 +1590,7 @@ def color_score(val):
 with tab_screener:
 
  # ── Nightly data status banner (always visible) ───────────────
- _pc_results, _pc_meta = load_precomputed_data()
+ _pc_results, _pc_meta = load_precomputed_data(mtime=_data_file_mtime())
  if _pc_results:
     _pc_time  = _pc_meta.get("scanned_at_utc", "unknown")
     _pc_count = len(_pc_results)
@@ -1607,7 +1616,7 @@ with tab_screener:
     # ── Priority 1: Pre-computed nightly data file ───────────────────
     # Check if data/stock_data.json.gz exists (written by nightly GitHub Action).
     # This is the fastest path — no live scanning needed at all.
-    _precomp_results, _precomp_meta = load_precomputed_data()
+    _precomp_results, _precomp_meta = load_precomputed_data(mtime=_data_file_mtime())
     _precomp_for_exchange = get_precomputed_for_exchange(exchange_key) if _precomp_results else []
     _using_precomp = bool(_precomp_for_exchange)
 
@@ -2216,6 +2225,14 @@ with tab_analyze:
             (r for r in _cached_results if r.get("Ticker") == ticker_input), None
         )
 
+        # Also check the nightly pre-computed data if session cache has nothing
+        if not _cached_row:
+            _nightly_results, _ = load_precomputed_data(mtime=_data_file_mtime())
+            if _nightly_results:
+                _cached_row = next(
+                    (r for r in _nightly_results if r.get("Ticker") == ticker_input), None
+                )
+
         # Ensure fin cache dict exists and has an entry for this ticker
         if "analyze_fin_cache" not in st.session_state:
             st.session_state["analyze_fin_cache"] = {}
@@ -2316,12 +2333,19 @@ with tab_analyze:
 
                 # ── price history ─────────────────────────────────
                 if need_hist:
-                    try:
-                        _hist = _stock.history(period="1y")
+                    # Try nightly cache first — avoids a live yfinance call
+                    if _cached_row and _cached_row.get("_hist"):
+                        _hist = _hist_from_cache(_cached_row)
                         if not _hist.empty:
                             _fc["hist"] = _hist
-                    except Exception:
-                        _hist = _fc.get("hist", pd.DataFrame())
+                            need_hist = False
+                    if need_hist:
+                        try:
+                            _hist = _stock.history(period="1y")
+                            if not _hist.empty:
+                                _fc["hist"] = _hist
+                        except Exception:
+                            _hist = _fc.get("hist", pd.DataFrame())
                 else:
                     _hist = _fc["hist"]
 
@@ -2356,7 +2380,7 @@ with tab_analyze:
                 # ── metrics (raw scores) ──────────────────────────
                 if need_raw:
                     if _cached_row:
-                        # Pull directly from screener data — no recalculation needed
+                        # Pull directly from screener/nightly data — no recalculation needed
                         _raw = {
                             "OE_Yield":       _cached_row.get("OE_Yield"),
                             "ROIC":           _cached_row.get("ROIC"),
@@ -2367,6 +2391,12 @@ with tab_analyze:
                             "OBV":            _cached_row.get("OBV"),
                             "MFI":            _cached_row.get("MFI"),
                             "PCV":            _cached_row.get("PCV"),
+                            "RSI":            _cached_row.get("RSI"),
+                            "MACD":           _cached_row.get("MACD"),
+                            "GoldenCross":    _cached_row.get("GoldenCross"),
+                            "MFISweetSpot":   _cached_row.get("MFISweetSpot"),
+                            "NoBearDiv":      _cached_row.get("NoBearDiv"),
+                            "MA50Proximity":  _cached_row.get("MA50Proximity"),
                         }
                     else:
                         try:
