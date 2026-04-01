@@ -60,10 +60,12 @@ jobs:
           if [ -f data/stock_data.json.gz ] && [ -f data/scan_meta.json ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+            # Fetch latest remote state so we can rebase cleanly
+            git fetch origin main
+            git reset --soft origin/main
             git add data/stock_data.json.gz data/scan_meta.json
+            # Only commit if there are staged changes
             git diff --staged --quiet || git commit -m "chore: nightly scan $(date -u '+%Y-%m-%d %H:%M UTC')"
-            # Pull remote changes first (rebase keeps history clean), then push
-            git pull --rebase origin main
             git push origin main
             echo "Data files committed successfully."
           else
