@@ -2096,7 +2096,7 @@ with tab_screener:
                 hidden_cols.append("MFI_Signal")
         display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
-        styled = display.style.applymap(color_score, subset=["Score"])
+        styled = display.style.map(color_score, subset=["Score"])
 
         st.subheader(f"Top {len(screened)} Stocks — {sector_label}")
         st.dataframe(styled, use_container_width=True, height=600)
