@@ -703,12 +703,13 @@ def main():
     #   ~7000 tickers / 30 per batch = ~233 batches
     #   233 batches × (30 tickers / 3 workers × ~2s avg + 8s pause) ≈ 190 min
     # Well within the 210-minute timeout.
-    log.info(f"Starting download: {total} tickers · {WORKERS} workers · "
-             f"batches of {BATCH_SIZE} · {BATCH_PAUSE}s pause between batches")
     all_results  = []
     done_count   = 0
     remaining    = list(unique_tickers)
+    total        = len(unique_tickers)
     batch_num    = 0
+    log.info(f"Starting download: {total} tickers · {WORKERS} workers · "
+             f"batches of {BATCH_SIZE} · {BATCH_PAUSE}s pause between batches")
 
     while remaining:
         batch      = remaining[:BATCH_SIZE]
