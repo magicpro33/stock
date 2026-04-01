@@ -62,7 +62,9 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add data/stock_data.json.gz data/scan_meta.json
             git diff --staged --quiet || git commit -m "chore: nightly scan $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git push
+            # Pull remote changes first (rebase keeps history clean), then push
+            git pull --rebase origin main
+            git push origin main
             echo "Data files committed successfully."
           else
             echo "ERROR: data files not found — scan failed. Check logs above."
