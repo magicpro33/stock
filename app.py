@@ -798,14 +798,18 @@ def _get_github_repo() -> str:
     except Exception:
         return _os.environ.get("GITHUB_REPO", "")
 
+@st.cache_data(ttl=1800)   # check GitHub for new data at most every 30 minutes
 def _fetch_github_meta() -> dict:
-    """Fetch scan_meta.json from GitHub to detect when new data was committed."""
+    """
+    Fetch scan_meta.json from GitHub to detect when new nightly data exists.
+    Cached for 30 minutes — no need to hit GitHub on every page render.
+    """
     repo = _get_github_repo()
     if not repo:
         return {}
     try:
         url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
-        resp = requests.get(url, timeout=10, headers={"Cache-Control": "no-cache"})
+        resp = requests.get(url, timeout=10)   # allow CDN cache — no Cache-Control header
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -813,9 +817,11 @@ def _fetch_github_meta() -> dict:
     return {}
 
 def _get_cache_key() -> str:
-    """Return scanned_at timestamp — changes when nightly job runs, busting cache."""
+    """
+    Return scanned_at timestamp from GitHub meta.
+    Cached via _fetch_github_meta — safe to call multiple times per render.
+    """
     meta = _fetch_github_meta()
-    # Fall back to local mtime so local dev still works
     if not meta:
         try:
             return str(_DATA_FILE.stat().st_mtime)
@@ -836,11 +842,11 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
     if repo:
         try:
             url  = f"https://raw.githubusercontent.com/{repo}/main/data/stock_data.json.gz"
-            resp = requests.get(url, timeout=60, headers={"Cache-Control": "no-cache"})
+            resp = requests.get(url, timeout=60)   # allow CDN cache
             if resp.status_code == 200:
                 results = _json.loads(gzip.decompress(resp.content).decode("utf-8"))
                 meta_url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
-                meta_resp = requests.get(meta_url, timeout=10, headers={"Cache-Control": "no-cache"})
+                meta_resp = requests.get(meta_url, timeout=10)
                 meta = meta_resp.json() if meta_resp.status_code == 200 else {}
                 return results, meta
         except Exception:
@@ -861,7 +867,8 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
         return None, None
 
 def get_precomputed_for_exchange(exchange_key: str) -> list:
-    """Filter pre-computed results to a specific exchange."""
+    """Filter pre-computed results to a specific exchange.
+    Uses already-cached load_precomputed_data — no extra network calls."""
     results, _ = load_precomputed_data(cache_key=_get_cache_key())
     if not results:
         return []
@@ -1633,7 +1640,8 @@ def color_score(val):
 with tab_screener:
 
  # ── Nightly data status banner (always visible) ───────────────
- _pc_results, _pc_meta = load_precomputed_data(cache_key=_get_cache_key())
+ _ck = _get_cache_key()
+ _pc_results, _pc_meta = load_precomputed_data(cache_key=_ck)
  if _pc_results:
     _pc_time  = _pc_meta.get("scanned_at_utc", "unknown")
     _pc_count = len(_pc_results)
@@ -1667,7 +1675,7 @@ with tab_screener:
     # ── Priority 1: Pre-computed nightly data file ───────────────────
     # Check if data/stock_data.json.gz exists (written by nightly GitHub Action).
     # This is the fastest path — no live scanning needed at all.
-    _precomp_results, _precomp_meta = load_precomputed_data(cache_key=_get_cache_key())
+    _precomp_results, _precomp_meta = load_precomputed_data(cache_key=_ck)
     _precomp_for_exchange = get_precomputed_for_exchange(exchange_key) if _precomp_results else []
     _using_precomp = bool(_precomp_for_exchange)
 
@@ -1710,7 +1718,7 @@ with tab_screener:
             f"indicators recomputed instantly. "
             f"Click **Clear Cache & Rescan** to fetch fresh data."
         )
-        if st.button("🔄 Clear Cache & Rescan", key="clear_cache_btn"):
+        if st.button("🔄 Clear Cache & Rescan", key="clear_live_cache_btn"):
             st.session_state.pop("screener_cache", None)
             st.rerun()
 
@@ -2278,7 +2286,7 @@ with tab_analyze:
 
         # Also check the nightly pre-computed data if session cache has nothing
         if not _cached_row:
-            _nightly_results, _ = load_precomputed_data(cache_key=_get_cache_key())
+            _nightly_results, _ = load_precomputed_data(cache_key=_ck)
             if _nightly_results:
                 _cached_row = next(
                     (r for r in _nightly_results if r.get("Ticker") == ticker_input), None
