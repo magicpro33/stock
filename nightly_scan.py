@@ -43,11 +43,16 @@ OUTPUT_DIR      = os.path.join(os.path.dirname(__file__), "data")
 DATA_FILE       = os.path.join(OUTPUT_DIR, "stock_data.json.gz")
 META_FILE       = os.path.join(OUTPUT_DIR, "scan_meta.json")
 
-# Worker count for nightly job — runs unattended so we can be conservative
-# and let it take longer without anyone waiting. Lower = fewer 429s.
-WORKERS         = 5
-MFI_PERIOD      = 14   # default; app recomputes from raw hist anyway
-RANGE_DAYS      = 30   # default; same
+# Worker count — KEEP THIS LOW for nightly jobs.
+# GitHub Actions IPs are heavily rate-limited by Yahoo Finance.
+# 3 workers = ~3 requests/sec. Too fast = empty responses for everything.
+WORKERS         = 3
+# Pause between batches (seconds) — lets Yahoo's rate limiter reset
+BATCH_PAUSE     = 8
+# Batch size — small batches + pauses prevents sustained hammering
+BATCH_SIZE      = 30
+MFI_PERIOD      = 14
+RANGE_DAYS      = 30
 
 ETF_KEYWORDS = [
     "etf", "ishares", "invesco", "vanguard", "spdr", "proshares",
@@ -533,94 +538,104 @@ def calculate_roic_trend(fin, bal):
 
 def process_ticker(args):
     t, mfi_period, range_days = args
-    try:
-        stock = yf.Ticker(t)
-
+    # 3 attempts with increasing backoff — nightly job has time to spare.
+    for attempt in range(3):
         try:
-            info = stock.info or {}
-        except Exception:
-            return None
+            if attempt > 0:
+                time.sleep(attempt * 5 + random.uniform(0, 3))
 
-        if not info or len(info) < 5:
-            return None
-        if is_etf_or_fund(info):
-            return None
+            stock = yf.Ticker(t)
+            info  = stock.info or {}
 
-        price = info.get("currentPrice") or info.get("regularMarketPrice")
-        if not price:
-            return None
+            if not info or len(info) < 5:
+                # Rate-limited: wait and retry
+                if attempt < 2:
+                    time.sleep(10 + random.uniform(0, 5))
+                    continue
+                return None
 
-        try:
-            hist = stock.history(period="1y")
-            if hist.empty or len(hist) < 30:
-                hist = stock.history(period="6mo")
-        except Exception:
-            hist = pd.DataFrame()
+            if is_etf_or_fund(info):
+                return None
 
-        try:
-            fin = stock.financials
-        except Exception:
-            fin = pd.DataFrame()
-        try:
-            bal = stock.balance_sheet
-        except Exception:
-            bal = pd.DataFrame()
-        try:
-            cf = stock.cashflow
-        except Exception:
-            cf = pd.DataFrame()
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if not price:
+                return None
 
-        vol_signals    = get_volume_signals(hist, mfi_period)
-        tech_signals   = calculate_technical_signals(hist)
-        range_data     = calculate_price_range(hist, range_days)
-        ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
-                          if len(hist) >= 50 else None)
-        owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+            try:
+                hist = stock.history(period="1y")
+                if hist.empty or len(hist) < 30:
+                    hist = stock.history(period="6mo")
+            except Exception:
+                hist = pd.DataFrame()
 
-        hist_cache = {}
-        if not hist.empty:
-            hist_cache = {
-                "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
-                "open":   hist["Open"].tolist(),
-                "high":   hist["High"].tolist(),
-                "low":    hist["Low"].tolist(),
-                "close":  hist["Close"].tolist(),
-                "volume": hist["Volume"].tolist(),
+            try:
+                fin = stock.financials
+            except Exception:
+                fin = pd.DataFrame()
+            try:
+                bal = stock.balance_sheet
+            except Exception:
+                bal = pd.DataFrame()
+            try:
+                cf = stock.cashflow
+            except Exception:
+                cf = pd.DataFrame()
+
+            vol_signals  = get_volume_signals(hist, mfi_period)
+            tech_signals = calculate_technical_signals(hist)
+            range_data   = calculate_price_range(hist, range_days)
+            ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
+                            if len(hist) >= 50 else None)
+            owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+
+            hist_cache = {}
+            if not hist.empty:
+                hist_cache = {
+                    "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
+                    "open":   hist["Open"].tolist(),
+                    "high":   hist["High"].tolist(),
+                    "low":    hist["Low"].tolist(),
+                    "close":  hist["Close"].tolist(),
+                    "volume": hist["Volume"].tolist(),
+                }
+
+            return {
+                "Ticker":         t,
+                "Sector":         info.get("sector", "Unknown"),
+                "Price":          price,
+                "MarketCap":      info.get("marketCap"),
+                "P/E":            info.get("trailingPE"),
+                "OwnerEarnings":  owner_earnings,
+                "OE_Yield":       oe_yield,
+                "ROIC":           calculate_roic(fin, bal),
+                "ROIC_Trend":     calculate_roic_trend(fin, bal),
+                "RevenueGrowth":  info.get("revenueGrowth"),
+                "EarningsGrowth": info.get("earningsGrowth"),
+                "Piotroski":      calculate_piotroski(fin, bal, cf),
+                "MA50":           ma50,
+                "OBV":            vol_signals["OBV"],
+                "MFI":            vol_signals["MFI"],
+                "PCV":            vol_signals["PCV"],
+                "RSI":            tech_signals["RSI"],
+                "MACD":           tech_signals["MACD"],
+                "GoldenCross":    tech_signals["GoldenCross"],
+                "MFISweetSpot":   tech_signals["MFISweetSpot"],
+                "NoBearDiv":      tech_signals["NoBearDiv"],
+                "MA50Proximity":  tech_signals["MA50Proximity"],
+                "RangeHigh":      range_data["RangeHigh"],
+                "RangeLow":       range_data["RangeLow"],
+                "RangePct":       range_data["RangePct"],
+                "RangePos":       range_data["RangePos"],
+                "_hist":          hist_cache,
+                "_exchange":      "",
             }
 
-        return {
-            "Ticker":         t,
-            "Sector":         info.get("sector", "Unknown"),
-            "Price":          price,
-            "MarketCap":      info.get("marketCap"),
-            "P/E":            info.get("trailingPE"),
-            "OwnerEarnings":  owner_earnings,
-            "OE_Yield":       oe_yield,
-            "ROIC":           calculate_roic(fin, bal),
-            "ROIC_Trend":     calculate_roic_trend(fin, bal),
-            "RevenueGrowth":  info.get("revenueGrowth"),
-            "EarningsGrowth": info.get("earningsGrowth"),
-            "Piotroski":      calculate_piotroski(fin, bal, cf),
-            "MA50":           ma50,
-            "OBV":            vol_signals["OBV"],
-            "MFI":            vol_signals["MFI"],
-            "PCV":            vol_signals["PCV"],
-            "RSI":            tech_signals["RSI"],
-            "MACD":           tech_signals["MACD"],
-            "GoldenCross":    tech_signals["GoldenCross"],
-            "MFISweetSpot":   tech_signals["MFISweetSpot"],
-            "NoBearDiv":      tech_signals["NoBearDiv"],
-            "MA50Proximity":  tech_signals["MA50Proximity"],
-            "RangeHigh":      range_data["RangeHigh"],
-            "RangeLow":       range_data["RangeLow"],
-            "RangePct":       range_data["RangePct"],
-            "RangePos":       range_data["RangePos"],
-            "_hist":          hist_cache,
-            "_exchange":      "",   # filled in below
-        }
-    except Exception:
-        return None
+        except Exception:
+            if attempt == 2:
+                return None
+            continue
 
+    return None  # all attempts exhausted
 
 # ── Scan one exchange ─────────────────────────────────────────────────────────
 
@@ -682,31 +697,50 @@ def main():
     for exch, tl in all_tickers.items():
         log.info(f"  {exch.upper()}: {len(tl)}")
 
-    # ── 2. Scan all tickers once ──────────────────────────────────────
-    log.info("Starting download phase...")
-    all_results = []
-    done_count  = 0
-    total       = len(unique_tickers)
+    # ── 2. Scan all tickers in small batches with pauses ────────────
+    # Small batches + pauses prevent sustained rate limiting from Yahoo.
+    # At BATCH_SIZE=30, BATCH_PAUSE=8s, WORKERS=3:
+    #   ~7000 tickers / 30 per batch = ~233 batches
+    #   233 batches × (30 tickers / 3 workers × ~2s avg + 8s pause) ≈ 190 min
+    # Well within the 210-minute timeout.
+    log.info(f"Starting download: {total} tickers · {WORKERS} workers · "
+             f"batches of {BATCH_SIZE} · {BATCH_PAUSE}s pause between batches")
+    all_results  = []
+    done_count   = 0
+    remaining    = list(unique_tickers)
+    batch_num    = 0
 
-    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        futures = {
-            executor.submit(process_ticker, (t, MFI_PERIOD, RANGE_DAYS)): t
-            for t in unique_tickers
-        }
-        for future in as_completed(futures):
-            t = futures[future]
-            try:
-                result = future.result(timeout=20)
-            except Exception:
-                result = None
-            if result:
-                # Tag which exchanges this ticker belongs to
-                result["_exchanges"] = list(ticker_to_exchanges.get(t, set()))
-                all_results.append(result)
-            done_count += 1
-            if done_count % 100 == 0 or done_count == total:
-                pct = int(done_count / total * 100)
-                log.info(f"  {done_count}/{total} ({pct}%)  ·  {len(all_results)} valid")
+    while remaining:
+        batch      = remaining[:BATCH_SIZE]
+        remaining  = remaining[BATCH_SIZE:]
+        batch_num += 1
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+            futures = {
+                executor.submit(process_ticker, (t, MFI_PERIOD, RANGE_DAYS)): t
+                for t in batch
+            }
+            for future in as_completed(futures):
+                t = futures[future]
+                try:
+                    result = future.result(timeout=45)
+                except Exception:
+                    result = None
+                if result:
+                    result["_exchanges"] = list(ticker_to_exchanges.get(t, set()))
+                    all_results.append(result)
+                done_count += 1
+
+        # Log progress every 10 batches
+        if batch_num % 10 == 0 or not remaining:
+            pct = int(done_count / total * 100)
+            pass_rate = len(all_results) / done_count if done_count else 0
+            log.info(f"  Batch {batch_num} · {done_count}/{total} ({pct}%) · "
+                     f"{len(all_results)} valid · pass rate {pass_rate:.0%}")
+
+        # Pause between batches — lets Yahoo's rate limiter breathe
+        if remaining:
+            time.sleep(BATCH_PAUSE)
 
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
