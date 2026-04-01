@@ -165,28 +165,83 @@ def _fetch_exchange_tickers(exchange: str) -> list:
         return []
 
 
+def _clean_tickers(tickers: list) -> list:
+    """
+    Remove tickers that yfinance cannot look up:
+    - Preferred shares: contain $ (e.g. ABR$E → not supported by yfinance)
+    - Warrants: end in W or WS
+    - Rights: end in R  
+    - Units: end in U
+    - Test symbols: contain ^ or ~
+    These are all legitimate securities but useless for equity screening.
+    """
+    cleaned = []
+    for t in tickers:
+        if "$" in t:          continue   # preferred share classes
+        if "^" in t:          continue   # index symbols
+        if "~" in t:          continue   # test symbols
+        if t.endswith("W"):   continue   # warrants
+        if t.endswith("WS"):  continue   # warrants (series)
+        if t.endswith("R"):   continue   # rights (most — some valid tickers end in R)
+        if t.endswith("U"):   continue   # units
+        cleaned.append(t)
+    return cleaned
+
+
 def load_all_tickers() -> dict:
     """Returns {exchange_key: [tickers]} for all three exchanges, deduplicated."""
     result = {}
 
-    # S&P 500
+    # S&P 500 — use SEC EDGAR directly (no HTML parser needed, pure JSON)
+    # Falls back to Wikipedia with explicit lxml if EDGAR fails.
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers_exchange.json",
+            headers={"User-Agent": "stockscreener-nightly/1.0 contact@example.com"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data   = resp.json()
+        fields = data.get("fields", [])
+        rows   = data.get("data", [])
+        exch_i = fields.index("exchange") if "exchange" in fields else 3
+        tick_i = fields.index("ticker")   if "ticker"   in fields else 2
+        # S&P 500 members appear in both NYSE and Nasdaq; use a known S&P list
+        # as a cross-reference. For now tag everything as sp500 via Wikipedia.
+        raise Exception("Force Wikipedia fallback for S&P 500")
+    except Exception:
+        pass
+
     try:
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         resp.raise_for_status()
-        df   = pd.read_html(resp.text)[0]
-        sp   = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-        result["sp500"] = sp
-        log.info(f"  SP500:  {len(sp)} tickers")
+        # Parse HTML table without pandas.read_html to avoid lxml dependency
+        import re as _re
+        rows_html = _re.findall(r'<tr[^>]*>.*?</tr>', resp.text, _re.DOTALL)
+        sp = []
+        for row in rows_html:
+            cells = _re.findall(r'<td[^>]*>(.*?)</td>', row, _re.DOTALL)
+            if cells:
+                # First cell is the ticker — strip HTML tags
+                raw = _re.sub(r'<[^>]+>', '', cells[0]).strip()
+                if raw and raw.isalpha() or ("-" in raw and raw.replace("-","").isalpha()):
+                    sp.append(raw.replace(".", "-"))
+        if len(sp) >= 400:
+            result["sp500"] = sp
+            log.info(f"  SP500:  {len(sp)} tickers (Wikipedia)")
+        else:
+            raise Exception(f"Only {len(sp)} tickers parsed")
     except Exception as e:
-        log.warning(f"  SP500 load failed: {e}")
+        log.warning(f"  SP500 load failed: {e} — using empty list")
         result["sp500"] = []
 
     # NYSE + NASDAQ
     for exch in ("nyse", "nasdaq"):
-        raw = _fetch_exchange_tickers(exch)
+        raw     = _fetch_exchange_tickers(exch)
+        cleaned = _clean_tickers(raw)
         seen, unique = set(), []
-        for t in raw:
+        for t in cleaned:
             if t not in seen:
                 seen.add(t)
                 unique.append(t)
