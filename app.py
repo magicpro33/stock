@@ -356,19 +356,22 @@ with st.sidebar:
 
     # ── Magic Stock preset button ────────────────────────────────
     if st.button("✨ Magic Stock", use_container_width=True, key="preset_magic_stock",
-                 help="Finds stocks with the full continuation signal stack: "
-                      "MFI in sweet spot (55–75), rising OBV, MACD accelerating, "
-                      "golden cross confirmed, no bearish divergence, "
-                      "price near MA50 support. The ideal 'going higher' setup."):
+                 help="Finds stocks matching the perfect entry checklist: "
+                      "price just crossed above MA50 on heavy volume (PCV), "
+                      "OBV rising (institutional accumulation), MACD accelerating, "
+                      "RSI in the 55-70 sweet spot, no bearish divergence, "
+                      "golden cross confirmed, and price close to MA50 support "
+                      "for a low-risk entry point."):
         # ── Filter settings ──────────────────────────────────────
-        st.session_state["slider_max_price"]   = 500    # Don't cap price — quality stocks can be expensive
-        st.session_state["slider_min_score"]   = 0.0    # Let the metric weights do the filtering
-        st.session_state["tog_ma50"]           = "above"  # Must be in uptrend — above 50MA
-        st.session_state["tog_range"]          = False  # Range filter off — we want trending stocks
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # Entry checklist condition: price must be ABOVE MA50 (just crossed)
+        st.session_state["tog_ma50"]           = "above"
+        # Range filter off — we want stocks breaking out, not coiling
+        st.session_state["tog_range"]          = False
         st.session_state["slider_range_days"]  = 20
         st.session_state["slider_range_pct"]   = 15.0
         st.session_state["slider_mfi_period"]  = 14
-        # Turn off valuation filters — momentum setup doesn't require value conditions
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
         # ── Turn off all metrics first ────────────────────────────
@@ -376,42 +379,46 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # ── The full "going higher" signal stack ──────────────────
-        # GoldenCross ×4 — 50MA above 200MA = institutional uptrend confirmed
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 4.0
-
-        # MFISweetSpot ×4 — MFI 55–75: buying pressure without overbought risk
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 4.0
-
-        # NoBearDiv ×3 — price and MFI both making higher highs = momentum confirmed
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 3.0
-
-        # OBV ×3 — rising OBV = institutions accumulating, not distributing
+        # ── Entry checklist metric weights ────────────────────────
+        # Checklist item: "OBV rising" — institutional accumulation before the move
+        # Highest weight: this is the single best early signal that big money is buying
         st.session_state["tog_OBV"]  = True
-        st.session_state["wt_OBV"]   = 3.0
+        st.session_state["wt_OBV"]   = 5.0
 
-        # MACD ×3 — histogram positive and accelerating = short-term momentum confirmed
+        # Checklist item: "Volume 2x+ normal on breakout" — PCV measures up-day volume dominance
+        # High weight: heavy volume on the breakout confirms real covering/buying, not speculation
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 4.0
+
+        # Checklist item: "Price just crossed above MA50" — MA50Proximity scores stocks near MA50
+        # High weight: entry near MA50 = low risk, tight stop, maximum room to run
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 4.0
+
+        # Checklist item: "Golden cross confirmed" — 50MA above 200MA = institutional uptrend
+        # The long-term structural backdrop that makes the MA50 breakout meaningful
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 3.0
+
+        # Checklist item: "MACD accelerating" — histogram positive and growing = momentum building
+        # Confirms the breakout has real momentum behind it, not just a one-day spike
         st.session_state["tog_MACD"] = True
         st.session_state["wt_MACD"]  = 3.0
 
-        # RSI ×2 — RSI 55–70: uptrend confirmed, room to run before overbought
+        # Checklist item: "No bearish divergence" — price and MFI making higher highs together
+        # Rules out false breakouts where price moves but buying pressure doesn't confirm
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 3.0
+
+        # Checklist item: "RSI in the 55-70 sweet spot" — uptrend confirmed, not yet overbought
+        # RSI below 55 = no real momentum. RSI above 70 = extended, higher reversal risk.
         st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 2.0
+        st.session_state["wt_RSI"]  = 3.0
 
-        # MA50Proximity ×2 — price near MA50 support = low-risk entry, not extended
-        st.session_state["tog_MA50Proximity"] = True
-        st.session_state["wt_MA50Proximity"]  = 2.0
-
-        # PCV ×2 — dominant up-day volume = buyers in control
-        st.session_state["tog_PCV"]  = True
-        st.session_state["wt_PCV"]   = 2.0
-
-        # ROIC ×1 — quality filter: only fundamentally sound businesses
-        st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 1.0
+        # MFI sweet spot — money flowing in without being overbought (55-75 range)
+        # Confirms buying pressure is sustained, not a short-term spike
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 2.0
 
         st.rerun()
 
