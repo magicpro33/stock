@@ -884,12 +884,24 @@ def _get_cache_key() -> str:
             return "0"
     return meta.get("scanned_at_utc", "0")
 
+def _strip_hist(results: list) -> list:
+    """
+    Remove raw OHLCV history (_hist) from nightly results.
+    The nightly cache uses pre-computed scores — _hist is only needed for
+    the live screener's recompute_indicators(). Stripping it saves ~13KB
+    per ticker, reducing the nightly cache from ~65MB to ~5MB for 5000 stocks.
+    The _hist key is kept in live screener_cache (session_state) where it IS needed.
+    """
+    return [{k: v for k, v in row.items() if k != "_hist"} for row in results]
+
+
 @st.cache_data(ttl=300)   # re-check every 5 minutes
 def load_precomputed_data(cache_key: str = "") -> tuple:
     """
     Load nightly stock data. Tries GitHub raw URL first (always latest),
     falls back to local file for dev environments.
     cache_key changes when new data is committed → busts Streamlit cache.
+    _hist stripped to save memory — nightly data uses pre-computed scores.
     """
     repo = _get_github_repo()
 
@@ -899,7 +911,9 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
             url  = f"https://raw.githubusercontent.com/{repo}/main/data/stock_data.json.gz"
             resp = requests.get(url, timeout=60)   # allow CDN cache
             if resp.status_code == 200:
-                results = _json.loads(gzip.decompress(resp.content).decode("utf-8"))
+                results = _strip_hist(
+                    _json.loads(gzip.decompress(resp.content).decode("utf-8"))
+                )
                 meta_url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
                 meta_resp = requests.get(meta_url, timeout=10)
                 meta = meta_resp.json() if meta_resp.status_code == 200 else {}
@@ -912,7 +926,7 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
         return None, None
     try:
         with gzip.open(_DATA_FILE, "rt", encoding="utf-8") as f:
-            results = _json.load(f)
+            results = _strip_hist(_json.load(f))
         meta = {}
         if _META_FILE.exists():
             with open(_META_FILE) as f:
@@ -1431,15 +1445,18 @@ def process_ticker(args):
         roic_trend     = calculate_roic_trend(fin, bal)
         piotroski      = calculate_piotroski(fin, bal, cf)
 
-        # ── 6. Compact OHLCV cache ──────────────────────────────────────
+        # ── 6. Compact OHLCV cache — keep last 200 bars only ──────────
+        # Golden cross needs 200 bars; MFI/OBV/range need far less.
+        # Trimming from 252 to 200 bars saves ~4KB per ticker with no indicator loss.
         if not hist.empty:
+            _h = hist.iloc[-200:] if len(hist) > 200 else hist
             hist_cache = {
-                "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
-                "open":   hist["Open"].tolist(),
-                "high":   hist["High"].tolist(),
-                "low":    hist["Low"].tolist(),
-                "close":  hist["Close"].tolist(),
-                "volume": hist["Volume"].tolist(),
+                "dates":  _h.index.strftime("%Y-%m-%d").tolist(),
+                "open":   _h["Open"].tolist(),
+                "high":   _h["High"].tolist(),
+                "low":    _h["Low"].tolist(),
+                "close":  _h["Close"].tolist(),
+                "volume": _h["Volume"].tolist(),
             }
         else:
             hist_cache = {}
@@ -2027,14 +2044,17 @@ with tab_screener:
             st.stop()
 
         # ── Store results in session_state cache ──────────────────
-        # Raw OHLCV history is embedded in each result row (_hist key).
-        # mfi_period and range_days are NOT stored — indicators are
-        # recomputed on-the-fly from _hist whenever settings change.
-        st.session_state["screener_cache"] = {
-            "exchange_key": exchange_key,
-            "results":      results,
-            "scanned_at":   datetime.now().strftime("%H:%M:%S"),
-        }
+        # Only cache live scan results — nightly data stays in st.cache_data
+        # (shared across all users) and doesn't need a per-session copy.
+        # Strip results without _hist before caching to save memory — tickers
+        # without history can't benefit from recompute_indicators anyway.
+        _results_with_hist = [r for r in results if r.get("_hist")]
+        if _results_with_hist:
+            st.session_state["screener_cache"] = {
+                "exchange_key": exchange_key,
+                "results":      _results_with_hist,
+                "scanned_at":   datetime.now().strftime("%H:%M:%S"),
+            }
         # Recompute immediately with current sidebar values
         results = recompute_indicators(results, mfi_period, range_days)
 
@@ -2444,9 +2464,15 @@ with tab_analyze:
         if "analyze_fin_cache" not in st.session_state:
             st.session_state["analyze_fin_cache"] = {}
         _fin_store = st.session_state["analyze_fin_cache"]
+        # Cap cache at 5 tickers — evict oldest when full to bound memory use.
+        # Financial DataFrames are ~50-200KB each; 5 tickers ≈ 1MB max.
         if ticker_input not in _fin_store:
-            _fin_store[ticker_input] = {}          # initialise empty — avoids KeyError
-        _fc = _fin_store[ticker_input]             # shorthand reference
+            if len(_fin_store) >= 5:
+                # Remove the oldest entry (first key inserted)
+                _oldest = next(iter(_fin_store))
+                del _fin_store[_oldest]
+            _fin_store[ticker_input] = {}
+        _fc = _fin_store[ticker_input]
 
         # ── Validator: is a cached value actually usable? ──────────
         def _ok(key):
