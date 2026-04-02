@@ -2475,23 +2475,34 @@ with tab_analyze:
                 # Create ticker object once — used for all fetches below
                 _stock = yf.Ticker(ticker_input)
 
-                # ── info ─────────────────────────────────────────
+                # ── info — with retry on sparse/rate-limited response ─────
                 if need_info:
-                    try:
-                        _info = _stock.info or {}
-                        # Store whatever we got — even a partial dict is useful
-                        if _info:
-                            _fc["info"] = _info
-                    except Exception:
+                    _info = {}
+                    for _attempt in range(3):
+                        try:
+                            _fetched = _stock.info or {}
+                            # A full info dict has 20+ keys; < 5 = rate-limited stub
+                            if len(_fetched) >= 5:
+                                _info = _fetched
+                                _fc["info"] = _info
+                                break
+                            elif _attempt < 2:
+                                time.sleep(3 + _attempt * 3)  # 3s, 6s backoff
+                        except Exception:
+                            if _attempt < 2:
+                                time.sleep(3)
+                    # If still sparse after retries, use whatever we got
+                    if not _info:
                         _info = _fc.get("info", {})
                 else:
                     _info = _fc.get("info", {})
 
-                # Patch info with screener row data for any gaps
+                # Patch info with screener/nightly row data for any gaps
                 if _cached_row:
                     _patch = {
                         "sector":         _cached_row.get("Sector"),
                         "currentPrice":   _cached_row.get("Price"),
+                        "regularMarketPrice": _cached_row.get("Price"),
                         "marketCap":      _cached_row.get("MarketCap"),
                         "trailingPE":     _cached_row.get("P/E"),
                         "revenueGrowth":  _cached_row.get("RevenueGrowth"),
@@ -2501,42 +2512,69 @@ with tab_analyze:
                         if v is not None and not _info.get(k):
                             _info[k] = v
 
-                # Only abort if we have absolutely nothing — no info AND no screener row
-                if not _info and not _cached_row:
-                    # ── Smart typo suggestions ──────────────────
-                    _suggestions = {
-                        "APPL":  "AAPL (Apple)",
-                        "GOOGL": "GOOGL ✓ — if this failed, try GOOG",
-                        "GOOG":  "GOOG ✓ — if this failed, try GOOGL",
-                        "AMZN":  "AMZN ✓ — double-check spelling",
-                        "TSLA":  "TSLA ✓ — double-check spelling",
-                        "MSFT":  "MSFT ✓ — double-check spelling",
-                        "META":  "META (formerly FB)",
-                        "FB":    "META (Facebook rebranded to META in 2021)",
-                        "TWTR":  "TWTR was delisted — Twitter is now private (X)",
-                        "TWITCH":"TWITCH is not public — owned by Amazon (AMZN)",
-                        "BRK":   "BRK.A or BRK.B (Berkshire Hathaway)",
-                        "BRKA":  "BRK-A",
-                        "BRKB":  "BRK-B",
-                        "NVIDA": "NVDA (Nvidia)",
-                        "NVDIA": "NVDA (Nvidia)",
-                        "NFLX":  "NFLX ✓ — double-check spelling",
-                        "BABA":  "BABA ✓ — if this fails try 9988.HK (Hong Kong listing)",
-                    }
-                    _hint = _suggestions.get(ticker_input.upper())
-                    _msg  = f"**`{ticker_input}`** was not found. "
-                    if _hint:
-                        _msg += f"\n\n💡 Did you mean **{_hint}**?"
-                    else:
-                        _msg += (
-                            f"\n\n**Common causes:**\n"
-                            f"- Typo in the ticker (e.g. APPL instead of AAPL)\n"
-                            f"- The stock was delisted or went private\n"
-                            f"- International stocks may need a suffix (e.g. `TSM` for TSMC, `ASML` for ASML)\n"
-                            f"- yfinance may be rate-limited — wait 30 seconds and try again"
+                # Determine if this is a true not-found vs a rate-limit failure
+                _has_price = (_info.get("currentPrice") or
+                              _info.get("regularMarketPrice") or
+                              (_cached_row and _cached_row.get("Price")))
+
+                if not _has_price and not _cached_row:
+                    # Distinguish: try history — if that works the ticker exists
+                    # but info is rate-limited; if not, ticker is genuinely invalid
+                    _test_hist = pd.DataFrame()
+                    try:
+                        _test_hist = _stock.history(period="5d")
+                    except Exception:
+                        pass
+
+                    if not _test_hist.empty:
+                        # Ticker is real — yfinance info is just rate-limited
+                        st.warning(
+                            f"⚠️ **`{ticker_input}`** exists but yfinance returned limited data "
+                            f"(rate-limited). Price history loaded — some metrics may be unavailable. "
+                            f"Try again in 30 seconds for full data."
                         )
-                    st.error(_msg)
-                    st.stop()
+                        _fc["hist"] = _test_hist
+                        need_hist   = False
+                        # Synthesise minimal info from history
+                        _info = {
+                            "currentPrice": round(float(_test_hist["Close"].iloc[-1]), 2),
+                            "symbol":       ticker_input,
+                        }
+                        _fc["info"] = _info
+                    else:
+                        # Genuinely not found
+                        _suggestions = {
+                            "APPL":   "AAPL (Apple)",
+                            "GOOGL":  "GOOGL ✓ — if this failed, try GOOG",
+                            "GOOG":   "GOOG ✓ — if this failed, try GOOGL",
+                            "AMZN":   "AMZN ✓",
+                            "TSLA":   "TSLA ✓",
+                            "MSFT":   "MSFT ✓",
+                            "META":   "META (formerly FB)",
+                            "FB":     "META (Facebook rebranded to META in 2021)",
+                            "TWTR":   "TWTR was delisted — Twitter is now private (X)",
+                            "TWITCH": "TWITCH is not public — owned by Amazon (AMZN)",
+                            "BRK":    "BRK.A or BRK.B (Berkshire Hathaway)",
+                            "BRKA":   "BRK-A",
+                            "BRKB":   "BRK-B",
+                            "NVIDA":  "NVDA (Nvidia)",
+                            "NVDIA":  "NVDA (Nvidia)",
+                            "BABA":   "BABA ✓ — if this fails try 9988.HK",
+                        }
+                        _hint = _suggestions.get(ticker_input.upper())
+                        _msg  = f"**`{ticker_input}`** was not found."
+                        if _hint:
+                            _msg += f"\n\n💡 Did you mean **{_hint}**?"
+                        else:
+                            _msg += (
+                                "\n\n**Common causes:**\n"
+                                "- Typo in the ticker (e.g. APPL instead of AAPL)\n"
+                                "- The stock was delisted or went private\n"
+                                "- International stocks may need a suffix (e.g. `TSM`, `ASML`)\n"
+                                "- yfinance may be rate-limited — wait 30 seconds and retry"
+                            )
+                        st.error(_msg)
+                        st.stop()
 
                 # ── price history ─────────────────────────────────
                 # Always try nightly cache first — avoids a live yfinance call
