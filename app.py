@@ -2456,6 +2456,30 @@ with tab_analyze:
             if isinstance(v, dict) and not v:             return False  # only reject empty dicts
             return True
 
+        # If nightly data has this ticker, pre-populate info and hist from it
+        # so we can skip those yfinance calls entirely.
+        if _cached_row and not _ok("info"):
+            _nightly_info = {
+                "symbol":         ticker_input,
+                "sector":         _cached_row.get("Sector", ""),
+                "currentPrice":   _cached_row.get("Price"),
+                "regularMarketPrice": _cached_row.get("Price"),
+                "marketCap":      _cached_row.get("MarketCap"),
+                "trailingPE":     _cached_row.get("P/E"),
+                "revenueGrowth":  _cached_row.get("RevenueGrowth"),
+                "earningsGrowth": _cached_row.get("EarningsGrowth"),
+                "shortPercentOfFloat": (_cached_row.get("ShortPctFloat")),
+                "shortRatio":     _cached_row.get("DaysToCover"),
+            }
+            # Only use nightly info if it has a price — otherwise fall back to live
+            if _nightly_info["currentPrice"]:
+                _fc["info"] = {k: v for k, v in _nightly_info.items() if v is not None}
+
+        if _cached_row and not _ok("hist") and _cached_row.get("_hist"):
+            _pre_hist = _hist_from_cache(_cached_row)
+            if not _pre_hist.empty:
+                _fc["hist"] = _pre_hist
+
         need_info = not _ok("info")
         need_hist = not _ok("hist")
         need_fin  = not _ok("fin")
