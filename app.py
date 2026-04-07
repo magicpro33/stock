@@ -2467,60 +2467,28 @@ with tab_analyze:
                     (r for r in _nightly_results if r.get("Ticker") == ticker_input), None
                 )
 
-        # Ensure fin cache dict exists and has an entry for this ticker
+        # ── Always fetch fresh data — analyze tab prioritises live accuracy ──
+        # Session cache is used ONLY as a fallback if yfinance fails, never
+        # served directly. Nightly data is used to fill metrics gaps only.
         if "analyze_fin_cache" not in st.session_state:
             st.session_state["analyze_fin_cache"] = {}
         _fin_store = st.session_state["analyze_fin_cache"]
-        # Cap cache at 5 tickers — evict oldest when full to bound memory use.
-        # Financial DataFrames are ~50-200KB each; 5 tickers ≈ 1MB max.
-        if ticker_input not in _fin_store:
-            if len(_fin_store) >= 5:
-                # Remove the oldest entry (first key inserted)
-                _oldest = next(iter(_fin_store))
-                del _fin_store[_oldest]
-            _fin_store[ticker_input] = {}
+        if len(_fin_store) >= 5:
+            _oldest = next(iter(_fin_store))
+            del _fin_store[_oldest]
+        # Always start with a fresh empty dict — forces live fetch every time
+        _fin_store[ticker_input] = {}
         _fc = _fin_store[ticker_input]
 
-        # ── Validator: is a cached value actually usable? ──────────
-        def _ok(key):
-            v = _fc.get(key)
-            if v is None:                                return False
-            if isinstance(v, pd.DataFrame) and v.empty:  return False
-            if isinstance(v, dict) and not v:             return False  # only reject empty dicts
-            return True
+        # Every field is always needed — we always go live
+        need_info = True
+        need_hist = True
+        need_fin  = True
+        need_bal  = True
+        need_cf   = True
+        need_raw  = True
 
-        # If nightly data has this ticker, pre-populate info and hist from it
-        # so we can skip those yfinance calls entirely.
-        if _cached_row and not _ok("info"):
-            _nightly_info = {
-                "symbol":         ticker_input,
-                "sector":         _cached_row.get("Sector", ""),
-                "currentPrice":   _cached_row.get("Price"),
-                "regularMarketPrice": _cached_row.get("Price"),
-                "marketCap":      _cached_row.get("MarketCap"),
-                "trailingPE":     _cached_row.get("P/E"),
-                "revenueGrowth":  _cached_row.get("RevenueGrowth"),
-                "earningsGrowth": _cached_row.get("EarningsGrowth"),
-                "shortPercentOfFloat": (_cached_row.get("ShortPctFloat")),
-                "shortRatio":     _cached_row.get("DaysToCover"),
-            }
-            # Only use nightly info if it has a price — otherwise fall back to live
-            if _nightly_info["currentPrice"]:
-                _fc["info"] = {k: v for k, v in _nightly_info.items() if v is not None}
-
-        if _cached_row and not _ok("hist") and _cached_row.get("_hist"):
-            _pre_hist = _hist_from_cache(_cached_row)
-            if not _pre_hist.empty:
-                _fc["hist"] = _pre_hist
-
-        need_info = not _ok("info")
-        need_hist = not _ok("hist")
-        need_fin  = not _ok("fin")
-        need_bal  = not _ok("bal")
-        need_cf   = not _ok("cf")
-        need_raw  = not _ok("raw")
-
-        anything_missing = any([need_info, need_hist, need_fin, need_bal, need_cf, need_raw])
+        anything_missing = True
 
         if anything_missing:
             missing_labels = [k for k, n in [
@@ -2679,85 +2647,51 @@ with tab_analyze:
                 else:
                     _cf = _fc.get("cf")
 
-                # ── metrics (raw scores) ──────────────────────────
-                if need_raw:
-                    if _cached_row:
-                        # Pull directly from screener/nightly data — no recalculation needed
-                        _raw = {
-                            "OE_Yield":       _cached_row.get("OE_Yield"),
-                            "ROIC":           _cached_row.get("ROIC"),
-                            "ROIC_Trend":     _cached_row.get("ROIC_Trend"),
-                            "RevenueGrowth":  _cached_row.get("RevenueGrowth"),
-                            "EarningsGrowth": _cached_row.get("EarningsGrowth"),
-                            "Piotroski":      _cached_row.get("Piotroski"),
-                            "OBV":            _cached_row.get("OBV"),
-                            "MFI":            _cached_row.get("MFI"),
-                            "PCV":            _cached_row.get("PCV"),
-                            "RSI":            _cached_row.get("RSI"),
-                            "MACD":           _cached_row.get("MACD"),
-                            "GoldenCross":    _cached_row.get("GoldenCross"),
-                            "MFISweetSpot":   _cached_row.get("MFISweetSpot"),
-                            "NoBearDiv":      _cached_row.get("NoBearDiv"),
-                            "MA50Proximity":  _cached_row.get("MA50Proximity"),
-                            "ShortPctFloatRaw": _cached_row.get("ShortPctFloatRaw"),
-                            "DaysToCover":    _cached_row.get("DaysToCover"),
-                            "ShortChange":    _cached_row.get("ShortChange"),
-                            "ShortSqueeze":   _cached_row.get("ShortSqueeze"),
-                        }
-                    else:
-                        try:
-                            # Use pre-fetched statements — same pattern as screener
-                            _fin_r  = _fc.get("fin",  pd.DataFrame())
-                            _bal_r  = _fc.get("bal",  pd.DataFrame())
-                            _cf_r   = _fc.get("cf",   pd.DataFrame())
-                            _hist_r = _fc.get("hist", pd.DataFrame())
-                            # mfi_period lives in sidebar scope — read from session state
-                            _mfi_p  = st.session_state.get("slider_mfi_period", 14)
-                            _oe, _oey  = get_owner_earnings(_cf_r, _fin_r, _info)
-                            _vols      = get_volume_signals(_hist_r, _mfi_p)
-                            _tech      = calculate_technical_signals(_hist_r)
-                            _short = calculate_short_squeeze(_info)
-                            _raw = {
-                                "OE_Yield":       _oey,
-                                "ROIC":           calculate_roic(_fin_r, _bal_r),
-                                "ROIC_Trend":     calculate_roic_trend(_fin_r, _bal_r),
-                                "RevenueGrowth":  _info.get("revenueGrowth"),
-                                "EarningsGrowth": _info.get("earningsGrowth"),
-                                "Piotroski":      calculate_piotroski(_fin_r, _bal_r, _cf_r),
-                                "OBV":            _vols["OBV"],
-                                "MFI":            _vols["MFI"],
-                                "PCV":            _vols["PCV"],
-                                "RSI":            _tech["RSI"],
-                                "MACD":           _tech["MACD"],
-                                "GoldenCross":    _tech["GoldenCross"],
-                                "MFISweetSpot":   _tech["MFISweetSpot"],
-                                "NoBearDiv":      _tech["NoBearDiv"],
-                                "MA50Proximity":  _tech["MA50Proximity"],
-                                "ShortPctFloatRaw": _short["ShortPctFloatRaw"],
-                                "DaysToCover":    _short["DaysToCover"],
-                                "ShortChange":    _short["ShortChange"],
-                                "ShortSqueeze":   _short["ShortSqueeze"],
-                            }
-                        except Exception:
-                            _raw = _fc.get("raw", {})
-                    _fc["raw"] = _raw
-                else:
-                    _raw = _fc["raw"]
+                # ── metrics — always computed from live fetched data ────
+                # Never use nightly cached scores here — recalculate from
+                # the fresh financials and history just fetched above.
+                try:
+                    _fin_r  = _fc.get("fin",  pd.DataFrame())
+                    _bal_r  = _fc.get("bal",  pd.DataFrame())
+                    _cf_r   = _fc.get("cf",   pd.DataFrame())
+                    _hist_r = _fc.get("hist", pd.DataFrame())
+                    _mfi_p  = st.session_state.get("slider_mfi_period", 14)
+                    _oe, _oey  = get_owner_earnings(_cf_r, _fin_r, _info)
+                    _vols      = get_volume_signals(_hist_r, _mfi_p)
+                    _tech      = calculate_technical_signals(_hist_r)
+                    _short     = calculate_short_squeeze(_info)
+                    _raw = {
+                        "OE_Yield":         _oey,
+                        "ROIC":             calculate_roic(_fin_r, _bal_r),
+                        "ROIC_Trend":       calculate_roic_trend(_fin_r, _bal_r),
+                        "RevenueGrowth":    _info.get("revenueGrowth"),
+                        "EarningsGrowth":   _info.get("earningsGrowth"),
+                        "Piotroski":        calculate_piotroski(_fin_r, _bal_r, _cf_r),
+                        "OBV":              _vols["OBV"],
+                        "MFI":              _vols["MFI"],
+                        "PCV":              _vols["PCV"],
+                        "RSI":              _tech["RSI"],
+                        "MACD":             _tech["MACD"],
+                        "GoldenCross":      _tech["GoldenCross"],
+                        "MFISweetSpot":     _tech["MFISweetSpot"],
+                        "NoBearDiv":        _tech["NoBearDiv"],
+                        "MA50Proximity":    _tech["MA50Proximity"],
+                        "ShortPctFloatRaw": _short["ShortPctFloatRaw"],
+                        "DaysToCover":      _short["DaysToCover"],
+                        "ShortChange":      _short["ShortChange"],
+                        "ShortSqueeze":     _short["ShortSqueeze"],
+                    }
+                except Exception:
+                    _raw = {}
+                _fc["raw"] = _raw
 
-        else:
-            # ── Fully cached — zero API calls ────────────────────
-            _info = _fc["info"]
-            _hist = _fc["hist"]
-            _fin  = _fc.get("fin")
-            _bal  = _fc.get("bal")
-            _cf   = _fc.get("cf")
-            _raw  = _fc["raw"]
-
-        # Persist everything back to store
+        # Persist to session store (fallback only — next analyze click re-fetches)
+        _fetched_at = datetime.now().strftime("%b %d, %Y %I:%M %p")
         _fin_store[ticker_input].update({
             "info": _info, "hist": _hist,
             "fin":  _fin,  "bal":  _bal,
             "cf":   _cf,   "raw":  _raw,
+            "fetched_at": _fetched_at,
         })
 
         # Add short interest data directly to analyze_data for display
@@ -2775,6 +2709,7 @@ with tab_analyze:
             "bal":         _bal,
             "cf":          _cf,
             "raw":         _raw,
+            "fetched_at":  _fetched_at,
             "short":       _short_display,
             "metrics_sel": dict(analyze_metrics),
             "from_cache":  bool(_cached_row),
@@ -2813,9 +2748,10 @@ with tab_analyze:
             mktcap  = info.get("marketCap")
 
             st.markdown(f"## {name} &nbsp; `{sticker}`")
-            # Show data source
-            if _d.get("from_cache"):
-                st.caption("⚡ Metrics from screener cache · Financials cached locally — no API calls")
+            # Always show when data was fetched — analyze tab always pulls live
+            _fat = _d.get("fetched_at", "")
+            if _fat:
+                st.caption(f"Live data fetched: {_fat} · Source: Yahoo Finance via yfinance")
             h1, h2, h3, h4 = st.columns(4)
             h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
             h2.metric("Sector",   info.get("sector", "N/A"))
