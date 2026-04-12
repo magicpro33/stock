@@ -1428,6 +1428,778 @@ def calculate_short_squeeze(info: dict) -> dict:
         return default
 
 
+
+def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
+                           raw, sticker, selected, fetched_at,
+                           range_days=30, mfi_period=14):
+    """
+    Full stock analysis render — identical to the Analyze a Stock tab.
+    Called from both the analyze tab and the inline screener panel.
+    """
+    try:
+
+        name    = info.get("longName") or info.get("shortName") or sticker
+        price   = info.get("currentPrice") or info.get("regularMarketPrice")
+        mktcap  = info.get("marketCap")
+
+        st.markdown(f"## {name} &nbsp; `{sticker}`")
+        # Always show when data was fetched — analyze tab always pulls live
+        pass  # placeholder
+        if fetched_at:
+            st.caption(f"Live data fetched: {fetched_at} · Source: Yahoo Finance via yfinance")
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
+        h2.metric("Sector",   info.get("sector", "N/A"))
+        h3.metric("Industry", info.get("industry", "N/A"))
+        h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
+        st.divider()
+
+        if not selected:
+            st.warning("No metrics were selected when Analyze was run.")
+            st.stop()
+
+        THRESHOLDS = {
+            "OE_Yield":       (0.05,  0.02, True),
+            "ROIC":           (0.15,  0.08, True),
+            "ROIC_Trend":     (0.02,  0.0,  True),
+            "RevenueGrowth":  (0.10,  0.05, True),
+            "EarningsGrowth": (0.10,  0.05, True),
+            "Piotroski":      (7,     4,    True),
+            "OBV":            (0.8,   0.4,  True),
+            "MFI":            (0.6,   0.4,  True),
+            "PCV":            (0.5,   0.2,  True),
+            "RSI":            (0.9,   0.5,  True),
+            "MACD":           (0.9,   0.5,  True),
+            "GoldenCross":    (0.9,   0.4,  True),
+            "MFISweetSpot":   (0.9,   0.5,  True),
+            "NoBearDiv":      (0.9,   0.4,  True),
+            "MA50Proximity":  (0.9,   0.5,  True),
+            "RangePosScore":  (0.75,  0.4,  True),
+        }
+
+        def _sig(key, val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "⚪"
+            g, n, hi = THRESHOLDS.get(key, (None, None, True))
+            if g is None: return "⚪"
+            if hi:  return "🟢" if val >= g else ("🟡" if val >= n else "🔴")
+            else:   return "🟢" if val <= g else ("🟡" if val <= n else "🔴")
+
+        def _fv(key, val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+            if key in ("OE_Yield","RevenueGrowth","EarningsGrowth","ROIC","ROIC_Trend"): return f"{val:.2%}"
+            if key in ("OBV","MFI","PCV"): return f"{val:.4f}"
+            if key == "Piotroski": return f"{int(val)} / 9"
+            return str(round(val, 4))
+
+        def _fb(val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+            try:
+                v = float(val)
+                if abs(v)>=1e12: return f"${v/1e12:.2f}T"
+                if abs(v)>=1e9:  return f"${v/1e9:.2f}B"
+                if abs(v)>=1e6:  return f"${v/1e6:.2f}M"
+                if abs(v)>=1e3:  return f"${v/1e3:.2f}K"
+                return f"${v:,.2f}"
+            except: return "N/A"
+
+        def _fp(val):
+            try:    return f"{float(val):.2%}" if val is not None else "N/A"
+            except: return "N/A"
+
+        def _fn(val, d=2):
+            try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
+            except: return "N/A"
+
+        def irow(label, value, tip=None):
+            # tip renders as a small ℹ tooltip after the label
+            tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
+                        f"font-size:0.85em;'>ℹ️</span>") if tip else ""
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;"
+                f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
+                f"<span style='color:#aaa;'>{label}{tip_html}</span>"
+                f"<span style='font-weight:600;'>{value}</span></div>",
+                unsafe_allow_html=True)
+
+        # ── Metric cards ─────────────────────────────────
+        st.markdown("### Metric Results")
+
+        # Compute MFI signal for use in card and banner
+        _mfi_raw = raw.get("MFI")
+        def _mfi_label(v):
+            if v is None or (isinstance(v, float) and np.isnan(v)): return None, None
+            mfi = v * 100
+            if mfi >= 80: return "🔥 Overbought",  "#ef5350"
+            if mfi >= 60: return "📈 Buying",       "#26a69a"
+            if mfi >= 40: return "➡️ Neutral",      "#888888"
+            if mfi >= 20: return "📉 Selling",      "#f59e0b"
+            return         "🧊 Oversold",           "#60a5fa"
+
+        _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
+
+        # Show MFI signal banner if MFI is selected
+        if "MFI" in selected and _mfi_lbl:
+            _mfi_pct = f"{_mfi_raw*100:.1f}" if _mfi_raw is not None else "N/A"
+            st.markdown(
+                f"<div style='background:{_mfi_col}22;border:1px solid {_mfi_col};"
+                f"border-radius:8px;padding:10px 16px;margin-bottom:12px;"
+                f"display:flex;justify-content:space-between;align-items:center;'>"
+                f"<span style='font-weight:600;font-size:1.05em;'>{_mfi_lbl}</span>"
+                f"<span style='color:#ccc;font-size:0.9em;'>MFI = {_mfi_pct} &nbsp;·&nbsp; "
+                f"Oversold ≤20 · Selling 20–40 · Neutral 40–60 · Buying 60–80 · Overbought ≥80</span>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+        cols = st.columns(3)
+        for i, key in enumerate(selected):
+            cfg = METRICS[key]; val = raw.get(key)
+            # HTML-escape the description so special chars don't break the markup
+            import html as _html
+            safe_desc = _html.escape(cfg['desc'][:120])
+            # Build extra badge line for MFI card
+            extra = ""
+            if key == "MFI" and _mfi_lbl:
+                extra = (f"<div style='margin-top:6px;padding:3px 8px;border-radius:4px;"
+                         f"background:{_mfi_col}33;color:{_mfi_col};"
+                         f"font-size:0.85em;font-weight:600;display:inline-block;'>"
+                         f"{_mfi_lbl}</div>")
+            with cols[i % 3]:
+                st.markdown(
+                    f"<div style='border:1px solid #444;border-radius:8px;"
+                    f"padding:14px;margin-bottom:12px;'>"
+                    f"<div style='font-size:1.1em;font-weight:600;'>{_sig(key,val)} {cfg['label']}</div>"
+                    f"<div style='font-size:1.8em;font-weight:700;margin:6px 0;'>{_fv(key,val)}</div>"
+                    f"{extra}"
+                    f"<div style='font-size:0.78em;color:#aaa;margin-top:6px;'>{safe_desc}...</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+        # ── MA50 ─────────────────────────────────────────
+        st.divider()
+        if not hist_1y.empty and len(hist_1y) >= 50:
+            ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
+            diff_pct = ((price - ma50_val) / ma50_val * 100) if price else 0
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Current Price", f"${price:,.2f}" if price else "N/A",
+                      help="The latest traded price of the stock")
+            m2.metric("50-Day MA",     f"${ma50_val:,.2f}",
+                      help="50-Day Moving Average — the average closing price over the last 50 trading days. "
+                           "Price below this line = stock is in a short-term downtrend or pullback")
+            m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
+                      help="How far the current price is above or below the 50-day MA. "
+                           "Negative = trading below the MA (potential value zone). "
+                           "Positive = trading above the MA (momentum zone)")
+            st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
+
+        # ── Short Interest ────────────────────────────────
+        st.divider()
+        st.markdown("### 🎯 Short Interest")
+        _sd = st.session_state.get("analyze_data", {}).get("short", {})
+        _spf  = _sd.get("ShortPctFloatRaw")
+        _dtc  = _sd.get("DaysToCover")
+        _schg = _sd.get("ShortChange")
+        _ssq  = _sd.get("ShortSqueeze", 0)
+        if _spf is not None or _dtc is not None:
+            si1, si2, si3, si4 = st.columns(4)
+            si1.metric(
+                "Short % of Float",
+                f"{_spf:.1f}%" if _spf is not None else "N/A",
+                help="Percentage of the float currently sold short. "
+                     "Above 10% = elevated. Above 20% = heavily shorted. Above 30% = extreme. "
+                     "Higher = more potential fuel for a short squeeze."
+            )
+            si2.metric(
+                "Days to Cover",
+                f"{_dtc:.1f}" if _dtc is not None else "N/A",
+                help="How many days of average trading volume it would take all short sellers to exit. "
+                     "Also called Short Ratio. Above 5 = shorts are trapped. "
+                     "Above 10 = very difficult to exit quickly — high squeeze risk."
+            )
+            _schg_str = (f"▲ {_schg:.1%}" if _schg and _schg > 0
+                         else f"▼ {abs(_schg):.1%}" if _schg and _schg < 0
+                         else "N/A")
+            si3.metric(
+                "Short Change MoM",
+                _schg_str,
+                help="Month-over-month change in shares short. "
+                     "▲ = shorts increasing (more bearish bets being placed). "
+                     "▼ = shorts covering (potential squeeze in progress)."
+            )
+            _squeeze_pct = f"{_ssq*100:.0f}%" if _ssq else "0%"
+            si4.metric(
+                "Squeeze Score",
+                _squeeze_pct,
+                help="Composite short squeeze setup score (0–100%). "
+                     "Combines short float %, days-to-cover, and short covering momentum. "
+                     "Above 60% = strong squeeze setup. Above 80% = extreme."
+            )
+            # Visual squeeze meter
+            _bar_filled = int((_ssq or 0) * 20)
+            _bar = "█" * _bar_filled + "░" * (20 - _bar_filled)
+            if _ssq and _ssq >= 0.7:
+                st.error(f"🔥 **High Squeeze Risk** [{_bar}] {_squeeze_pct} — heavy short interest with squeeze conditions present")
+            elif _ssq and _ssq >= 0.4:
+                st.warning(f"⚡ **Elevated Short Interest** [{_bar}] {_squeeze_pct} — watch for squeeze trigger")
+            elif _spf and _spf >= 5:
+                st.info(f"📊 **Moderate Short Interest** [{_bar}] {_squeeze_pct} — some short interest present")
+            else:
+                st.success(f"✅ **Low Short Interest** [{_bar}] {_squeeze_pct} — minimal squeeze risk")
+            st.caption("Short interest data from Yahoo Finance / FINRA. Updated twice monthly.")
+        else:
+            st.info("Short interest data not available for this ticker.")
+
+        # ── Price Range ───────────────────────────────────
+        st.divider()
+        st.markdown("### 📦 Price Range Analysis")
+        st.caption(f"Last **{range_days} trading days** — adjust via sidebar")
+        if not hist_1y.empty and len(hist_1y) >= range_days:
+            win  = hist_1y["Close"].iloc[-range_days:]
+            rh   = round(win.max(), 2); rl = round(win.min(), 2)
+            mid  = (rh + rl) / 2
+            rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
+            rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            rc1.metric("Range High", f"${rh:,.2f}",
+                       help=f"The highest closing price over the last {range_days} trading days. "
+                            "This acts as the top of the price range — a resistance level. "
+                            "Price approaching this level may face selling pressure.")
+            rc2.metric("Range Low",  f"${rl:,.2f}",
+                       help=f"The lowest closing price over the last {range_days} trading days. "
+                            "This acts as the bottom of the price range — a support level. "
+                            "Price near this level may attract buyers.")
+            rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A",
+                       help="Range Width = (High − Low) ÷ Midpoint × 100. "
+                            "Measures how wide the trading channel is as a % of price. "
+                            "Under 5% = very tight consolidation (coiling). "
+                            "5–10% = normal consolidation. "
+                            "Above 20% = high volatility / wide swings.")
+            rc4.metric("Position",    f"{rpos:.0%}",
+                       help="Where the current price sits within the range. "
+                            "0% = at the range low (at support — potential buy zone). "
+                            "50% = exactly at the midpoint. "
+                            "100% = at the range high (at resistance — potential sell zone). "
+                            "Stocks near the low end of a tight range can signal accumulation before a breakout.")
+            bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
+            pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
+            st.markdown(
+                f"<div style='font-family:monospace;font-size:1.1em;margin:10px 0;'>"
+                f"${rl:,.2f} |{bar}| ${rh:,.2f}</div>"
+                f"<div style='color:#aaa;font-size:0.9em;'>Current ${price:,.2f} — {pos_lbl}</div>",
+                unsafe_allow_html=True)
+            if rp is not None:
+                if rp <= 5:    st.success(f"🔒 Very Tight Range ({rp:.1f}%) — consolidation/breakout setup")
+                elif rp <= 10: st.info(f"📦 Tight Range ({rp:.1f}%) — consolidating")
+                elif rp <= 20: st.warning(f"📊 Moderate Range ({rp:.1f}%)")
+                else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
+            cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
+            cdf["High"] = rh; cdf["Low"] = rl
+            st.line_chart(cdf, use_container_width=True)
+        else:
+            st.warning("Not enough price history to calculate range.")
+
+        # ── Weighted score ────────────────────────────────
+        st.divider()
+        ts = sum(
+            float(raw.get(k) or 0) * metric_weight.get(k, METRICS[k]["weight"])
+            for k in selected
+            if raw.get(k) is not None and not (isinstance(raw.get(k), float) and np.isnan(raw.get(k)))
+        )
+        st.metric("Weighted Score", f"{ts:.2f}")
+
+        # ── Financial tabs ────────────────────────────────
+        st.divider()
+        st.markdown("## 📋 Full Financial Breakdown")
+        ft = st.tabs(["🏢 Overview","💰 Valuation","📈 Income","🏦 Balance Sheet","💵 Cash Flow","📊 Price History"])
+
+        with ft[0]:
+            st.markdown("### 🏢 Company Overview")
+            c1, c2 = st.columns(2)
+            with c1:
+                irow("Full Name",    info.get("longName","N/A"))
+                irow("Exchange",     info.get("exchange","N/A"),   "The stock exchange where shares are listed and traded")
+                irow("Sector",       info.get("sector","N/A"),     "GICS sector classification — broad industry group the company belongs to")
+                irow("Industry",     info.get("industry","N/A"),   "Specific industry within the sector")
+                irow("Country",      info.get("country","N/A"),    "Country where the company is headquartered")
+                irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A",
+                     "Total number of full-time employees")
+                irow("Website",      info.get("website","N/A"))
+            with c2:
+                officers = info.get("companyOfficers",[])
+                irow("CEO",          officers[0].get("name","N/A") if officers else "N/A",
+                     "Chief Executive Officer — the top executive responsible for running the company")
+                irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")),
+                     "Fiscal Year End — the month the company closes its annual accounting period")
+                irow("Audit Risk",   str(info.get("auditRisk","N/A")),
+                     "Score 1–10 rating audit-related governance risk. Lower = less risk")
+                irow("Board Risk",   str(info.get("boardRisk","N/A")),
+                     "Score 1–10 rating board structure and independence risk. Lower = less risk")
+                irow("Comp Risk",    str(info.get("compensationRisk","N/A")),
+                     "Compensation Risk — score 1–10 rating executive pay structure risk. Lower = less risk")
+                irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")),
+                     "Shareholder Rights Risk — score 1–10. High = management has too much power vs shareholders")
+                irow("Overall Risk", str(info.get("overallRisk","N/A")),
+                     "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
+            st.markdown("#### Business Summary")
+            st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
+
+        with ft[1]:
+            st.markdown("### 💰 Valuation")
+            v1, v2 = st.columns(2)
+            with v1:
+                irow("Market Cap",       _fb(info.get("marketCap")),
+                     "Market Capitalization — total market value of all outstanding shares (Share Price × Shares Outstanding)")
+                irow("Enterprise Value", _fb(info.get("enterpriseValue")),
+                     "Enterprise Value (EV) — Market Cap + Total Debt − Cash. Represents the true takeover cost of a company")
+                irow("Trailing P/E",     _fn(info.get("trailingPE")),
+                     "Trailing Price-to-Earnings — share price divided by actual earnings per share over the last 12 months. Lower = cheaper relative to earnings")
+                irow("Forward P/E",      _fn(info.get("forwardPE")),
+                     "Forward Price-to-Earnings — share price divided by analyst-estimated future earnings. Reflects growth expectations")
+                irow("PEG Ratio",        _fn(info.get("pegRatio")),
+                     "Price/Earnings-to-Growth — P/E divided by earnings growth rate. Below 1.0 may indicate undervaluation relative to growth")
+                irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")),
+                     "Price-to-Sales (P/S) — Market Cap divided by annual revenue. Useful for unprofitable companies. Lower = cheaper")
+                irow("Price/Book",       _fn(info.get("priceToBook")),
+                     "Price-to-Book (P/B) — share price divided by book value per share (assets minus liabilities). Below 1.0 = trading below asset value")
+                irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")),
+                     "Enterprise Value divided by annual revenue. Similar to P/S but accounts for debt. Lower = cheaper")
+                irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")),
+                     "Enterprise Value divided by EBITDA. Popular acquisition valuation multiple. Below 10 is generally considered reasonable")
+            with v2:
+                irow("Trailing EPS",     _fn(info.get("trailingEps")),
+                     "Trailing Earnings Per Share — actual net income per share over the last 12 months")
+                irow("Forward EPS",      _fn(info.get("forwardEps")),
+                     "Forward Earnings Per Share — analyst-estimated earnings per share for the next 12 months")
+                irow("Book Value/Share", _fn(info.get("bookValue")),
+                     "Net assets per share — total assets minus total liabilities, divided by shares outstanding")
+                irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")),
+                     "Highest closing price over the last 52 weeks (one year)")
+                irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")),
+                     "Lowest closing price over the last 52 weeks (one year)")
+                irow("50-Day MA",        _fn(info.get("fiftyDayAverage")),
+                     "50-Day Moving Average — average closing price over the last 50 trading days. Used as a short-term trend indicator")
+                irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")),
+                     "200-Day Moving Average — average closing price over the last 200 trading days. Used as a long-term trend indicator")
+                irow("Beta",             _fn(info.get("beta")),
+                     "Beta — measures stock volatility vs the S&P 500. Beta > 1 = more volatile than market; Beta < 1 = less volatile")
+                irow("Short % Float",    _fp(info.get("shortPercentOfFloat")),
+                     "Short Interest as % of Float — percentage of tradeable shares currently sold short. High % can signal bearish sentiment or potential short squeeze")
+            d1,d2,d3 = st.columns(3)
+            d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None",
+                      help="Dividend Rate — annual cash dividend paid per share")
+            d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None",
+                      help="Dividend Yield — annual dividend as a % of share price. Higher = more income per dollar invested")
+            d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A",
+                      help="Payout Ratio — percentage of net income paid out as dividends. Above 100% means paying more than it earns")
+
+        with ft[2]:
+            st.markdown("### 📈 Income Statement (Annual)")
+            if fin_stmt is not None and not fin_stmt.empty:
+                fd = fin_stmt.T.copy()
+                fd.index = [str(i)[:10] for i in fd.index]
+                for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(fd, use_container_width=True)
+            else:
+                st.info("Income statement not available.")
+            i1,i2,i3,i4 = st.columns(4)
+            i1.metric("Revenue",    _fb(info.get("totalRevenue")),
+                      help="Total Revenue — all money earned from selling products/services before any expenses are deducted")
+            i2.metric("Gross",      _fb(info.get("grossProfits")),
+                      help="Gross Profit — Revenue minus Cost of Goods Sold (COGS). Shows profit before operating expenses")
+            i3.metric("EBITDA",     _fb(info.get("ebitda")),
+                      help="Earnings Before Interest, Taxes, Depreciation & Amortization — a proxy for operating cash flow and profitability")
+            i4.metric("Net Inc",    _fb(info.get("netIncomeToCommon")),
+                      help="Net Income — the bottom line profit after all expenses, interest, and taxes have been deducted")
+            i5,i6,i7,i8 = st.columns(4)
+            i5.metric("Gross Mgn",  _fp(info.get("grossMargins")),
+                      help="Gross Margin — Gross Profit ÷ Revenue. Higher % = more money left after production costs")
+            i6.metric("Op Mgn",     _fp(info.get("operatingMargins")),
+                      help="Operating Margin — Operating Income ÷ Revenue. Shows profit from core business operations")
+            i7.metric("Net Mgn",    _fp(info.get("profitMargins")),
+                      help="Net Profit Margin — Net Income ÷ Revenue. The % of every dollar of revenue that becomes profit")
+            i8.metric("Rev Growth", _fp(info.get("revenueGrowth")),
+                      help="Revenue Growth — year-over-year percentage increase in total revenue")
+
+        with ft[3]:
+            st.markdown("### 🏦 Balance Sheet (Annual)")
+            if bal_stmt is not None and not bal_stmt.empty:
+                bd = bal_stmt.T.copy()
+                bd.index = [str(i)[:10] for i in bd.index]
+                for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(bd, use_container_width=True)
+            else:
+                st.info("Balance sheet not available.")
+            b1,b2,b3,b4 = st.columns(4)
+            b1.metric("Cash",      _fb(info.get("totalCash")),
+                      help="Total Cash & Short-Term Investments — liquid assets the company can access immediately")
+            b2.metric("Debt",      _fb(info.get("totalDebt")),
+                      help="Total Debt — all short-term and long-term borrowings combined")
+            b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)),
+                      help="Net Cash Position — Total Cash minus Total Debt. Positive = more cash than debt (strong balance sheet)")
+            b4.metric("Assets",    _fb(info.get("totalAssets")),
+                      help="Total Assets — everything the company owns: cash, property, equipment, intangibles, etc.")
+            b5,b6,b7,b8 = st.columns(4)
+            b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")),
+                      help="Cash Per Share — total cash divided by shares outstanding. Higher = more cash backing each share")
+            b6.metric("D/E",       _fn(info.get("debtToEquity")),
+                      help="Debt-to-Equity Ratio — total debt divided by shareholders equity. Lower = less financial leverage/risk. Above 2.0 can be concerning")
+            b7.metric("Cur Ratio", _fn(info.get("currentRatio")),
+                      help="Current Ratio — Current Assets ÷ Current Liabilities. Above 1.0 means the company can cover its short-term debts. Above 2.0 is considered healthy")
+            b8.metric("Qck Ratio", _fn(info.get("quickRatio")),
+                      help="Quick Ratio (Acid Test) — like Current Ratio but excludes inventory. Above 1.0 means the company can pay short-term debts without selling inventory")
+
+        with ft[4]:
+            st.markdown("### 💵 Cash Flow (Annual)")
+            if cf_stmt is not None and not cf_stmt.empty:
+                cd = cf_stmt.T.copy()
+                cd.index = [str(i)[:10] for i in cd.index]
+                for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(cd, use_container_width=True)
+            else:
+                st.info("Cash flow not available.")
+            cf1,cf2,cf3,cf4 = st.columns(4)
+            cf1.metric("Op CF",   _fb(info.get("operatingCashflow")),
+                       help="Operating Cash Flow — actual cash generated from core business operations. More reliable than net income as a profitability measure")
+            cf2.metric("FCF",     _fb(info.get("freeCashflow")),
+                       help="Free Cash Flow — Operating Cash Flow minus Capital Expenditures. Cash left over that can be used for dividends, buybacks, or debt repayment")
+            cf3.metric("CapEx",   _fb(info.get("capitalExpenditures")),
+                       help="Capital Expenditures — money spent on buying, maintaining or upgrading physical assets like buildings and equipment")
+            sh = info.get("sharesOutstanding"); fcf = info.get("freeCashflow")
+            cf4.metric("FCF/Shr", _fn(fcf/sh if fcf and sh else None),
+                       help="Free Cash Flow Per Share — FCF divided by shares outstanding. How much free cash is generated per share owned")
+            cf5,cf6 = st.columns(2)
+            cf5.metric("ROA", _fp(info.get("returnOnAssets")),
+                       help="Return on Assets — Net Income ÷ Total Assets. Measures how efficiently a company uses its assets to generate profit. Above 5% is generally good")
+            cf6.metric("ROE", _fp(info.get("returnOnEquity")),
+                       help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
+
+        with ft[5]:
+            st.markdown("### 📊 Interactive Chart")
+
+            # ── Chart controls row 1 ──────────────────────
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            with cc1:
+                chart_type = st.selectbox(
+                    "Chart Type",
+                    ["Candlestick", "Heikin Ashi", "Line"],
+                    index=0, key="chart_type",
+                    help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
+                )
+            with cc2:
+                interval = st.selectbox(
+                    "Candle Interval",
+                    ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
+                    index=6, key="chart_interval",
+                    help=(
+                        "1m/5m: last 7 days max  |  "
+                        "15m/30m/1h: last 60 days max  |  "
+                        "4h: last 60 days max (resampled)  |  "
+                        "1d/1wk/1mo: years of data available"
+                    )
+                )
+            with cc3:
+                # Restrict time period options based on interval
+                intraday_short = interval in ("1m", "5m")
+                intraday_mid   = interval in ("15m", "30m", "1h", "4h")
+
+                if intraday_short:
+                    period_opts = ["1d", "5d", "7d"]
+                    period_def  = 1
+                elif intraday_mid:
+                    period_opts = ["1d", "5d", "1mo", "2mo"]
+                    period_def  = 2
+                else:
+                    period_opts = ["5d","1mo","3mo","6mo","1y","2y","5y","10y","Custom"]
+                    period_def  = 4
+
+                pc = st.selectbox(
+                    "Time Period", period_opts,
+                    index=period_def, key="price_history_period"
+                )
+            with cc4:
+                chart_theme = st.selectbox(
+                    "Theme", ["Dark","Light"], index=0, key="chart_theme"
+                )
+
+            # ── Custom date range (daily+ only) ───────────
+            if pc == "Custom":
+                dr1, dr2 = st.columns(2)
+                with dr1:
+                    custom_start = st.date_input(
+                        "Start Date",
+                        value=pd.Timestamp.today() - pd.Timedelta(days=365),
+                        max_value=pd.Timestamp.today(),
+                        key="chart_custom_start",
+                    )
+                with dr2:
+                    custom_end = st.date_input(
+                        "End Date",
+                        value=pd.Timestamp.today(),
+                        max_value=pd.Timestamp.today(),
+                        key="chart_custom_end",
+                    )
+
+            st.markdown("**Overlays**")
+            ov1,ov2,ov3,ov4 = st.columns(4)
+            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
+            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
+            show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
+            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
+
+            st.markdown("**Sub-Charts**")
+            sc1,sc2,sc3 = st.columns(3)
+            show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
+            show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
+            show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
+
+            # ── Fetch history with correct interval ───────
+            # yfinance interval/period compatibility:
+            #   1m        → max period "7d"
+            #   5m/15m/30m/1h → max period "60d"
+            #   4h        → not native; fetch 1h and resample
+            #   1d/1wk/1mo → any period
+            fetch_interval = "1h" if interval == "4h" else interval
+
+            # Map display period → yfinance period string for fetch
+            period_fetch_map = {
+                "1d":"1d","5d":"5d","7d":"7d","1mo":"1mo","2mo":"2mo",
+                "3mo":"3mo","6mo":"6mo","1y":"2y","2y":"5y",
+                "5y":"10y","10y":"max","Custom":"max",
+            }
+            fetch_period = period_fetch_map.get(pc, "2y")
+
+            try:
+                _s = yf.Ticker(sticker)
+                if pc == "Custom":
+                    hist_full = _s.history(
+                        start=str(custom_start),
+                        end=str(custom_end),
+                        interval=fetch_interval
+                    )
+                else:
+                    hist_full = _s.history(period=fetch_period, interval=fetch_interval)
+            except Exception as _fe:
+                st.warning(f"Could not fetch {interval} data: {_fe}. Falling back to daily.")
+                hist_full = hist_1y
+
+            # Resample 1h → 4h if needed
+            if interval == "4h" and not hist_full.empty:
+                hist_full = hist_full.resample("4h").agg({
+                    "Open":  "first",
+                    "High":  "max",
+                    "Low":   "min",
+                    "Close": "last",
+                    "Volume":"sum",
+                }).dropna()
+
+            # Slice to display window for daily+ periods
+            period_days_map = {
+                "5d":5,"1mo":21,"3mo":63,"6mo":126,
+                "1y":252,"2y":504,"5y":1260,"10y":2520,
+            }
+            if pc not in ("Custom","1d","5d","7d","1mo","2mo"):
+                dn = period_days_map.get(pc, 252)
+                hd = hist_full.iloc[-dn:].copy() if len(hist_full) >= dn else hist_full.copy()
+            else:
+                hd = hist_full.copy()
+
+            if not hd.empty:
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
+
+                bg   = "#0e1117" if chart_theme == "Dark" else "#ffffff"
+                fg   = "#ffffff" if chart_theme == "Dark" else "#000000"
+                grid = "#1f2937" if chart_theme == "Dark" else "#e5e7eb"
+
+                # ── Compute indicators ────────────────────
+                hd["EMA20"]  = hd["Close"].ewm(span=20,  adjust=False).mean()
+                hd["EMA50"]  = hd["Close"].ewm(span=50,  adjust=False).mean()
+                hd["EMA200"] = hd["Close"].ewm(span=200, adjust=False).mean()
+
+                # Bollinger Bands (20-day, 2σ)
+                bb_mid        = hd["Close"].rolling(20).mean()
+                bb_std        = hd["Close"].rolling(20).std()
+                hd["BB_mid"]  = bb_mid
+                hd["BB_up"]   = bb_mid + 2 * bb_std
+                hd["BB_low"]  = bb_mid - 2 * bb_std
+
+                # RSI (14-period)
+                delta  = hd["Close"].diff()
+                gain   = delta.clip(lower=0).rolling(14).mean()
+                loss   = (-delta.clip(upper=0)).rolling(14).mean()
+                rs     = gain / loss.replace(0, np.nan)
+                hd["RSI"] = 100 - (100 / (1 + rs))
+
+                # MACD (12/26/9)
+                ema12       = hd["Close"].ewm(span=12, adjust=False).mean()
+                ema26       = hd["Close"].ewm(span=26, adjust=False).mean()
+                hd["MACD"]  = ema12 - ema26
+                hd["Signal"]= hd["MACD"].ewm(span=9, adjust=False).mean()
+                hd["Hist"]  = hd["MACD"] - hd["Signal"]
+
+                # Heikin Ashi OHLC
+                ha = hd.copy()
+                ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
+                ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
+                ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
+                ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
+
+                # ── Build subplot layout ──────────────────
+                sub_charts = [s for s, show in [
+                    ("Volume", show_vol), ("RSI", show_rsi), ("MACD", show_macd)
+                ] if show]
+
+                n_rows   = 1 + len(sub_charts)
+                row_h    = [0.55] + [0.45 / max(len(sub_charts), 1)] * len(sub_charts) if sub_charts else [1.0]
+                sub_specs= [[{"secondary_y": False}]] * n_rows
+
+                fig = make_subplots(
+                    rows=n_rows, cols=1,
+                    shared_xaxes=True,
+                    row_heights=row_h,
+                    vertical_spacing=0.03,
+                    specs=sub_specs,
+                )
+
+                # ── Main price chart ──────────────────────
+                if chart_type == "Candlestick":
+                    fig.add_trace(go.Candlestick(
+                        x=hd.index, open=hd["Open"], high=hd["High"],
+                        low=hd["Low"],  close=hd["Close"],
+                        name="Price",
+                        increasing_line_color="#26a69a",
+                        decreasing_line_color="#ef5350",
+                        increasing_fillcolor="#26a69a",
+                        decreasing_fillcolor="#ef5350",
+                    ), row=1, col=1)
+
+                elif chart_type == "Heikin Ashi":
+                    fig.add_trace(go.Candlestick(
+                        x=ha.index, open=ha["HA_Open"], high=ha["HA_High"],
+                        low=ha["HA_Low"],  close=ha["HA_Close"],
+                        name="Heikin Ashi",
+                        increasing_line_color="#26a69a",
+                        decreasing_line_color="#ef5350",
+                        increasing_fillcolor="#26a69a",
+                        decreasing_fillcolor="#ef5350",
+                    ), row=1, col=1)
+
+                else:  # Line
+                    fig.add_trace(go.Scatter(
+                        x=hd.index, y=hd["Close"],
+                        name="Close", line=dict(color="#2196f3", width=1.5)
+                    ), row=1, col=1)
+
+                # ── Overlays ──────────────────────────────
+                if show_ema20:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA20"],
+                        name="EMA 20", line=dict(color="#f59e0b", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_ema50:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA50"],
+                        name="EMA 50", line=dict(color="#a78bfa", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_ema200:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA200"],
+                        name="EMA 200", line=dict(color="#f87171", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_bb:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_up"],
+                        name="BB Upper", line=dict(color="#94a3b8", width=1, dash="dot"),
+                        opacity=0.6), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_low"],
+                        name="BB Lower", line=dict(color="#94a3b8", width=1, dash="dot"),
+                        fill="tonexty", fillcolor="rgba(148,163,184,0.08)",
+                        opacity=0.6), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_mid"],
+                        name="BB Mid", line=dict(color="#94a3b8", width=1, dash="dash"),
+                        opacity=0.4), row=1, col=1)
+
+                # ── Sub-charts ────────────────────────────
+                sub_row = 2
+                if show_vol:
+                    colors = ["#26a69a" if hd["Close"].iloc[i] >= hd["Open"].iloc[i]
+                              else "#ef5350" for i in range(len(hd))]
+                    fig.add_trace(go.Bar(
+                        x=hd.index, y=hd["Volume"],
+                        name="Volume", marker_color=colors, opacity=0.7,
+                    ), row=sub_row, col=1)
+                    fig.update_yaxes(title_text="Volume", row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+                    sub_row += 1
+
+                if show_rsi:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["RSI"],
+                        name="RSI", line=dict(color="#60a5fa", width=1.5)),
+                        row=sub_row, col=1)
+                    fig.add_hline(y=70, line_dash="dot", line_color="#ef5350",
+                                  line_width=1, row=sub_row, col=1)
+                    fig.add_hline(y=30, line_dash="dot", line_color="#26a69a",
+                                  line_width=1, row=sub_row, col=1)
+                    fig.update_yaxes(title_text="RSI", range=[0,100],
+                                     row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+                    sub_row += 1
+
+                if show_macd:
+                    hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
+                                   for v in hd["Hist"].fillna(0)]
+                    fig.add_trace(go.Bar(x=hd.index, y=hd["Hist"],
+                        name="MACD Hist", marker_color=hist_colors, opacity=0.6),
+                        row=sub_row, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["MACD"],
+                        name="MACD", line=dict(color="#60a5fa", width=1.2)),
+                        row=sub_row, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["Signal"],
+                        name="Signal", line=dict(color="#f59e0b", width=1.2)),
+                        row=sub_row, col=1)
+                    fig.update_yaxes(title_text="MACD", row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+
+                # ── Layout ────────────────────────────────
+                fig.update_layout(
+                    height=600 + 120 * len(sub_charts),
+                    paper_bgcolor=bg, plot_bgcolor=bg,
+                    font=dict(color=fg, size=11),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.01,
+                        xanchor="left", x=0,
+                        bgcolor="rgba(0,0,0,0)", font=dict(size=10)
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_rangeslider_visible=False,
+                    hovermode="x unified",
+                )
+                fig.update_xaxes(
+                    gridcolor=grid, showgrid=True,
+                    zeroline=False, showspikes=True,
+                    spikecolor="#666", spikethickness=1,
+                )
+                fig.update_yaxes(
+                    gridcolor=grid, showgrid=True,
+                    zeroline=False,
+                )
+                fig.update_yaxes(title_text="Price ($)", row=1, col=1,
+                                 title_font=dict(size=10), tickfont=dict(size=9))
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # ── Period stats ──────────────────────────
+                s1, s2, s3, s4 = st.columns(4)
+                pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
+                s1.metric("Period Return", _fp(pr),     delta=f"{pr:+.2%}")
+                s2.metric("Period High",   f"${hd['High'].max():,.2f}")
+                s3.metric("Period Low",    f"${hd['Low'].min():,.2f}")
+                s4.metric("Avg Volume",    _fb(hd["Volume"].mean()).replace("$",""))
+            else:
+                st.info("No price history available.")
+
+    except Exception as _render_err:
+        st.error(f"Error rendering analysis: {_render_err}")
+
+
 def process_ticker(args):
     """
     Fetch all data for one ticker — optimised for minimum wall-clock time.
@@ -2444,11 +3216,8 @@ with tab_screener:
  _inline_tk = st.session_state.get("_inline_ticker")
  if _inline_tk:
     st.divider()
-    st.markdown(f"### 🔍 Quick Analysis — {_inline_tk}")
 
     # ── Per-ticker cache — avoids re-fetching on every Streamlit rerender ────
-    # Keyed by ticker + fetch time bucket (15-min windows) so data stays fresh
-    # without hammering yfinance on sidebar changes, scrolling, etc.
     import math as _math
     _cache_bucket  = _math.floor(time.time() / 900)   # new bucket every 15 min
     _il_cache_key  = f"_il_cache_{_inline_tk}_{_cache_bucket}"
@@ -2456,13 +3225,12 @@ with tab_screener:
 
     if _il_cached:
         # Serve from cache — no network calls
-        _il_info  = _il_cached["info"]
-        _il_hist  = _il_cached["hist"]
-        _il_fin   = _il_cached["fin"]
-        _il_bal   = _il_cached["bal"]
-        _il_cf    = _il_cached["cf"]
-        st.caption(f"Data fetched: {_il_cached['fetched_at']} · Cached for 15 min · "
-                   f"For full analysis open the Analyze a Stock tab")
+        _il_info       = _il_cached["info"]
+        _il_hist       = _il_cached["hist"]
+        _il_fin        = _il_cached["fin"]
+        _il_bal        = _il_cached["bal"]
+        _il_cf         = _il_cached["cf"]
+        _il_fetched_at = _il_cached["fetched_at"]
     else:
         # Fresh fetch — isolate each request so one failure doesn't kill the rest
         with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
@@ -2517,8 +3285,8 @@ with tab_screener:
                 "currentPrice": round(float(_il_hist["Close"].iloc[-1]), 2),
             }
 
-        # Cache the result (even partial) to avoid re-fetching on rerender
-        _il_fetched_at = datetime.now().strftime("%b %d %I:%M %p")
+        _il_fetched_at = datetime.now().strftime("%b %d, %Y %I:%M %p")
+
         if _il_info or not _il_hist.empty:
             # Evict old cache entries for this ticker (different time buckets)
             for _k in list(st.session_state.keys()):
@@ -2528,7 +3296,6 @@ with tab_screener:
             _all_il = [k for k in st.session_state if k.startswith("_il_cache_")]
             while len(_all_il) > 10:
                 del st.session_state[_all_il.pop(0)]
-            # Store — keep only hist/fin as compact dicts to save memory
             st.session_state[_il_cache_key] = {
                 "info":       _il_info,
                 "hist":       _il_hist,
@@ -2537,89 +3304,55 @@ with tab_screener:
                 "cf":         _il_cf,
                 "fetched_at": _il_fetched_at,
             }
-        st.caption(f"Data fetched: {_il_fetched_at} · Cached for 15 min · "
-                   f"For full analysis open the Analyze a Stock tab")
 
     if _il_info or not _il_hist.empty:
-        _il_price  = (_il_info.get("currentPrice") or _il_info.get("regularMarketPrice")
-                      or (round(float(_il_hist["Close"].iloc[-1]), 2) if not _il_hist.empty else None))
-        _il_mktcap = _il_info.get("marketCap")
-        _il_mfi_p  = st.session_state.get("slider_mfi_period", 14)
+        # Compute raw metrics from live data
+        _il_mfi_p = st.session_state.get("slider_mfi_period", 14)
+        _il_rdays = st.session_state.get("slider_range_days", 30)
+        try:
+            _il_vols  = get_volume_signals(_il_hist, _il_mfi_p)
+            _il_tech  = calculate_technical_signals(_il_hist)
+            _il_short = calculate_short_squeeze(_il_info)
+            _il_oe, _il_oey = get_owner_earnings(_il_cf, _il_fin, _il_info)
+            _il_raw = {
+                "OE_Yield":         _il_oey,
+                "ROIC":             calculate_roic(_il_fin, _il_bal),
+                "ROIC_Trend":       calculate_roic_trend(_il_fin, _il_bal),
+                "RevenueGrowth":    _il_info.get("revenueGrowth"),
+                "EarningsGrowth":   _il_info.get("earningsGrowth"),
+                "Piotroski":        calculate_piotroski(_il_fin, _il_bal, _il_cf),
+                "OBV":              _il_vols["OBV"],
+                "MFI":              _il_vols["MFI"],
+                "PCV":              _il_vols["PCV"],
+                "RSI":              _il_tech["RSI"],
+                "MACD":             _il_tech["MACD"],
+                "GoldenCross":      _il_tech["GoldenCross"],
+                "MFISweetSpot":     _il_tech["MFISweetSpot"],
+                "NoBearDiv":        _il_tech["NoBearDiv"],
+                "MA50Proximity":    _il_tech["MA50Proximity"],
+                "ShortPctFloatRaw": _il_short["ShortPctFloatRaw"],
+                "DaysToCover":      _il_short["DaysToCover"],
+                "ShortChange":      _il_short["ShortChange"],
+                "ShortSqueeze":     _il_short["ShortSqueeze"],
+            }
+        except Exception:
+            _il_raw = {}
 
-        _il_c1, _il_c2, _il_c3, _il_c4, _il_c5 = st.columns(5)
-        _il_c1.metric("Price",    f"${_il_price:,.2f}" if _il_price else "N/A")
-        _il_c2.metric("Sector",   _il_info.get("sector", "N/A"))
-        _il_c3.metric("Industry", _il_info.get("industry", "N/A"))
-        _il_c4.metric("Mkt Cap",  f"${_il_mktcap/1e9:.1f}B" if _il_mktcap else "N/A")
-        _il_pe = _il_info.get("trailingPE")
-        _il_c5.metric("P/E",      f"{_il_pe:.1f}" if _il_pe else "N/A")
+        # Show all metrics in the inline panel (same as analyze tab default)
+        _il_selected = list(METRICS.keys())
 
-        _il_vols  = get_volume_signals(_il_hist, _il_mfi_p)
-        _il_tech  = calculate_technical_signals(_il_hist)
-        _il_short = calculate_short_squeeze(_il_info)
-        _il_rng   = calculate_price_range(_il_hist, 30)
-        _il_ma50  = (round(_il_hist["Close"].rolling(50).mean().iloc[-1], 2)
-                     if len(_il_hist) >= 50 else None)
-        _il_oe, _il_oey = get_owner_earnings(_il_cf, _il_fin, _il_info)
-
-        st.markdown("**Metric scores:**")
-        _mc1, _mc2, _mc3, _mc4, _mc5, _mc6 = st.columns(6)
-        _mc1.metric("OBV",    f"{_il_vols['OBV']:.2f}",  help="1.0 = rising accumulation")
-        _mc2.metric("RSI",    f"{_il_tech['RSI']:.2f}",  help="1.0 = 55–70 sweet spot")
-        _mc3.metric("MACD",   f"{_il_tech['MACD']:.2f}", help="1.0 = positive + accelerating")
-        _mc4.metric("Golden", f"{_il_tech['GoldenCross']:.2f}", help="1.0 = 50MA above 200MA")
-        _mc5.metric("MFI",    f"{_il_vols['MFI']:.2f}",  help="1.0 = strong inflow")
-        _mc6.metric("PCV",    f"{_il_vols['PCV']:.2f}",  help="1.0 = up-day volume dominant")
-
-        _mc7, _mc8, _mc9, _mc10, _mc11, _mc12 = st.columns(6)
-        _mc7.metric("Short Float",
-            f"{_il_short['ShortPctFloatRaw']:.1f}%" if _il_short.get('ShortPctFloatRaw') else "N/A",
-            help="% of float sold short")
-        _mc8.metric("Days Cover",
-            f"{_il_short['DaysToCover']:.1f}" if _il_short.get('DaysToCover') else "N/A",
-            help="Days to cover shorts")
-        _sc = _il_short.get("ShortChange")
-        _mc9.metric("Short Chg",
-            (f"▲ {_sc:.1%}" if _sc and _sc > 0 else f"▼ {abs(_sc):.1%}" if _sc else "N/A"),
-            help="Month-over-month short interest change")
-        _mc10.metric("MA50",
-            f"${_il_ma50:,.2f}" if _il_ma50 else "N/A",
-            delta=f"{((_il_price-_il_ma50)/_il_ma50*100):+.1f}%" if (_il_price and _il_ma50) else None,
-            help="50-day moving average")
-        _mc11.metric("Range Pos",
-            f"{_il_rng['RangePos']:.0%}" if _il_rng.get('RangePos') is not None else "N/A",
-            help="0% = at range low · 100% = at range high")
-        _mc12.metric("OE Yield",
-            f"{_il_oey:.1%}" if _il_oey else "N/A",
-            help="Owner Earnings Yield")
-
-        if not _il_hist.empty:
-            import plotly.graph_objects as _pgo
-            _ch = _il_hist.tail(60)
-            _il_fig = _pgo.Figure()
-            _il_fig.add_trace(_pgo.Candlestick(
-                x=_ch.index, open=_ch["Open"], high=_ch["High"],
-                low=_ch["Low"], close=_ch["Close"], name=_inline_tk,
-                increasing_line_color="#639922", decreasing_line_color="#A32D2D",
-            ))
-            if _il_ma50:
-                _ma50s = _il_hist["Close"].rolling(50).mean().tail(60)
-                _il_fig.add_trace(_pgo.Scatter(
-                    x=_ma50s.index, y=_ma50s, mode="lines", name="MA50",
-                    line=dict(color="#378ADD", width=1.5, dash="dot")
-                ))
-            _il_fig.update_layout(
-                height=300, margin=dict(l=8, r=8, t=8, b=8),
-                xaxis_rangeslider_visible=False,
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(size=11), showlegend=False,
-            )
-            st.plotly_chart(_il_fig, use_container_width=True)
-
-        st.caption(
-            f"Fetched: {datetime.now().strftime('%b %d %I:%M %p')} · "
-            f"Click another ticker above to update · "
-            f"For full analysis open the Analyze a Stock tab"
+        render_stock_analysis(
+            info       = _il_info,
+            hist_1y    = _il_hist,
+            fin_stmt   = _il_fin,
+            bal_stmt   = _il_bal,
+            cf_stmt    = _il_cf,
+            raw        = _il_raw,
+            sticker    = _inline_tk,
+            selected   = _il_selected,
+            fetched_at = _il_fetched_at,
+            range_days = _il_rdays,
+            mfi_period = _il_mfi_p,
         )
     else:
         st.warning(
@@ -2971,774 +3704,18 @@ with tab_analyze:
     if "analyze_data" not in st.session_state:
         st.info("Enter a ticker above and click **🔬 Analyze** to get started. Works on any publicly traded stock — S&P 500, NYSE, NASDAQ, or international.")
     else:
-        try:
-            _d       = st.session_state["analyze_data"]
-            info     = _d["info"]
-            hist_1y  = _d["hist"]
-            fin_stmt = _d["fin"]
-            bal_stmt = _d["bal"]
-            cf_stmt  = _d["cf"]
-            raw      = _d["raw"]
-            sticker  = _d["ticker"]
-            selected = [k for k, v in _d["metrics_sel"].items() if v]
-
-            name    = info.get("longName") or info.get("shortName") or sticker
-            price   = info.get("currentPrice") or info.get("regularMarketPrice")
-            mktcap  = info.get("marketCap")
-
-            st.markdown(f"## {name} &nbsp; `{sticker}`")
-            # Always show when data was fetched — analyze tab always pulls live
-            _fat = _d.get("fetched_at", "")
-            if _fat:
-                st.caption(f"Live data fetched: {_fat} · Source: Yahoo Finance via yfinance")
-            h1, h2, h3, h4 = st.columns(4)
-            h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
-            h2.metric("Sector",   info.get("sector", "N/A"))
-            h3.metric("Industry", info.get("industry", "N/A"))
-            h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
-            st.divider()
-
-            if not selected:
-                st.warning("No metrics were selected when Analyze was run.")
-                st.stop()
-
-            THRESHOLDS = {
-                "OE_Yield":       (0.05,  0.02, True),
-                "ROIC":           (0.15,  0.08, True),
-                "ROIC_Trend":     (0.02,  0.0,  True),
-                "RevenueGrowth":  (0.10,  0.05, True),
-                "EarningsGrowth": (0.10,  0.05, True),
-                "Piotroski":      (7,     4,    True),
-                "OBV":            (0.8,   0.4,  True),
-                "MFI":            (0.6,   0.4,  True),
-                "PCV":            (0.5,   0.2,  True),
-                "RSI":            (0.9,   0.5,  True),
-                "MACD":           (0.9,   0.5,  True),
-                "GoldenCross":    (0.9,   0.4,  True),
-                "MFISweetSpot":   (0.9,   0.5,  True),
-                "NoBearDiv":      (0.9,   0.4,  True),
-                "MA50Proximity":  (0.9,   0.5,  True),
-                "RangePosScore":  (0.75,  0.4,  True),
-            }
-
-            def _sig(key, val):
-                if val is None or (isinstance(val, float) and np.isnan(val)): return "⚪"
-                g, n, hi = THRESHOLDS.get(key, (None, None, True))
-                if g is None: return "⚪"
-                if hi:  return "🟢" if val >= g else ("🟡" if val >= n else "🔴")
-                else:   return "🟢" if val <= g else ("🟡" if val <= n else "🔴")
-
-            def _fv(key, val):
-                if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
-                if key in ("OE_Yield","RevenueGrowth","EarningsGrowth","ROIC","ROIC_Trend"): return f"{val:.2%}"
-                if key in ("OBV","MFI","PCV"): return f"{val:.4f}"
-                if key == "Piotroski": return f"{int(val)} / 9"
-                return str(round(val, 4))
-
-            def _fb(val):
-                if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
-                try:
-                    v = float(val)
-                    if abs(v)>=1e12: return f"${v/1e12:.2f}T"
-                    if abs(v)>=1e9:  return f"${v/1e9:.2f}B"
-                    if abs(v)>=1e6:  return f"${v/1e6:.2f}M"
-                    if abs(v)>=1e3:  return f"${v/1e3:.2f}K"
-                    return f"${v:,.2f}"
-                except: return "N/A"
-
-            def _fp(val):
-                try:    return f"{float(val):.2%}" if val is not None else "N/A"
-                except: return "N/A"
-
-            def _fn(val, d=2):
-                try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
-                except: return "N/A"
-
-            def irow(label, value, tip=None):
-                # tip renders as a small ℹ tooltip after the label
-                tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
-                            f"font-size:0.85em;'>ℹ️</span>") if tip else ""
-                st.markdown(
-                    f"<div style='display:flex;justify-content:space-between;"
-                    f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
-                    f"<span style='color:#aaa;'>{label}{tip_html}</span>"
-                    f"<span style='font-weight:600;'>{value}</span></div>",
-                    unsafe_allow_html=True)
-
-            # ── Metric cards ─────────────────────────────────
-            st.markdown("### Metric Results")
-
-            # Compute MFI signal for use in card and banner
-            _mfi_raw = raw.get("MFI")
-            def _mfi_label(v):
-                if v is None or (isinstance(v, float) and np.isnan(v)): return None, None
-                mfi = v * 100
-                if mfi >= 80: return "🔥 Overbought",  "#ef5350"
-                if mfi >= 60: return "📈 Buying",       "#26a69a"
-                if mfi >= 40: return "➡️ Neutral",      "#888888"
-                if mfi >= 20: return "📉 Selling",      "#f59e0b"
-                return         "🧊 Oversold",           "#60a5fa"
-
-            _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
-
-            # Show MFI signal banner if MFI is selected
-            if "MFI" in selected and _mfi_lbl:
-                _mfi_pct = f"{_mfi_raw*100:.1f}" if _mfi_raw is not None else "N/A"
-                st.markdown(
-                    f"<div style='background:{_mfi_col}22;border:1px solid {_mfi_col};"
-                    f"border-radius:8px;padding:10px 16px;margin-bottom:12px;"
-                    f"display:flex;justify-content:space-between;align-items:center;'>"
-                    f"<span style='font-weight:600;font-size:1.05em;'>{_mfi_lbl}</span>"
-                    f"<span style='color:#ccc;font-size:0.9em;'>MFI = {_mfi_pct} &nbsp;·&nbsp; "
-                    f"Oversold ≤20 · Selling 20–40 · Neutral 40–60 · Buying 60–80 · Overbought ≥80</span>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-
-            cols = st.columns(3)
-            for i, key in enumerate(selected):
-                cfg = METRICS[key]; val = raw.get(key)
-                # HTML-escape the description so special chars don't break the markup
-                import html as _html
-                safe_desc = _html.escape(cfg['desc'][:120])
-                # Build extra badge line for MFI card
-                extra = ""
-                if key == "MFI" and _mfi_lbl:
-                    extra = (f"<div style='margin-top:6px;padding:3px 8px;border-radius:4px;"
-                             f"background:{_mfi_col}33;color:{_mfi_col};"
-                             f"font-size:0.85em;font-weight:600;display:inline-block;'>"
-                             f"{_mfi_lbl}</div>")
-                with cols[i % 3]:
-                    st.markdown(
-                        f"<div style='border:1px solid #444;border-radius:8px;"
-                        f"padding:14px;margin-bottom:12px;'>"
-                        f"<div style='font-size:1.1em;font-weight:600;'>{_sig(key,val)} {cfg['label']}</div>"
-                        f"<div style='font-size:1.8em;font-weight:700;margin:6px 0;'>{_fv(key,val)}</div>"
-                        f"{extra}"
-                        f"<div style='font-size:0.78em;color:#aaa;margin-top:6px;'>{safe_desc}...</div>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-
-            # ── MA50 ─────────────────────────────────────────
-            st.divider()
-            if not hist_1y.empty and len(hist_1y) >= 50:
-                ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
-                diff_pct = ((price - ma50_val) / ma50_val * 100) if price else 0
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Current Price", f"${price:,.2f}" if price else "N/A",
-                          help="The latest traded price of the stock")
-                m2.metric("50-Day MA",     f"${ma50_val:,.2f}",
-                          help="50-Day Moving Average — the average closing price over the last 50 trading days. "
-                               "Price below this line = stock is in a short-term downtrend or pullback")
-                m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
-                          help="How far the current price is above or below the 50-day MA. "
-                               "Negative = trading below the MA (potential value zone). "
-                               "Positive = trading above the MA (momentum zone)")
-                st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
-
-            # ── Short Interest ────────────────────────────────
-            st.divider()
-            st.markdown("### 🎯 Short Interest")
-            _sd = st.session_state.get("analyze_data", {}).get("short", {})
-            _spf  = _sd.get("ShortPctFloatRaw")
-            _dtc  = _sd.get("DaysToCover")
-            _schg = _sd.get("ShortChange")
-            _ssq  = _sd.get("ShortSqueeze", 0)
-            if _spf is not None or _dtc is not None:
-                si1, si2, si3, si4 = st.columns(4)
-                si1.metric(
-                    "Short % of Float",
-                    f"{_spf:.1f}%" if _spf is not None else "N/A",
-                    help="Percentage of the float currently sold short. "
-                         "Above 10% = elevated. Above 20% = heavily shorted. Above 30% = extreme. "
-                         "Higher = more potential fuel for a short squeeze."
-                )
-                si2.metric(
-                    "Days to Cover",
-                    f"{_dtc:.1f}" if _dtc is not None else "N/A",
-                    help="How many days of average trading volume it would take all short sellers to exit. "
-                         "Also called Short Ratio. Above 5 = shorts are trapped. "
-                         "Above 10 = very difficult to exit quickly — high squeeze risk."
-                )
-                _schg_str = (f"▲ {_schg:.1%}" if _schg and _schg > 0
-                             else f"▼ {abs(_schg):.1%}" if _schg and _schg < 0
-                             else "N/A")
-                si3.metric(
-                    "Short Change MoM",
-                    _schg_str,
-                    help="Month-over-month change in shares short. "
-                         "▲ = shorts increasing (more bearish bets being placed). "
-                         "▼ = shorts covering (potential squeeze in progress)."
-                )
-                _squeeze_pct = f"{_ssq*100:.0f}%" if _ssq else "0%"
-                si4.metric(
-                    "Squeeze Score",
-                    _squeeze_pct,
-                    help="Composite short squeeze setup score (0–100%). "
-                         "Combines short float %, days-to-cover, and short covering momentum. "
-                         "Above 60% = strong squeeze setup. Above 80% = extreme."
-                )
-                # Visual squeeze meter
-                _bar_filled = int((_ssq or 0) * 20)
-                _bar = "█" * _bar_filled + "░" * (20 - _bar_filled)
-                if _ssq and _ssq >= 0.7:
-                    st.error(f"🔥 **High Squeeze Risk** [{_bar}] {_squeeze_pct} — heavy short interest with squeeze conditions present")
-                elif _ssq and _ssq >= 0.4:
-                    st.warning(f"⚡ **Elevated Short Interest** [{_bar}] {_squeeze_pct} — watch for squeeze trigger")
-                elif _spf and _spf >= 5:
-                    st.info(f"📊 **Moderate Short Interest** [{_bar}] {_squeeze_pct} — some short interest present")
-                else:
-                    st.success(f"✅ **Low Short Interest** [{_bar}] {_squeeze_pct} — minimal squeeze risk")
-                st.caption("Short interest data from Yahoo Finance / FINRA. Updated twice monthly.")
-            else:
-                st.info("Short interest data not available for this ticker.")
-
-            # ── Price Range ───────────────────────────────────
-            st.divider()
-            st.markdown("### 📦 Price Range Analysis")
-            st.caption(f"Last **{range_days} trading days** — adjust via sidebar")
-            if not hist_1y.empty and len(hist_1y) >= range_days:
-                win  = hist_1y["Close"].iloc[-range_days:]
-                rh   = round(win.max(), 2); rl = round(win.min(), 2)
-                mid  = (rh + rl) / 2
-                rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
-                rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
-                rc1, rc2, rc3, rc4 = st.columns(4)
-                rc1.metric("Range High", f"${rh:,.2f}",
-                           help=f"The highest closing price over the last {range_days} trading days. "
-                                "This acts as the top of the price range — a resistance level. "
-                                "Price approaching this level may face selling pressure.")
-                rc2.metric("Range Low",  f"${rl:,.2f}",
-                           help=f"The lowest closing price over the last {range_days} trading days. "
-                                "This acts as the bottom of the price range — a support level. "
-                                "Price near this level may attract buyers.")
-                rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A",
-                           help="Range Width = (High − Low) ÷ Midpoint × 100. "
-                                "Measures how wide the trading channel is as a % of price. "
-                                "Under 5% = very tight consolidation (coiling). "
-                                "5–10% = normal consolidation. "
-                                "Above 20% = high volatility / wide swings.")
-                rc4.metric("Position",    f"{rpos:.0%}",
-                           help="Where the current price sits within the range. "
-                                "0% = at the range low (at support — potential buy zone). "
-                                "50% = exactly at the midpoint. "
-                                "100% = at the range high (at resistance — potential sell zone). "
-                                "Stocks near the low end of a tight range can signal accumulation before a breakout.")
-                bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
-                pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
-                st.markdown(
-                    f"<div style='font-family:monospace;font-size:1.1em;margin:10px 0;'>"
-                    f"${rl:,.2f} |{bar}| ${rh:,.2f}</div>"
-                    f"<div style='color:#aaa;font-size:0.9em;'>Current ${price:,.2f} — {pos_lbl}</div>",
-                    unsafe_allow_html=True)
-                if rp is not None:
-                    if rp <= 5:    st.success(f"🔒 Very Tight Range ({rp:.1f}%) — consolidation/breakout setup")
-                    elif rp <= 10: st.info(f"📦 Tight Range ({rp:.1f}%) — consolidating")
-                    elif rp <= 20: st.warning(f"📊 Moderate Range ({rp:.1f}%)")
-                    else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
-                cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
-                cdf["High"] = rh; cdf["Low"] = rl
-                st.line_chart(cdf, use_container_width=True)
-            else:
-                st.warning("Not enough price history to calculate range.")
-
-            # ── Weighted score ────────────────────────────────
-            st.divider()
-            ts = sum(
-                float(raw.get(k) or 0) * metric_weight.get(k, METRICS[k]["weight"])
-                for k in selected
-                if raw.get(k) is not None and not (isinstance(raw.get(k), float) and np.isnan(raw.get(k)))
-            )
-            st.metric("Weighted Score", f"{ts:.2f}")
-
-            # ── Financial tabs ────────────────────────────────
-            st.divider()
-            st.markdown("## 📋 Full Financial Breakdown")
-            ft = st.tabs(["🏢 Overview","💰 Valuation","📈 Income","🏦 Balance Sheet","💵 Cash Flow","📊 Price History"])
-
-            with ft[0]:
-                st.markdown("### 🏢 Company Overview")
-                c1, c2 = st.columns(2)
-                with c1:
-                    irow("Full Name",    info.get("longName","N/A"))
-                    irow("Exchange",     info.get("exchange","N/A"),   "The stock exchange where shares are listed and traded")
-                    irow("Sector",       info.get("sector","N/A"),     "GICS sector classification — broad industry group the company belongs to")
-                    irow("Industry",     info.get("industry","N/A"),   "Specific industry within the sector")
-                    irow("Country",      info.get("country","N/A"),    "Country where the company is headquartered")
-                    irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A",
-                         "Total number of full-time employees")
-                    irow("Website",      info.get("website","N/A"))
-                with c2:
-                    officers = info.get("companyOfficers",[])
-                    irow("CEO",          officers[0].get("name","N/A") if officers else "N/A",
-                         "Chief Executive Officer — the top executive responsible for running the company")
-                    irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")),
-                         "Fiscal Year End — the month the company closes its annual accounting period")
-                    irow("Audit Risk",   str(info.get("auditRisk","N/A")),
-                         "Score 1–10 rating audit-related governance risk. Lower = less risk")
-                    irow("Board Risk",   str(info.get("boardRisk","N/A")),
-                         "Score 1–10 rating board structure and independence risk. Lower = less risk")
-                    irow("Comp Risk",    str(info.get("compensationRisk","N/A")),
-                         "Compensation Risk — score 1–10 rating executive pay structure risk. Lower = less risk")
-                    irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")),
-                         "Shareholder Rights Risk — score 1–10. High = management has too much power vs shareholders")
-                    irow("Overall Risk", str(info.get("overallRisk","N/A")),
-                         "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
-                st.markdown("#### Business Summary")
-                st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
-
-            with ft[1]:
-                st.markdown("### 💰 Valuation")
-                v1, v2 = st.columns(2)
-                with v1:
-                    irow("Market Cap",       _fb(info.get("marketCap")),
-                         "Market Capitalization — total market value of all outstanding shares (Share Price × Shares Outstanding)")
-                    irow("Enterprise Value", _fb(info.get("enterpriseValue")),
-                         "Enterprise Value (EV) — Market Cap + Total Debt − Cash. Represents the true takeover cost of a company")
-                    irow("Trailing P/E",     _fn(info.get("trailingPE")),
-                         "Trailing Price-to-Earnings — share price divided by actual earnings per share over the last 12 months. Lower = cheaper relative to earnings")
-                    irow("Forward P/E",      _fn(info.get("forwardPE")),
-                         "Forward Price-to-Earnings — share price divided by analyst-estimated future earnings. Reflects growth expectations")
-                    irow("PEG Ratio",        _fn(info.get("pegRatio")),
-                         "Price/Earnings-to-Growth — P/E divided by earnings growth rate. Below 1.0 may indicate undervaluation relative to growth")
-                    irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")),
-                         "Price-to-Sales (P/S) — Market Cap divided by annual revenue. Useful for unprofitable companies. Lower = cheaper")
-                    irow("Price/Book",       _fn(info.get("priceToBook")),
-                         "Price-to-Book (P/B) — share price divided by book value per share (assets minus liabilities). Below 1.0 = trading below asset value")
-                    irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")),
-                         "Enterprise Value divided by annual revenue. Similar to P/S but accounts for debt. Lower = cheaper")
-                    irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")),
-                         "Enterprise Value divided by EBITDA. Popular acquisition valuation multiple. Below 10 is generally considered reasonable")
-                with v2:
-                    irow("Trailing EPS",     _fn(info.get("trailingEps")),
-                         "Trailing Earnings Per Share — actual net income per share over the last 12 months")
-                    irow("Forward EPS",      _fn(info.get("forwardEps")),
-                         "Forward Earnings Per Share — analyst-estimated earnings per share for the next 12 months")
-                    irow("Book Value/Share", _fn(info.get("bookValue")),
-                         "Net assets per share — total assets minus total liabilities, divided by shares outstanding")
-                    irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")),
-                         "Highest closing price over the last 52 weeks (one year)")
-                    irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")),
-                         "Lowest closing price over the last 52 weeks (one year)")
-                    irow("50-Day MA",        _fn(info.get("fiftyDayAverage")),
-                         "50-Day Moving Average — average closing price over the last 50 trading days. Used as a short-term trend indicator")
-                    irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")),
-                         "200-Day Moving Average — average closing price over the last 200 trading days. Used as a long-term trend indicator")
-                    irow("Beta",             _fn(info.get("beta")),
-                         "Beta — measures stock volatility vs the S&P 500. Beta > 1 = more volatile than market; Beta < 1 = less volatile")
-                    irow("Short % Float",    _fp(info.get("shortPercentOfFloat")),
-                         "Short Interest as % of Float — percentage of tradeable shares currently sold short. High % can signal bearish sentiment or potential short squeeze")
-                d1,d2,d3 = st.columns(3)
-                d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None",
-                          help="Dividend Rate — annual cash dividend paid per share")
-                d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None",
-                          help="Dividend Yield — annual dividend as a % of share price. Higher = more income per dollar invested")
-                d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A",
-                          help="Payout Ratio — percentage of net income paid out as dividends. Above 100% means paying more than it earns")
-
-            with ft[2]:
-                st.markdown("### 📈 Income Statement (Annual)")
-                if fin_stmt is not None and not fin_stmt.empty:
-                    fd = fin_stmt.T.copy()
-                    fd.index = [str(i)[:10] for i in fd.index]
-                    for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                    st.dataframe(fd, use_container_width=True)
-                else:
-                    st.info("Income statement not available.")
-                i1,i2,i3,i4 = st.columns(4)
-                i1.metric("Revenue",    _fb(info.get("totalRevenue")),
-                          help="Total Revenue — all money earned from selling products/services before any expenses are deducted")
-                i2.metric("Gross",      _fb(info.get("grossProfits")),
-                          help="Gross Profit — Revenue minus Cost of Goods Sold (COGS). Shows profit before operating expenses")
-                i3.metric("EBITDA",     _fb(info.get("ebitda")),
-                          help="Earnings Before Interest, Taxes, Depreciation & Amortization — a proxy for operating cash flow and profitability")
-                i4.metric("Net Inc",    _fb(info.get("netIncomeToCommon")),
-                          help="Net Income — the bottom line profit after all expenses, interest, and taxes have been deducted")
-                i5,i6,i7,i8 = st.columns(4)
-                i5.metric("Gross Mgn",  _fp(info.get("grossMargins")),
-                          help="Gross Margin — Gross Profit ÷ Revenue. Higher % = more money left after production costs")
-                i6.metric("Op Mgn",     _fp(info.get("operatingMargins")),
-                          help="Operating Margin — Operating Income ÷ Revenue. Shows profit from core business operations")
-                i7.metric("Net Mgn",    _fp(info.get("profitMargins")),
-                          help="Net Profit Margin — Net Income ÷ Revenue. The % of every dollar of revenue that becomes profit")
-                i8.metric("Rev Growth", _fp(info.get("revenueGrowth")),
-                          help="Revenue Growth — year-over-year percentage increase in total revenue")
-
-            with ft[3]:
-                st.markdown("### 🏦 Balance Sheet (Annual)")
-                if bal_stmt is not None and not bal_stmt.empty:
-                    bd = bal_stmt.T.copy()
-                    bd.index = [str(i)[:10] for i in bd.index]
-                    for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                    st.dataframe(bd, use_container_width=True)
-                else:
-                    st.info("Balance sheet not available.")
-                b1,b2,b3,b4 = st.columns(4)
-                b1.metric("Cash",      _fb(info.get("totalCash")),
-                          help="Total Cash & Short-Term Investments — liquid assets the company can access immediately")
-                b2.metric("Debt",      _fb(info.get("totalDebt")),
-                          help="Total Debt — all short-term and long-term borrowings combined")
-                b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)),
-                          help="Net Cash Position — Total Cash minus Total Debt. Positive = more cash than debt (strong balance sheet)")
-                b4.metric("Assets",    _fb(info.get("totalAssets")),
-                          help="Total Assets — everything the company owns: cash, property, equipment, intangibles, etc.")
-                b5,b6,b7,b8 = st.columns(4)
-                b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")),
-                          help="Cash Per Share — total cash divided by shares outstanding. Higher = more cash backing each share")
-                b6.metric("D/E",       _fn(info.get("debtToEquity")),
-                          help="Debt-to-Equity Ratio — total debt divided by shareholders equity. Lower = less financial leverage/risk. Above 2.0 can be concerning")
-                b7.metric("Cur Ratio", _fn(info.get("currentRatio")),
-                          help="Current Ratio — Current Assets ÷ Current Liabilities. Above 1.0 means the company can cover its short-term debts. Above 2.0 is considered healthy")
-                b8.metric("Qck Ratio", _fn(info.get("quickRatio")),
-                          help="Quick Ratio (Acid Test) — like Current Ratio but excludes inventory. Above 1.0 means the company can pay short-term debts without selling inventory")
-
-            with ft[4]:
-                st.markdown("### 💵 Cash Flow (Annual)")
-                if cf_stmt is not None and not cf_stmt.empty:
-                    cd = cf_stmt.T.copy()
-                    cd.index = [str(i)[:10] for i in cd.index]
-                    for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                    st.dataframe(cd, use_container_width=True)
-                else:
-                    st.info("Cash flow not available.")
-                cf1,cf2,cf3,cf4 = st.columns(4)
-                cf1.metric("Op CF",   _fb(info.get("operatingCashflow")),
-                           help="Operating Cash Flow — actual cash generated from core business operations. More reliable than net income as a profitability measure")
-                cf2.metric("FCF",     _fb(info.get("freeCashflow")),
-                           help="Free Cash Flow — Operating Cash Flow minus Capital Expenditures. Cash left over that can be used for dividends, buybacks, or debt repayment")
-                cf3.metric("CapEx",   _fb(info.get("capitalExpenditures")),
-                           help="Capital Expenditures — money spent on buying, maintaining or upgrading physical assets like buildings and equipment")
-                sh = info.get("sharesOutstanding"); fcf = info.get("freeCashflow")
-                cf4.metric("FCF/Shr", _fn(fcf/sh if fcf and sh else None),
-                           help="Free Cash Flow Per Share — FCF divided by shares outstanding. How much free cash is generated per share owned")
-                cf5,cf6 = st.columns(2)
-                cf5.metric("ROA", _fp(info.get("returnOnAssets")),
-                           help="Return on Assets — Net Income ÷ Total Assets. Measures how efficiently a company uses its assets to generate profit. Above 5% is generally good")
-                cf6.metric("ROE", _fp(info.get("returnOnEquity")),
-                           help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
-
-            with ft[5]:
-                st.markdown("### 📊 Interactive Chart")
-
-                # ── Chart controls row 1 ──────────────────────
-                cc1, cc2, cc3, cc4 = st.columns(4)
-                with cc1:
-                    chart_type = st.selectbox(
-                        "Chart Type",
-                        ["Candlestick", "Heikin Ashi", "Line"],
-                        index=0, key="chart_type",
-                        help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
-                    )
-                with cc2:
-                    interval = st.selectbox(
-                        "Candle Interval",
-                        ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
-                        index=6, key="chart_interval",
-                        help=(
-                            "1m/5m: last 7 days max  |  "
-                            "15m/30m/1h: last 60 days max  |  "
-                            "4h: last 60 days max (resampled)  |  "
-                            "1d/1wk/1mo: years of data available"
-                        )
-                    )
-                with cc3:
-                    # Restrict time period options based on interval
-                    intraday_short = interval in ("1m", "5m")
-                    intraday_mid   = interval in ("15m", "30m", "1h", "4h")
-
-                    if intraday_short:
-                        period_opts = ["1d", "5d", "7d"]
-                        period_def  = 1
-                    elif intraday_mid:
-                        period_opts = ["1d", "5d", "1mo", "2mo"]
-                        period_def  = 2
-                    else:
-                        period_opts = ["5d","1mo","3mo","6mo","1y","2y","5y","10y","Custom"]
-                        period_def  = 4
-
-                    pc = st.selectbox(
-                        "Time Period", period_opts,
-                        index=period_def, key="price_history_period"
-                    )
-                with cc4:
-                    chart_theme = st.selectbox(
-                        "Theme", ["Dark","Light"], index=0, key="chart_theme"
-                    )
-
-                # ── Custom date range (daily+ only) ───────────
-                if pc == "Custom":
-                    dr1, dr2 = st.columns(2)
-                    with dr1:
-                        custom_start = st.date_input(
-                            "Start Date",
-                            value=pd.Timestamp.today() - pd.Timedelta(days=365),
-                            max_value=pd.Timestamp.today(),
-                            key="chart_custom_start",
-                        )
-                    with dr2:
-                        custom_end = st.date_input(
-                            "End Date",
-                            value=pd.Timestamp.today(),
-                            max_value=pd.Timestamp.today(),
-                            key="chart_custom_end",
-                        )
-
-                st.markdown("**Overlays**")
-                ov1,ov2,ov3,ov4 = st.columns(4)
-                show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
-                show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
-                show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
-                show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
-
-                st.markdown("**Sub-Charts**")
-                sc1,sc2,sc3 = st.columns(3)
-                show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
-                show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
-                show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
-
-                # ── Fetch history with correct interval ───────
-                # yfinance interval/period compatibility:
-                #   1m        → max period "7d"
-                #   5m/15m/30m/1h → max period "60d"
-                #   4h        → not native; fetch 1h and resample
-                #   1d/1wk/1mo → any period
-                fetch_interval = "1h" if interval == "4h" else interval
-
-                # Map display period → yfinance period string for fetch
-                period_fetch_map = {
-                    "1d":"1d","5d":"5d","7d":"7d","1mo":"1mo","2mo":"2mo",
-                    "3mo":"3mo","6mo":"6mo","1y":"2y","2y":"5y",
-                    "5y":"10y","10y":"max","Custom":"max",
-                }
-                fetch_period = period_fetch_map.get(pc, "2y")
-
-                try:
-                    _s = yf.Ticker(sticker)
-                    if pc == "Custom":
-                        hist_full = _s.history(
-                            start=str(custom_start),
-                            end=str(custom_end),
-                            interval=fetch_interval
-                        )
-                    else:
-                        hist_full = _s.history(period=fetch_period, interval=fetch_interval)
-                except Exception as _fe:
-                    st.warning(f"Could not fetch {interval} data: {_fe}. Falling back to daily.")
-                    hist_full = hist_1y
-
-                # Resample 1h → 4h if needed
-                if interval == "4h" and not hist_full.empty:
-                    hist_full = hist_full.resample("4h").agg({
-                        "Open":  "first",
-                        "High":  "max",
-                        "Low":   "min",
-                        "Close": "last",
-                        "Volume":"sum",
-                    }).dropna()
-
-                # Slice to display window for daily+ periods
-                period_days_map = {
-                    "5d":5,"1mo":21,"3mo":63,"6mo":126,
-                    "1y":252,"2y":504,"5y":1260,"10y":2520,
-                }
-                if pc not in ("Custom","1d","5d","7d","1mo","2mo"):
-                    dn = period_days_map.get(pc, 252)
-                    hd = hist_full.iloc[-dn:].copy() if len(hist_full) >= dn else hist_full.copy()
-                else:
-                    hd = hist_full.copy()
-
-                if not hd.empty:
-                    import plotly.graph_objects as go
-                    from plotly.subplots import make_subplots
-
-                    bg   = "#0e1117" if chart_theme == "Dark" else "#ffffff"
-                    fg   = "#ffffff" if chart_theme == "Dark" else "#000000"
-                    grid = "#1f2937" if chart_theme == "Dark" else "#e5e7eb"
-
-                    # ── Compute indicators ────────────────────
-                    hd["EMA20"]  = hd["Close"].ewm(span=20,  adjust=False).mean()
-                    hd["EMA50"]  = hd["Close"].ewm(span=50,  adjust=False).mean()
-                    hd["EMA200"] = hd["Close"].ewm(span=200, adjust=False).mean()
-
-                    # Bollinger Bands (20-day, 2σ)
-                    bb_mid        = hd["Close"].rolling(20).mean()
-                    bb_std        = hd["Close"].rolling(20).std()
-                    hd["BB_mid"]  = bb_mid
-                    hd["BB_up"]   = bb_mid + 2 * bb_std
-                    hd["BB_low"]  = bb_mid - 2 * bb_std
-
-                    # RSI (14-period)
-                    delta  = hd["Close"].diff()
-                    gain   = delta.clip(lower=0).rolling(14).mean()
-                    loss   = (-delta.clip(upper=0)).rolling(14).mean()
-                    rs     = gain / loss.replace(0, np.nan)
-                    hd["RSI"] = 100 - (100 / (1 + rs))
-
-                    # MACD (12/26/9)
-                    ema12       = hd["Close"].ewm(span=12, adjust=False).mean()
-                    ema26       = hd["Close"].ewm(span=26, adjust=False).mean()
-                    hd["MACD"]  = ema12 - ema26
-                    hd["Signal"]= hd["MACD"].ewm(span=9, adjust=False).mean()
-                    hd["Hist"]  = hd["MACD"] - hd["Signal"]
-
-                    # Heikin Ashi OHLC
-                    ha = hd.copy()
-                    ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
-                    ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
-                    ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
-                    ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
-                    ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
-
-                    # ── Build subplot layout ──────────────────
-                    sub_charts = [s for s, show in [
-                        ("Volume", show_vol), ("RSI", show_rsi), ("MACD", show_macd)
-                    ] if show]
-
-                    n_rows   = 1 + len(sub_charts)
-                    row_h    = [0.55] + [0.45 / max(len(sub_charts), 1)] * len(sub_charts) if sub_charts else [1.0]
-                    sub_specs= [[{"secondary_y": False}]] * n_rows
-
-                    fig = make_subplots(
-                        rows=n_rows, cols=1,
-                        shared_xaxes=True,
-                        row_heights=row_h,
-                        vertical_spacing=0.03,
-                        specs=sub_specs,
-                    )
-
-                    # ── Main price chart ──────────────────────
-                    if chart_type == "Candlestick":
-                        fig.add_trace(go.Candlestick(
-                            x=hd.index, open=hd["Open"], high=hd["High"],
-                            low=hd["Low"],  close=hd["Close"],
-                            name="Price",
-                            increasing_line_color="#26a69a",
-                            decreasing_line_color="#ef5350",
-                            increasing_fillcolor="#26a69a",
-                            decreasing_fillcolor="#ef5350",
-                        ), row=1, col=1)
-
-                    elif chart_type == "Heikin Ashi":
-                        fig.add_trace(go.Candlestick(
-                            x=ha.index, open=ha["HA_Open"], high=ha["HA_High"],
-                            low=ha["HA_Low"],  close=ha["HA_Close"],
-                            name="Heikin Ashi",
-                            increasing_line_color="#26a69a",
-                            decreasing_line_color="#ef5350",
-                            increasing_fillcolor="#26a69a",
-                            decreasing_fillcolor="#ef5350",
-                        ), row=1, col=1)
-
-                    else:  # Line
-                        fig.add_trace(go.Scatter(
-                            x=hd.index, y=hd["Close"],
-                            name="Close", line=dict(color="#2196f3", width=1.5)
-                        ), row=1, col=1)
-
-                    # ── Overlays ──────────────────────────────
-                    if show_ema20:
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA20"],
-                            name="EMA 20", line=dict(color="#f59e0b", width=1),
-                            opacity=0.85), row=1, col=1)
-                    if show_ema50:
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA50"],
-                            name="EMA 50", line=dict(color="#a78bfa", width=1),
-                            opacity=0.85), row=1, col=1)
-                    if show_ema200:
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA200"],
-                            name="EMA 200", line=dict(color="#f87171", width=1),
-                            opacity=0.85), row=1, col=1)
-                    if show_bb:
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_up"],
-                            name="BB Upper", line=dict(color="#94a3b8", width=1, dash="dot"),
-                            opacity=0.6), row=1, col=1)
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_low"],
-                            name="BB Lower", line=dict(color="#94a3b8", width=1, dash="dot"),
-                            fill="tonexty", fillcolor="rgba(148,163,184,0.08)",
-                            opacity=0.6), row=1, col=1)
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_mid"],
-                            name="BB Mid", line=dict(color="#94a3b8", width=1, dash="dash"),
-                            opacity=0.4), row=1, col=1)
-
-                    # ── Sub-charts ────────────────────────────
-                    sub_row = 2
-                    if show_vol:
-                        colors = ["#26a69a" if hd["Close"].iloc[i] >= hd["Open"].iloc[i]
-                                  else "#ef5350" for i in range(len(hd))]
-                        fig.add_trace(go.Bar(
-                            x=hd.index, y=hd["Volume"],
-                            name="Volume", marker_color=colors, opacity=0.7,
-                        ), row=sub_row, col=1)
-                        fig.update_yaxes(title_text="Volume", row=sub_row, col=1,
-                                         title_font=dict(size=10), tickfont=dict(size=9))
-                        sub_row += 1
-
-                    if show_rsi:
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["RSI"],
-                            name="RSI", line=dict(color="#60a5fa", width=1.5)),
-                            row=sub_row, col=1)
-                        fig.add_hline(y=70, line_dash="dot", line_color="#ef5350",
-                                      line_width=1, row=sub_row, col=1)
-                        fig.add_hline(y=30, line_dash="dot", line_color="#26a69a",
-                                      line_width=1, row=sub_row, col=1)
-                        fig.update_yaxes(title_text="RSI", range=[0,100],
-                                         row=sub_row, col=1,
-                                         title_font=dict(size=10), tickfont=dict(size=9))
-                        sub_row += 1
-
-                    if show_macd:
-                        hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
-                                       for v in hd["Hist"].fillna(0)]
-                        fig.add_trace(go.Bar(x=hd.index, y=hd["Hist"],
-                            name="MACD Hist", marker_color=hist_colors, opacity=0.6),
-                            row=sub_row, col=1)
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["MACD"],
-                            name="MACD", line=dict(color="#60a5fa", width=1.2)),
-                            row=sub_row, col=1)
-                        fig.add_trace(go.Scatter(x=hd.index, y=hd["Signal"],
-                            name="Signal", line=dict(color="#f59e0b", width=1.2)),
-                            row=sub_row, col=1)
-                        fig.update_yaxes(title_text="MACD", row=sub_row, col=1,
-                                         title_font=dict(size=10), tickfont=dict(size=9))
-
-                    # ── Layout ────────────────────────────────
-                    fig.update_layout(
-                        height=600 + 120 * len(sub_charts),
-                        paper_bgcolor=bg, plot_bgcolor=bg,
-                        font=dict(color=fg, size=11),
-                        legend=dict(
-                            orientation="h", yanchor="bottom", y=1.01,
-                            xanchor="left", x=0,
-                            bgcolor="rgba(0,0,0,0)", font=dict(size=10)
-                        ),
-                        margin=dict(l=10, r=10, t=30, b=10),
-                        xaxis_rangeslider_visible=False,
-                        hovermode="x unified",
-                    )
-                    fig.update_xaxes(
-                        gridcolor=grid, showgrid=True,
-                        zeroline=False, showspikes=True,
-                        spikecolor="#666", spikethickness=1,
-                    )
-                    fig.update_yaxes(
-                        gridcolor=grid, showgrid=True,
-                        zeroline=False,
-                    )
-                    fig.update_yaxes(title_text="Price ($)", row=1, col=1,
-                                     title_font=dict(size=10), tickfont=dict(size=9))
-
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    # ── Period stats ──────────────────────────
-                    s1, s2, s3, s4 = st.columns(4)
-                    pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
-                    s1.metric("Period Return", _fp(pr),     delta=f"{pr:+.2%}")
-                    s2.metric("Period High",   f"${hd['High'].max():,.2f}")
-                    s3.metric("Period Low",    f"${hd['Low'].min():,.2f}")
-                    s4.metric("Avg Volume",    _fb(hd["Volume"].mean()).replace("$",""))
-                else:
-                    st.info("No price history available.")
-
-        except Exception as e:
-            st.error(f"Error rendering analysis: {e}")
+        _d  = st.session_state["analyze_data"]
+        _sel = [k for k, v in _d.get("metrics_sel", {}).items() if v]
+        render_stock_analysis(
+            info       = _d.get("info", {}),
+            hist_1y    = _d.get("hist", pd.DataFrame()),
+            fin_stmt   = _d.get("fin"),
+            bal_stmt   = _d.get("bal"),
+            cf_stmt    = _d.get("cf"),
+            raw        = _d.get("raw", {}),
+            sticker    = _d.get("ticker", ""),
+            selected   = _sel,
+            fetched_at = _d.get("fetched_at", ""),
+            range_days = st.session_state.get("slider_range_days", 30),
+            mfi_period = st.session_state.get("slider_mfi_period", 14),
+        )
