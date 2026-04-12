@@ -2389,8 +2389,10 @@ with tab_screener:
         st.session_state["_screener_display"]    = display
         st.session_state["_screener_sector_lbl"] = sector_label
         st.session_state["_screener_count"]      = len(screened)
-        # Clear selected ticker when a new scan runs
+        # Clear selected ticker and all inline caches when a new scan runs
         st.session_state.pop("_inline_ticker", None)
+        for _k in [k for k in st.session_state if k.startswith("_il_cache_")]:
+            del st.session_state[_k]
 
 
  else:
@@ -2443,42 +2445,104 @@ with tab_screener:
  if _inline_tk:
     st.divider()
     st.markdown(f"### 🔍 Quick Analysis — {_inline_tk}")
-    st.caption("Data fetched live from Yahoo Finance")
 
-    with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
-        try:
+    # ── Per-ticker cache — avoids re-fetching on every Streamlit rerender ────
+    # Keyed by ticker + fetch time bucket (15-min windows) so data stays fresh
+    # without hammering yfinance on sidebar changes, scrolling, etc.
+    import math as _math
+    _cache_bucket  = _math.floor(time.time() / 900)   # new bucket every 15 min
+    _il_cache_key  = f"_il_cache_{_inline_tk}_{_cache_bucket}"
+    _il_cached     = st.session_state.get(_il_cache_key)
+
+    if _il_cached:
+        # Serve from cache — no network calls
+        _il_info  = _il_cached["info"]
+        _il_hist  = _il_cached["hist"]
+        _il_fin   = _il_cached["fin"]
+        _il_bal   = _il_cached["bal"]
+        _il_cf    = _il_cached["cf"]
+        st.caption(f"Data fetched: {_il_cached['fetched_at']} · Cached for 15 min · "
+                   f"For full analysis open the Analyze a Stock tab")
+    else:
+        # Fresh fetch — isolate each request so one failure doesn't kill the rest
+        with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
             _il_stock = yf.Ticker(_inline_tk)
             _il_info  = {}
+            _il_hist  = pd.DataFrame()
+            _il_fin   = pd.DataFrame()
+            _il_bal   = pd.DataFrame()
+            _il_cf    = pd.DataFrame()
+
+            # ── 1. info — with retry + exponential backoff ────────────
             for _att in range(3):
                 try:
-                    _il_info = _il_stock.info or {}
-                    if len(_il_info) >= 5:
+                    _fetched = _il_stock.info or {}
+                    # Valid response has quoteType or symbol key
+                    # Rate-limited stubs have 1-2 keys with None values
+                    if _fetched.get("quoteType") or _fetched.get("symbol") or len(_fetched) >= 10:
+                        _il_info = _fetched
                         break
                     if _att < 2:
-                        time.sleep(3)
+                        time.sleep(2 ** _att + 0.5)   # 0.5s, 1.5s, 3.5s
                 except Exception:
                     if _att < 2:
-                        time.sleep(3)
-            _il_hist = pd.DataFrame()
+                        time.sleep(2 ** _att)
+
+            # ── 2. history — independent, doesn't need info ───────────
             try:
                 _il_hist = _il_stock.history(period="1y")
-                if _il_hist.empty:
+                if _il_hist.empty or len(_il_hist) < 30:
                     _il_hist = _il_stock.history(period="6mo")
             except Exception:
                 pass
-            _il_fin = _il_bal = _il_cf = pd.DataFrame()
-            try: _il_fin = _il_stock.financials
-            except Exception: pass
-            try: _il_bal = _il_stock.balance_sheet
-            except Exception: pass
-            try: _il_cf  = _il_stock.cashflow
-            except Exception: pass
-        except Exception as _e:
-            st.error(f"Could not fetch data for {_inline_tk}: {_e}")
-            _il_info = {}
 
-    if _il_info and len(_il_info) >= 5:
-        _il_price  = _il_info.get("currentPrice") or _il_info.get("regularMarketPrice")
+            # ── 3. financials — each isolated, failures don't cascade ──
+            try:
+                _il_fin = _il_stock.financials
+            except Exception:
+                pass
+            try:
+                _il_bal = _il_stock.balance_sheet
+            except Exception:
+                pass
+            try:
+                _il_cf = _il_stock.cashflow
+            except Exception:
+                pass
+
+        # If info failed but history loaded, synthesise minimal info from history
+        if not _il_info and not _il_hist.empty:
+            _il_info = {
+                "symbol":       _inline_tk,
+                "currentPrice": round(float(_il_hist["Close"].iloc[-1]), 2),
+            }
+
+        # Cache the result (even partial) to avoid re-fetching on rerender
+        _il_fetched_at = datetime.now().strftime("%b %d %I:%M %p")
+        if _il_info or not _il_hist.empty:
+            # Evict old cache entries for this ticker (different time buckets)
+            for _k in list(st.session_state.keys()):
+                if _k.startswith(f"_il_cache_{_inline_tk}_") and _k != _il_cache_key:
+                    del st.session_state[_k]
+            # Cap total inline caches to 10 tickers to bound memory use
+            _all_il = [k for k in st.session_state if k.startswith("_il_cache_")]
+            while len(_all_il) > 10:
+                del st.session_state[_all_il.pop(0)]
+            # Store — keep only hist/fin as compact dicts to save memory
+            st.session_state[_il_cache_key] = {
+                "info":       _il_info,
+                "hist":       _il_hist,
+                "fin":        _il_fin,
+                "bal":        _il_bal,
+                "cf":         _il_cf,
+                "fetched_at": _il_fetched_at,
+            }
+        st.caption(f"Data fetched: {_il_fetched_at} · Cached for 15 min · "
+                   f"For full analysis open the Analyze a Stock tab")
+
+    if _il_info or not _il_hist.empty:
+        _il_price  = (_il_info.get("currentPrice") or _il_info.get("regularMarketPrice")
+                      or (round(float(_il_hist["Close"].iloc[-1]), 2) if not _il_hist.empty else None))
         _il_mktcap = _il_info.get("marketCap")
         _il_mfi_p  = st.session_state.get("slider_mfi_period", 14)
 
@@ -2558,7 +2622,10 @@ with tab_screener:
             f"For full analysis open the Analyze a Stock tab"
         )
     else:
-        st.warning(f"Could not load data for **{_inline_tk}**. yfinance may be rate-limited — try again in 30 seconds.")
+        st.warning(
+            f"Could not load data for **{_inline_tk}**. "
+            "yfinance may be rate-limited — wait 30 seconds and click the ticker again."
+        )
 
 
 # ───────────────────────────────────────────────────────────────
