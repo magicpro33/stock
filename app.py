@@ -2385,81 +2385,60 @@ with tab_screener:
                     hidden_cols.append(_sc)
         display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
-        styled = display.style.map(color_score, subset=["Score"])
-
-        st.subheader(f"Top {len(screened)} Stocks — {sector_label}")
-
-        # ── Clickable ticker grid — inline analysis below the table ──
-        # No st.rerun() — Streamlit rerenders naturally on button click.
-        # The selected ticker is stored in session state and the inline
-        # panel below reads it on the same render pass.
-        st.caption("Click any ticker to analyze it below:")
-        _btn_cols = st.columns(min(10, len(screened)))
-        _inline_clicked = None
-        for _bi, (_idx, _row) in enumerate(screened.iterrows()):
-            _tk = _row["Ticker"]
-            with _btn_cols[_bi % len(_btn_cols)]:
-                _is_selected = st.session_state.get("_inline_ticker") == _tk
-                if st.button(
-                    _tk,
-                    key=f"ticker_btn_{_tk}_{_bi}",
-                    use_container_width=True,
-                    type="primary" if _is_selected else "secondary",
-                    help=f"Analyze {_tk} — {_row.get('Sector','')}"
-                ):
-                    st.session_state["_inline_ticker"] = _tk
-                    _inline_clicked = _tk
-
-        st.dataframe(styled, use_container_width=True, height=600)
-
-        # Download button
-        st.divider()
-        excel_bytes = build_excel(display)
-        st.download_button(
-            label="⬇️ Download Excel",
-            data=excel_bytes,
-            file_name=f"stock_screener_{sector.replace(' ', '_')}_{datetime.today().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        # Save to session state — the always-visible panel below renders from here
+        st.session_state["_screener_display"]    = display
+        st.session_state["_screener_sector_lbl"] = sector_label
+        st.session_state["_screener_count"]      = len(screened)
+        # Clear selected ticker when a new scan runs
+        st.session_state.pop("_inline_ticker", None)
 
 
  else:
-    st.info("👈 Configure your filters in the sidebar, then click **Run Screener** to start.")
-    st.markdown("""
-    ### How to use
-    1. **Pick an exchange** — S&P 500 (~500 stocks, fast), NYSE or NASDAQ (2,000–3,500 stocks, 30–70 min)
-    2. **Pick a sector** — scan one GICS sector or all sectors
-    3. **Toggle metrics on/off** — disabled metrics are excluded from scoring AND hidden from results
-    4. **Set your filters** — price cap, min score, MA50 toggle
-    5. Hit **🚀 Run Screener**
+    if "_screener_display" not in st.session_state:
+        st.info("👈 Configure your filters in the sidebar, then click **Run Screener** to start.")
 
-    > ⚠️ **ETFs, index funds, trusts, and other non-company securities are automatically excluded** from all results.
+ # ── Always-visible results + inline analysis ─────────────────────────────────
+ # Renders the saved screener table and inline analysis panel on EVERY render,
+ # including when ticker buttons are clicked (run_btn=False on those renders).
+ _saved_display = st.session_state.get("_screener_display")
+ if _saved_display is not None and not _saved_display.empty:
+    # Re-render the table from saved state
+    _saved_label = st.session_state.get("_screener_sector_lbl", "")
+    _saved_count = st.session_state.get("_screener_count", len(_saved_display))
+    st.subheader(f"Top {_saved_count} Stocks — {_saved_label}")
 
-    ### Metric weights (when enabled)
-    | Metric | Default Weight | Ideal |
-    |---|---|---|
-    | OE Yield | ×3 | > 5% |
-    | ROIC | ×2 | > 15% |
-    | ROIC Trend | ×2 | Positive |
-    | Revenue Growth | ×1 | > 5% |
-    | Earnings Growth | ×1 | > 5% |
-    | Piotroski Score | ×1 | 7–9 |
-    | OBV (On-Balance Volume) | ×1 | 1.0 = rising accumulation |
-    | MFI (Money Flow Index) | ×1 | > 0.5 = buying pressure |
-    | PCV (Price-Confirmed Volume) | ×1 | > 0.5 = up-day volume dominant |
+    # Ticker button grid
+    st.caption("Click any ticker to analyze it below:")
+    _tk_list = list(_saved_display["Ticker"]) if "Ticker" in _saved_display.columns else []
+    _btn_cols = st.columns(min(10, len(_tk_list))) if _tk_list else []
+    for _bi, _tk in enumerate(_tk_list):
+        with _btn_cols[_bi % len(_btn_cols)]:
+            _is_sel = st.session_state.get("_inline_ticker") == _tk
+            if st.button(_tk, key=f"tk2_{_tk}_{_bi}",
+                         use_container_width=True,
+                         type="primary" if _is_sel else "secondary"):
+                st.session_state["_inline_ticker"] = _tk
 
-    ### Active filters
-    - **Exchange** — defines the universe of tickers to scan
-    - **Sector** — narrows results to one GICS sector (applied post-scan)
-    - **Price cap** — stocks above your max price are excluded
-    - **MA50 toggle** — when on, only stocks trading *below* their 50-day MA are shown
-    - **Min score** — removes low-conviction picks from the table
-    """)
+    # Table
+    try:
+        _styled2 = _saved_display.style.map(color_score, subset=["Score"])
+        st.dataframe(_styled2, use_container_width=True, height=600)
+    except Exception:
+        st.dataframe(_saved_display, use_container_width=True, height=600)
 
- # ── Inline stock analysis panel — always rendered when a ticker is selected ──
- # Lives OUTSIDE if run_btn: so it persists across rerenders triggered by
- # ticker button clicks (which don't re-fire run_btn).
+    # Download button
+    st.divider()
+    _excel2 = build_excel(_saved_display)
+    st.download_button(
+        label="⬇️ Download Excel",
+        data=_excel2,
+        file_name=f"stock_screener_{datetime.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_btn2",
+    )
+
+ # ── Inline stock analysis panel ──────────────────────────────────────────────
  _inline_tk = st.session_state.get("_inline_ticker")
  if _inline_tk:
     st.divider()
