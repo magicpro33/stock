@@ -2390,10 +2390,12 @@ with tab_screener:
         st.subheader(f"Top {len(screened)} Stocks — {sector_label}")
 
         # ── Clickable ticker grid — inline analysis below the table ──
-        # Clicking a ticker fetches and renders the full analysis
-        # directly below the screener results without any tab switching.
+        # No st.rerun() — Streamlit rerenders naturally on button click.
+        # The selected ticker is stored in session state and the inline
+        # panel below reads it on the same render pass.
         st.caption("Click any ticker to analyze it below:")
         _btn_cols = st.columns(min(10, len(screened)))
+        _inline_clicked = None
         for _bi, (_idx, _row) in enumerate(screened.iterrows()):
             _tk = _row["Ticker"]
             with _btn_cols[_bi % len(_btn_cols)]:
@@ -2406,7 +2408,7 @@ with tab_screener:
                     help=f"Analyze {_tk} — {_row.get('Sector','')}"
                 ):
                     st.session_state["_inline_ticker"] = _tk
-                    st.rerun()
+                    _inline_clicked = _tk
 
         st.dataframe(styled, use_container_width=True, height=600)
 
@@ -2421,146 +2423,6 @@ with tab_screener:
             use_container_width=True,
         )
 
-        # ── Inline stock analysis panel ───────────────────────────
-        _inline_tk = st.session_state.get("_inline_ticker")
-        if _inline_tk:
-            st.divider()
-            st.markdown(f"### 🔍 Quick Analysis — {_inline_tk}")
-            st.caption("Data fetched live from Yahoo Finance")
-
-            # Fetch data for selected ticker
-            with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
-                try:
-                    _il_stock = yf.Ticker(_inline_tk)
-                    _il_info  = {}
-                    for _att in range(3):
-                        try:
-                            _il_info = _il_stock.info or {}
-                            if len(_il_info) >= 5:
-                                break
-                            if _att < 2:
-                                time.sleep(3)
-                        except Exception:
-                            if _att < 2:
-                                time.sleep(3)
-
-                    _il_hist = pd.DataFrame()
-                    try:
-                        _il_hist = _il_stock.history(period="1y")
-                        if _il_hist.empty:
-                            _il_hist = _il_stock.history(period="6mo")
-                    except Exception:
-                        pass
-
-                    _il_fin, _il_bal, _il_cf = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-                    try: _il_fin = _il_stock.financials
-                    except Exception: pass
-                    try: _il_bal = _il_stock.balance_sheet
-                    except Exception: pass
-                    try: _il_cf  = _il_stock.cashflow
-                    except Exception: pass
-
-                except Exception as _e:
-                    st.error(f"Could not fetch data for {_inline_tk}: {_e}")
-                    _il_info = {}
-
-            if _il_info and len(_il_info) >= 5:
-                _il_price  = _il_info.get("currentPrice") or _il_info.get("regularMarketPrice")
-                _il_name   = _il_info.get("longName") or _il_info.get("shortName") or _inline_tk
-                _il_mktcap = _il_info.get("marketCap")
-                _il_mfi_p  = st.session_state.get("slider_mfi_period", 14)
-
-                # ── Header row ────────────────────────────────────
-                _il_c1, _il_c2, _il_c3, _il_c4, _il_c5 = st.columns(5)
-                _il_c1.metric("Price",    f"${_il_price:,.2f}" if _il_price else "N/A")
-                _il_c2.metric("Sector",   _il_info.get("sector", "N/A"))
-                _il_c3.metric("Industry", _il_info.get("industry", "N/A"))
-                _il_c4.metric("Mkt Cap",  f"${_il_mktcap/1e9:.1f}B" if _il_mktcap else "N/A")
-                _il_pe = _il_info.get("trailingPE")
-                _il_c5.metric("P/E",      f"{_il_pe:.1f}" if _il_pe else "N/A")
-
-                # ── Compute all metrics live ───────────────────────
-                _il_vols  = get_volume_signals(_il_hist, _il_mfi_p)
-                _il_tech  = calculate_technical_signals(_il_hist)
-                _il_short = calculate_short_squeeze(_il_info)
-                _il_range = calculate_price_range(_il_hist, range_days)
-                _il_ma50  = (round(_il_hist["Close"].rolling(50).mean().iloc[-1], 2)
-                             if len(_il_hist) >= 50 else None)
-                _il_oe, _il_oey = get_owner_earnings(_il_cf, _il_fin, _il_info)
-
-                # ── Metric cards ──────────────────────────────────
-                st.markdown("**Metric scores:**")
-                _mc1, _mc2, _mc3, _mc4, _mc5, _mc6 = st.columns(6)
-                def _ils(v, good, ok):
-                    if v is None: return "⚪"
-                    return "🟢" if v >= good else ("🟡" if v >= ok else "🔴")
-
-                _mc1.metric("OBV",    f"{_il_vols['OBV']:.2f}",   help="1.0 = rising accumulation")
-                _mc2.metric("RSI",    f"{_il_tech['RSI']:.2f}",   help="1.0 = 55-70 sweet spot")
-                _mc3.metric("MACD",   f"{_il_tech['MACD']:.2f}",  help="1.0 = positive + accelerating")
-                _mc4.metric("Golden", f"{_il_tech['GoldenCross']:.2f}", help="1.0 = 50MA above 200MA")
-                _mc5.metric("MFI",    f"{_il_vols['MFI']:.2f}",   help="1.0 = strong inflow")
-                _mc6.metric("PCV",    f"{_il_vols['PCV']:.2f}",   help="1.0 = all up-day volume")
-
-                _mc7, _mc8, _mc9, _mc10, _mc11, _mc12 = st.columns(6)
-                _mc7.metric("Short Float",
-                    f"{_il_short['ShortPctFloatRaw']:.1f}%" if _il_short['ShortPctFloatRaw'] else "N/A",
-                    help="% of float sold short")
-                _mc8.metric("Days Cover",
-                    f"{_il_short['DaysToCover']:.1f}" if _il_short['DaysToCover'] else "N/A",
-                    help="Days to cover all short positions")
-                _sc = _il_short.get("ShortChange")
-                _mc9.metric("Short Chg",
-                    (f"▲ {_sc:.1%}" if _sc and _sc > 0 else f"▼ {abs(_sc):.1%}" if _sc else "N/A"),
-                    help="Month-over-month short interest change")
-                _mc10.metric("MA50",
-                    f"${_il_ma50:,.2f}" if _il_ma50 else "N/A",
-                    delta=f"{((_il_price-_il_ma50)/_il_ma50*100):+.1f}%" if (_il_price and _il_ma50) else None,
-                    help="50-day moving average")
-                _mc11.metric("Range Pos",
-                    f"{_il_range['RangePos']:.0%}" if _il_range['RangePos'] is not None else "N/A",
-                    help="Price position in 30-day range (0% = at low, 100% = at high)")
-                _mc12.metric("OE Yield",
-                    f"{_il_oey:.1%}" if _il_oey else "N/A",
-                    help="Owner Earnings Yield — Buffett's true cash profitability measure")
-
-                # ── Short-term price chart ─────────────────────────
-                if not _il_hist.empty:
-                    import plotly.graph_objects as _pgo
-                    _chart_hist = _il_hist.tail(60)
-                    _il_fig = _pgo.Figure()
-                    _il_fig.add_trace(_pgo.Candlestick(
-                        x=_chart_hist.index,
-                        open=_chart_hist["Open"],
-                        high=_chart_hist["High"],
-                        low=_chart_hist["Low"],
-                        close=_chart_hist["Close"],
-                        name=_inline_tk,
-                        increasing_line_color="#639922",
-                        decreasing_line_color="#A32D2D",
-                    ))
-                    if _il_ma50:
-                        _ma50_series = _il_hist["Close"].rolling(50).mean().tail(60)
-                        _il_fig.add_trace(_pgo.Scatter(
-                            x=_ma50_series.index, y=_ma50_series,
-                            mode="lines", name="MA50",
-                            line=dict(color="#378ADD", width=1.5, dash="dot")
-                        ))
-                    _il_fig.update_layout(
-                        height=280, margin=dict(l=8, r=8, t=8, b=8),
-                        xaxis_rangeslider_visible=False,
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        font=dict(size=11),
-                        showlegend=False,
-                    )
-                    st.plotly_chart(_il_fig, use_container_width=True)
-
-                st.caption(f"Data fetched: {datetime.now().strftime('%b %d, %Y %I:%M %p')} · "
-                           f"Click another ticker above to update · "
-                           f"For full analysis open the Analyze a Stock tab")
-            else:
-                st.warning(f"Could not load data for **{_inline_tk}**. yfinance may be rate-limited — try again in 30 seconds.")
 
  else:
     st.info("👈 Configure your filters in the sidebar, then click **Run Screener** to start.")
@@ -2594,6 +2456,130 @@ with tab_screener:
     - **MA50 toggle** — when on, only stocks trading *below* their 50-day MA are shown
     - **Min score** — removes low-conviction picks from the table
     """)
+
+ # ── Inline stock analysis panel — always rendered when a ticker is selected ──
+ # Lives OUTSIDE if run_btn: so it persists across rerenders triggered by
+ # ticker button clicks (which don't re-fire run_btn).
+ _inline_tk = st.session_state.get("_inline_ticker")
+ if _inline_tk:
+    st.divider()
+    st.markdown(f"### 🔍 Quick Analysis — {_inline_tk}")
+    st.caption("Data fetched live from Yahoo Finance")
+
+    with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
+        try:
+            _il_stock = yf.Ticker(_inline_tk)
+            _il_info  = {}
+            for _att in range(3):
+                try:
+                    _il_info = _il_stock.info or {}
+                    if len(_il_info) >= 5:
+                        break
+                    if _att < 2:
+                        time.sleep(3)
+                except Exception:
+                    if _att < 2:
+                        time.sleep(3)
+            _il_hist = pd.DataFrame()
+            try:
+                _il_hist = _il_stock.history(period="1y")
+                if _il_hist.empty:
+                    _il_hist = _il_stock.history(period="6mo")
+            except Exception:
+                pass
+            _il_fin = _il_bal = _il_cf = pd.DataFrame()
+            try: _il_fin = _il_stock.financials
+            except Exception: pass
+            try: _il_bal = _il_stock.balance_sheet
+            except Exception: pass
+            try: _il_cf  = _il_stock.cashflow
+            except Exception: pass
+        except Exception as _e:
+            st.error(f"Could not fetch data for {_inline_tk}: {_e}")
+            _il_info = {}
+
+    if _il_info and len(_il_info) >= 5:
+        _il_price  = _il_info.get("currentPrice") or _il_info.get("regularMarketPrice")
+        _il_mktcap = _il_info.get("marketCap")
+        _il_mfi_p  = st.session_state.get("slider_mfi_period", 14)
+
+        _il_c1, _il_c2, _il_c3, _il_c4, _il_c5 = st.columns(5)
+        _il_c1.metric("Price",    f"${_il_price:,.2f}" if _il_price else "N/A")
+        _il_c2.metric("Sector",   _il_info.get("sector", "N/A"))
+        _il_c3.metric("Industry", _il_info.get("industry", "N/A"))
+        _il_c4.metric("Mkt Cap",  f"${_il_mktcap/1e9:.1f}B" if _il_mktcap else "N/A")
+        _il_pe = _il_info.get("trailingPE")
+        _il_c5.metric("P/E",      f"{_il_pe:.1f}" if _il_pe else "N/A")
+
+        _il_vols  = get_volume_signals(_il_hist, _il_mfi_p)
+        _il_tech  = calculate_technical_signals(_il_hist)
+        _il_short = calculate_short_squeeze(_il_info)
+        _il_rng   = calculate_price_range(_il_hist, 30)
+        _il_ma50  = (round(_il_hist["Close"].rolling(50).mean().iloc[-1], 2)
+                     if len(_il_hist) >= 50 else None)
+        _il_oe, _il_oey = get_owner_earnings(_il_cf, _il_fin, _il_info)
+
+        st.markdown("**Metric scores:**")
+        _mc1, _mc2, _mc3, _mc4, _mc5, _mc6 = st.columns(6)
+        _mc1.metric("OBV",    f"{_il_vols['OBV']:.2f}",  help="1.0 = rising accumulation")
+        _mc2.metric("RSI",    f"{_il_tech['RSI']:.2f}",  help="1.0 = 55–70 sweet spot")
+        _mc3.metric("MACD",   f"{_il_tech['MACD']:.2f}", help="1.0 = positive + accelerating")
+        _mc4.metric("Golden", f"{_il_tech['GoldenCross']:.2f}", help="1.0 = 50MA above 200MA")
+        _mc5.metric("MFI",    f"{_il_vols['MFI']:.2f}",  help="1.0 = strong inflow")
+        _mc6.metric("PCV",    f"{_il_vols['PCV']:.2f}",  help="1.0 = up-day volume dominant")
+
+        _mc7, _mc8, _mc9, _mc10, _mc11, _mc12 = st.columns(6)
+        _mc7.metric("Short Float",
+            f"{_il_short['ShortPctFloatRaw']:.1f}%" if _il_short.get('ShortPctFloatRaw') else "N/A",
+            help="% of float sold short")
+        _mc8.metric("Days Cover",
+            f"{_il_short['DaysToCover']:.1f}" if _il_short.get('DaysToCover') else "N/A",
+            help="Days to cover shorts")
+        _sc = _il_short.get("ShortChange")
+        _mc9.metric("Short Chg",
+            (f"▲ {_sc:.1%}" if _sc and _sc > 0 else f"▼ {abs(_sc):.1%}" if _sc else "N/A"),
+            help="Month-over-month short interest change")
+        _mc10.metric("MA50",
+            f"${_il_ma50:,.2f}" if _il_ma50 else "N/A",
+            delta=f"{((_il_price-_il_ma50)/_il_ma50*100):+.1f}%" if (_il_price and _il_ma50) else None,
+            help="50-day moving average")
+        _mc11.metric("Range Pos",
+            f"{_il_rng['RangePos']:.0%}" if _il_rng.get('RangePos') is not None else "N/A",
+            help="0% = at range low · 100% = at range high")
+        _mc12.metric("OE Yield",
+            f"{_il_oey:.1%}" if _il_oey else "N/A",
+            help="Owner Earnings Yield")
+
+        if not _il_hist.empty:
+            import plotly.graph_objects as _pgo
+            _ch = _il_hist.tail(60)
+            _il_fig = _pgo.Figure()
+            _il_fig.add_trace(_pgo.Candlestick(
+                x=_ch.index, open=_ch["Open"], high=_ch["High"],
+                low=_ch["Low"], close=_ch["Close"], name=_inline_tk,
+                increasing_line_color="#639922", decreasing_line_color="#A32D2D",
+            ))
+            if _il_ma50:
+                _ma50s = _il_hist["Close"].rolling(50).mean().tail(60)
+                _il_fig.add_trace(_pgo.Scatter(
+                    x=_ma50s.index, y=_ma50s, mode="lines", name="MA50",
+                    line=dict(color="#378ADD", width=1.5, dash="dot")
+                ))
+            _il_fig.update_layout(
+                height=300, margin=dict(l=8, r=8, t=8, b=8),
+                xaxis_rangeslider_visible=False,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(size=11), showlegend=False,
+            )
+            st.plotly_chart(_il_fig, use_container_width=True)
+
+        st.caption(
+            f"Fetched: {datetime.now().strftime('%b %d %I:%M %p')} · "
+            f"Click another ticker above to update · "
+            f"For full analysis open the Analyze a Stock tab"
+        )
+    else:
+        st.warning(f"Could not load data for **{_inline_tk}**. yfinance may be rate-limited — try again in 30 seconds.")
 
 
 # ───────────────────────────────────────────────────────────────
