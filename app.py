@@ -1835,6 +1835,14 @@ def color_score(val):
 
 with tab_screener:
 
+ # ── Analyze redirect banner ──────────────────────────────────
+ if st.session_state.pop("_switch_to_analyze", False):
+    _switched_ticker = st.session_state.get("analyze_ticker_input", "")
+    st.success(
+        f"⚡ **{_switched_ticker}** queued for analysis — "
+        f"click the **🔍 Analyze a Stock** tab above to see the results."
+    )
+
  # ── Nightly data status banner (always visible) ───────────────
  _ck = _get_cache_key()
  _pc_results, _pc_meta = load_precomputed_data(cache_key=_ck)
@@ -2388,6 +2396,27 @@ with tab_screener:
         styled = display.style.map(color_score, subset=["Score"])
 
         st.subheader(f"Top {len(screened)} Stocks — {sector_label}")
+
+        # ── Clickable ticker grid — one button per result ─────────
+        # Clicking a ticker sets the pending ticker in session state,
+        # switches to the Analyze tab, and auto-runs the analysis.
+        st.caption("Click any ticker to open it in the Analyzer:")
+        _btn_cols = st.columns(min(10, len(screened)))
+        for _bi, (_idx, _row) in enumerate(screened.iterrows()):
+            _tk = _row["Ticker"]
+            with _btn_cols[_bi % len(_btn_cols)]:
+                if st.button(
+                    _tk,
+                    key=f"ticker_btn_{_tk}_{_bi}",
+                    use_container_width=True,
+                    help=f"Analyze {_tk} — {_row.get('Sector','')}"
+                ):
+                    st.session_state["_pending_ticker"]      = _tk
+                    st.session_state["_rerun_ticker"]        = _tk
+                    st.session_state["analyze_ticker_input"] = _tk
+                    st.session_state["_switch_to_analyze"]   = True
+                    st.rerun()
+
         st.dataframe(styled, use_container_width=True, height=600)
 
         # Download button
