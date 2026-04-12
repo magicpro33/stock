@@ -450,6 +450,52 @@ with st.sidebar:
         st.session_state["wt_GoldenCross"]   = 1.0   # longer-term trend support
         st.rerun()
 
+    # ── Low Price Position preset button ─────────────────────────
+    if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
+                 help="Finds stocks trading at or near the bottom 10% of their recent price range. "
+                      "Price near the range low with rising OBV = coiling for a breakout. "
+                      "The lower the position in the range, the more upside before hitting resistance."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 filter off — stocks near range low may be below MA50 and still valid setups
+        st.session_state["tog_ma50"]           = "off"
+        # Range filter ON — tight range confirms consolidation, not a freefall
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30    # 30-day window — enough to define current range
+        st.session_state["slider_range_pct"]   = 15.0  # max 15% width — coiling, not crashing
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        # ── Turn off all metrics first ────────────────────────────
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # RangePosScore ×5 — CORE: score = 1 - RangePos, so 1.0 = price at range LOW
+        # This is the primary sort — stocks at the very bottom of their range score highest
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+
+        # OBV ×3 — rising OBV near the range low = accumulation, not distribution
+        # Distinguishes a coiling setup from a stock that's low for a reason
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 3.0
+
+        # MFISweetSpot ×2 — buying pressure present even while price sits low
+        # Confirms money is flowing in quietly before the breakout
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 2.0
+
+        # NoBearDiv ×2 — price and MFI not diverging = the low is not a warning sign
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # GoldenCross ×1 — long-term uptrend intact even if short-term price pulled back
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
+
+        st.rerun()
+
     # ── Insider Buying preset button ──────────────────────────────
     if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
                  help="Searches for stocks showing signs of institutional/insider accumulation: "
