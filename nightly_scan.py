@@ -25,7 +25,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yfinance as yf
@@ -798,11 +798,38 @@ def main():
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
 
+    date_tag = end_utc.strftime("%Y-%m-%d") if 'end_utc' in dir() else start_utc.strftime("%Y-%m-%d")
+
+    # ── Primary files (always overwritten — what the app reads) ──────
     # Compressed JSON — readable by the Streamlit app with json + gzip
     with gzip.open(DATA_FILE, "wt", encoding="utf-8") as f:
         json.dump(all_results, f, default=str)
 
     log.info(f"  Saved: {DATA_FILE}  ({os.path.getsize(DATA_FILE) / 1024:.0f} KB compressed)")
+
+    # ── Dated archive copy (for rollback if a bad scan runs) ─────────
+    archive_data = os.path.join(OUTPUT_DIR, f"stock_data_{date_tag}.json.gz")
+    archive_meta = os.path.join(OUTPUT_DIR, f"scan_meta_{date_tag}.json")
+    import shutil
+    shutil.copy2(DATA_FILE, archive_data)
+    log.info(f"  Archive: {archive_data}")
+
+    # ── Purge archive files older than 3 days ────────────────────────
+    import glob
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)
+    purged = 0
+    for pattern in ("stock_data_*.json.gz", "scan_meta_*.json"):
+        for fpath in glob.glob(os.path.join(OUTPUT_DIR, pattern)):
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+                if mtime < cutoff:
+                    os.remove(fpath)
+                    log.info(f"  Purged old archive: {os.path.basename(fpath)}")
+                    purged += 1
+            except Exception as _e:
+                log.warning(f"  Could not purge {fpath}: {_e}")
+    if purged == 0:
+        log.info("  No old archives to purge.")
 
     # Metadata file — app reads this to show "last updated" banner
     end_utc   = datetime.now(timezone.utc)
@@ -821,6 +848,8 @@ def main():
         json.dump(meta, f, indent=2)
 
     log.info(f"  Saved: {META_FILE}")
+    shutil.copy2(META_FILE, archive_meta)
+    log.info(f"  Archive: {archive_meta}")
     log.info("=" * 60)
     log.info(f"Done.  {len(all_results)} stocks · {elapsed} minutes")
     log.info("=" * 60)
