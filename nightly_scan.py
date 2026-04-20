@@ -536,6 +536,73 @@ def calculate_roic_trend(fin, bal):
 
 # ── Short interest ───────────────────────────────────────────────────────────
 
+def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
+    """Compute composite dividend quality score — same logic as app.py."""
+    default = {
+        "DividendYieldPct":  None,
+        "DividendRate":      None,
+        "PayoutRatio":       None,
+        "DividendFrequency": "None",
+        "DividendScore":     0.0,
+    }
+    try:
+        yield_raw = (info.get("trailingAnnualDividendYield") or info.get("dividendYield"))
+        div_rate  = (info.get("trailingAnnualDividendRate") or info.get("dividendRate"))
+        payout    = info.get("payoutRatio")
+        if not yield_raw and not div_rate:
+            return default
+        yield_pct = round(yield_raw * 100, 2) if yield_raw else None
+        y = yield_pct or 0.0
+        if y >= 8:    yield_score = 0.60
+        elif y >= 6:  yield_score = 0.55
+        elif y >= 4:  yield_score = 0.45
+        elif y >= 3:  yield_score = 0.35
+        elif y >= 2:  yield_score = 0.20
+        elif y >= 1:  yield_score = 0.10
+        else:         yield_score = 0.0
+        if payout is None:
+            payout_score = 0.10
+        else:
+            p = payout * 100
+            if p <= 0:      payout_score = 0.0
+            elif p <= 40:   payout_score = 0.20
+            elif p <= 60:   payout_score = 0.18
+            elif p <= 80:   payout_score = 0.12
+            elif p <= 100:  payout_score = 0.05
+            else:           payout_score = 0.0
+        freq_label = "None"
+        freq_score = 0.0
+        if dividends_history is not None and not dividends_history.empty:
+            try:
+                one_yr_ago = pd.Timestamp.now(tz="UTC") - pd.DateOffset(years=1)
+                recent = dividends_history[dividends_history.index >= one_yr_ago]
+                n = len(recent)
+                if n >= 10:
+                    freq_label = "Monthly";     freq_score = 0.20
+                elif n >= 3:
+                    freq_label = "Quarterly";   freq_score = 0.15
+                elif n == 2:
+                    freq_label = "Semi-Annual"; freq_score = 0.10
+                elif n == 1:
+                    freq_label = "Annual";      freq_score = 0.05
+                else:
+                    freq_label = "Irregular";   freq_score = 0.03
+            except Exception:
+                freq_label = "Unknown"; freq_score = 0.05
+        elif info.get("dividendRate") and yield_raw:
+            freq_label = "Quarterly (est)"; freq_score = 0.12
+        composite = round(min(yield_score + payout_score + freq_score, 1.0), 4)
+        return {
+            "DividendYieldPct":  yield_pct,
+            "DividendRate":      round(div_rate, 4) if div_rate else None,
+            "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
+            "DividendFrequency": freq_label,
+            "DividendScore":     composite,
+        }
+    except Exception:
+        return default
+
+
 def calculate_short_squeeze(info: dict) -> dict:
     """Compute short interest metrics from yfinance info dict. No extra API calls."""
     default = {
@@ -619,6 +686,10 @@ def process_ticker(args):
             except Exception:
                 fin = pd.DataFrame()
             try:
+                div_hist = stock.dividends
+            except Exception:
+                div_hist = pd.Series(dtype=float)
+            try:
                 bal = stock.balance_sheet
             except Exception:
                 bal = pd.DataFrame()
@@ -631,6 +702,7 @@ def process_ticker(args):
             tech_signals = calculate_technical_signals(hist)
             range_data   = calculate_price_range(hist, range_days)
             short_data   = calculate_short_squeeze(info)
+            div_data     = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                             if len(hist) >= 50 else None)
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -678,6 +750,11 @@ def process_ticker(args):
                 "DaysToCover":    short_data["DaysToCover"],
                 "ShortChange":    short_data["ShortChange"],
                 "ShortSqueeze":   short_data["ShortSqueeze"],
+                "DividendYieldPct":    div_data["DividendYieldPct"],
+                "DividendRate":        div_data["DividendRate"],
+                "DividendPayoutRatio": div_data["PayoutRatio"],
+                "DividendFrequency":   div_data["DividendFrequency"],
+                "DividendScore":       div_data["DividendScore"],
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
