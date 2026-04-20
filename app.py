@@ -178,6 +178,17 @@ METRICS = {
                    "0.0 = short float <5% (little short interest — squeeze unlikely). "
                    "Short interest data from Yahoo Finance / FINRA (updated twice monthly).",
     },
+    "DividendScore": {
+        "label":   "Dividend Score",
+        "weight":  4,
+        "desc":    "Composite dividend quality score combining yield, payout sustainability, and payment frequency. "
+                   "1.0 = yield ≥6% + payout ratio <60% + monthly payments (highest income + safest + most frequent). "
+                   "0.8 = yield 4–6% + quarterly payments + sustainable payout. "
+                   "0.5 = yield 2–4% + annual or semi-annual payments. "
+                   "0.2 = yield <2% (token dividend). "
+                   "0.0 = no dividend. "
+                   "Payout ratio >100% penalised — company paying more than it earns is unsustainable.",
+    },
 }
 
 ALL_SECTORS = [
@@ -340,7 +351,7 @@ for _k, _cfg in METRICS.items():
 # RangePosScore off by default — only meaningful when range filter is on
 _defaults["tog_RangePosScore"] = False
 # New technical metrics — off by default so existing users aren't disrupted
-for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze"]:
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore"]:
     _defaults[f"tog_{_k}"] = False
     _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
 
@@ -450,7 +461,42 @@ with st.sidebar:
         st.session_state["wt_GoldenCross"]   = 1.0   # longer-term trend support
         st.rerun()
 
-    # ── Low Price Position preset button ─────────────────────────
+    # ── High Dividend preset button ──────────────────────────────
+    if st.button("💰 High Dividend", use_container_width=True, key="preset_high_dividend",
+                 help="Finds stocks with the highest sustainable dividend yield. "
+                      "Scores on yield, payout safety, and payment frequency. "
+                      "Monthly payers with yields above 4% and sustainable payout ratios score highest."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"    # dividend stocks can be anywhere vs MA50
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # DividendScore ×5 — primary signal: composite yield + safety + frequency
+        st.session_state["tog_DividendScore"] = True
+        st.session_state["wt_DividendScore"]  = 5.0
+
+        # OE_Yield ×2 — owner earnings yield: ensures company actually generates
+        # cash to sustain the dividend, not just paying from debt
+        st.session_state["tog_OE_Yield"] = True
+        st.session_state["wt_OE_Yield"]  = 2.0
+
+        # Piotroski ×1 — financial health check: dividends from weak companies get cut
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 1.0
+
+        # ROIC ×1 — ensures company has durable returns to keep paying
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 1.0
+
+        st.rerun()
+
+    # ── Low Price Position preset button ──────────────────────────
     if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
                  help="Finds stocks trading at or near the bottom 10% of their recent price range. "
                       "Price near the range low with rising OBV = coiling for a breakout. "
@@ -732,6 +778,22 @@ with st.sidebar:
     # ── Short interest metrics ────────────────────────────────
     st.markdown("**Short Interest**")
     for key in ["ShortSqueeze"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Dividend metric ───────────────────────────────────────
+    st.markdown("**Dividend Income**")
+    for key in ["DividendScore"]:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -1363,6 +1425,110 @@ def calculate_roic_trend(fin, bal):
         return None
 
 
+def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
+    """
+    Compute a composite dividend quality score from yfinance info + optional history.
+
+    Components:
+        Yield score   — rewards higher trailing yield (capped at 1.0 for extreme yields)
+        Payout safety — penalises unsustainable payout ratios (>100% = paying more than earned)
+        Frequency     — rewards more frequent payments (monthly > quarterly > annual)
+
+    Returns dict with:
+        DividendYieldPct  : trailing annual yield as % (e.g. 4.5 means 4.5%)
+        DividendRate      : annual $ per share
+        PayoutRatio       : % of earnings paid as dividend (None if not available)
+        DividendFrequency : "Monthly" | "Quarterly" | "Semi-Annual" | "Annual" | "None"
+        DividendScore     : composite score 0.0–1.0
+    """
+    default = {
+        "DividendYieldPct":  None,
+        "DividendRate":      None,
+        "PayoutRatio":       None,
+        "DividendFrequency": "None",
+        "DividendScore":     0.0,
+    }
+    try:
+        # ── Raw fields from yfinance info ────────────────────────
+        # Prefer trailing 12-month yield over forward estimate
+        yield_raw = (info.get("trailingAnnualDividendYield")
+                     or info.get("dividendYield"))          # 0.0–1.0 decimal
+        div_rate  = (info.get("trailingAnnualDividendRate")
+                     or info.get("dividendRate"))           # $ per share per year
+        payout    = info.get("payoutRatio")                 # 0.0–1.0 decimal
+
+        if not yield_raw and not div_rate:
+            return default                                  # no dividend at all
+
+        yield_pct = round(yield_raw * 100, 2) if yield_raw else None
+
+        # ── Yield score (0.0–0.6) ────────────────────────────────
+        # Scale: <2% = 0.1, 2–4% = 0.3, 4–6% = 0.5, ≥6% = 0.6
+        # Cap contribution to 0.6 so payout safety and frequency still matter
+        y = yield_pct or 0.0
+        if y >= 8:    yield_score = 0.60
+        elif y >= 6:  yield_score = 0.55
+        elif y >= 4:  yield_score = 0.45
+        elif y >= 3:  yield_score = 0.35
+        elif y >= 2:  yield_score = 0.20
+        elif y >= 1:  yield_score = 0.10
+        else:         yield_score = 0.0
+
+        # ── Payout safety (0.0–0.2) ──────────────────────────────
+        # Sustainable payout = bonus. Unsustainable (>100%) = penalty.
+        # None (e.g. REIT, no earnings) = neutral 0.1
+        if payout is None:
+            payout_score = 0.10
+        else:
+            p = payout * 100           # convert to percentage
+            if p <= 0:      payout_score = 0.0    # paying nothing
+            elif p <= 40:   payout_score = 0.20   # very safe
+            elif p <= 60:   payout_score = 0.18   # healthy
+            elif p <= 80:   payout_score = 0.12   # elevated but ok
+            elif p <= 100:  payout_score = 0.05   # borderline
+            else:           payout_score = 0.0    # unsustainable — penalty
+
+        # ── Payment frequency (0.0–0.2) ──────────────────────────
+        # Infer from dividend history: count unique payment months in last 12m
+        freq_label = "None"
+        freq_score = 0.0
+        if dividends_history is not None and not dividends_history.empty:
+            try:
+                import pandas as _pd
+                one_yr_ago = _pd.Timestamp.now(tz="UTC") - _pd.DateOffset(years=1)
+                recent = dividends_history[dividends_history.index >= one_yr_ago]
+                n = len(recent)
+                if n >= 10:
+                    freq_label = "Monthly";     freq_score = 0.20
+                elif n >= 3:
+                    freq_label = "Quarterly";   freq_score = 0.15
+                elif n == 2:
+                    freq_label = "Semi-Annual"; freq_score = 0.10
+                elif n == 1:
+                    freq_label = "Annual";      freq_score = 0.05
+                else:
+                    freq_label = "Irregular";   freq_score = 0.03
+            except Exception:
+                freq_label = "Unknown"
+                freq_score = 0.05
+        elif info.get("dividendRate") and yield_raw:
+            # No history — guess quarterly (most common for US equities)
+            freq_label = "Quarterly (est)"
+            freq_score = 0.12
+
+        composite = round(min(yield_score + payout_score + freq_score, 1.0), 4)
+
+        return {
+            "DividendYieldPct":  yield_pct,
+            "DividendRate":      round(div_rate, 4) if div_rate else None,
+            "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
+            "DividendFrequency": freq_label,
+            "DividendScore":     composite,
+        }
+    except Exception:
+        return default
+
+
 def calculate_short_squeeze(info: dict) -> dict:
     """
     Compute short interest metrics and a composite squeeze score from yfinance info.
@@ -1649,6 +1815,70 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             st.caption("Short interest data from Yahoo Finance / FINRA. Updated twice monthly.")
         else:
             st.info("Short interest data not available for this ticker.")
+
+        # ── Dividend Income ───────────────────────────────────
+        st.divider()
+        st.markdown("### 💰 Dividend Income")
+        _div_yield  = info.get("trailingAnnualDividendYield") or info.get("dividendYield")
+        _div_rate   = info.get("trailingAnnualDividendRate") or info.get("dividendRate")
+        _div_payout = info.get("payoutRatio")
+        _div_score  = raw.get("DividendScore", 0.0) or 0.0
+        _div_freq   = raw.get("DividendFrequency", "")
+        _div_5yr    = info.get("fiveYearAvgDividendYield")
+
+        if _div_yield or _div_rate:
+            dv1, dv2, dv3, dv4, dv5 = st.columns(5)
+            dv1.metric(
+                "Annual Yield",
+                f"{_div_yield*100:.2f}%" if _div_yield else "N/A",
+                help="Trailing 12-month dividend yield — annual dividend ÷ current share price"
+            )
+            dv2.metric(
+                "Annual Rate",
+                f"${_div_rate:.2f}/shr" if _div_rate else "N/A",
+                help="Total annual dividend paid per share (trailing 12 months)"
+            )
+            dv3.metric(
+                "Payout Ratio",
+                f"{_div_payout*100:.0f}%" if _div_payout else "N/A",
+                delta="Sustainable" if _div_payout and _div_payout < 0.6
+                      else ("Elevated" if _div_payout and _div_payout < 1.0 else None),
+                delta_color="normal" if _div_payout and _div_payout < 0.6 else "inverse",
+                help="% of net earnings paid as dividends. Under 60% = healthy. Over 100% = unsustainable."
+            )
+            dv4.metric(
+                "Pay Frequency",
+                _div_freq or "Unknown",
+                help="How often dividends are paid. Monthly > Quarterly > Semi-Annual > Annual."
+            )
+            dv5.metric(
+                "5yr Avg Yield",
+                f"{_div_5yr:.2f}%" if _div_5yr else "N/A",
+                help="5-year average dividend yield — shows whether current yield is high relative to history"
+            )
+            # Dividend quality bar
+            _dbar_filled = int(_div_score * 20)
+            _dbar = "█" * _dbar_filled + "░" * (20 - _dbar_filled)
+            _dbar_pct = f"{_div_score*100:.0f}%"
+            if _div_score >= 0.7:
+                st.success(f"💰 **High Quality Dividend** [{_dbar}] {_dbar_pct} — high yield, sustainable payout, frequent payments")
+            elif _div_score >= 0.4:
+                st.info(f"📈 **Moderate Dividend** [{_dbar}] {_dbar_pct} — decent yield with acceptable payout ratio")
+            elif _div_score >= 0.15:
+                st.warning(f"📊 **Low Dividend** [{_dbar}] {_dbar_pct} — token yield or infrequent payments")
+            else:
+                st.caption(f"Dividend Score: [{_dbar}] {_dbar_pct}")
+            # Ex-dividend date
+            _ex_div = info.get("exDividendDate")
+            if _ex_div:
+                try:
+                    import datetime as _dt
+                    _ex_str = _dt.datetime.fromtimestamp(_ex_div).strftime("%b %d, %Y")
+                    st.caption(f"Ex-dividend date: {_ex_str}")
+                except Exception:
+                    pass
+        else:
+            st.info("This stock does not pay a dividend.")
 
         # ── Price Range ───────────────────────────────────
         st.divider()
@@ -2249,6 +2479,12 @@ def process_ticker(args):
             fin = stock.financials
         except Exception:
             fin = pd.DataFrame()
+
+        # ── 4b. Dividend history — needed for payment frequency ─────
+        try:
+            div_hist = stock.dividends   # pandas Series indexed by date
+        except Exception:
+            div_hist = pd.Series(dtype=float)
         try:
             bal = stock.balance_sheet
         except Exception:
@@ -2263,6 +2499,7 @@ def process_ticker(args):
         tech_signals   = calculate_technical_signals(hist)
         range_data     = calculate_price_range(hist, range_days)
         short_data     = calculate_short_squeeze(info)
+        div_data       = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
         ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                           if len(hist) >= 50 else None)
         owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -2318,6 +2555,11 @@ def process_ticker(args):
             "DaysToCover":    short_data["DaysToCover"],
             "ShortChange":    short_data["ShortChange"],
             "ShortSqueeze":   short_data["ShortSqueeze"],
+            "DividendYieldPct":  div_data["DividendYieldPct"],
+            "DividendRate":      div_data["DividendRate"],
+            "DividendPayoutRatio": div_data["PayoutRatio"],
+            "DividendFrequency": div_data["DividendFrequency"],
+            "DividendScore":     div_data["DividendScore"],
             "_hist":          hist_cache,
         }
 
@@ -2896,7 +3138,8 @@ with tab_screener:
                   "RevenueGrowth", "EarningsGrowth", "RangePct",
                   "RangePos", "RangeHigh", "RangeLow", "MA50",
                   "ShortSqueeze", "ShortPctFloat", "ShortPctFloatRaw",
-                  "DaysToCover", "ShortChange"]
+                  "DaysToCover", "ShortChange",
+                  "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
     for _c in _zero_cols:
         if _c not in df.columns:
             df[_c] = 0.0
@@ -2912,7 +3155,8 @@ with tab_screener:
                     "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
                     "Piotroski", "OBV", "MFI", "PCV",
                     "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity",
-                    "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze"]
+                    "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
+                    "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -3116,6 +3360,21 @@ with tab_screener:
             display["Short Chg"] = display["ShortChange"].apply(
                 lambda x: (f"▲ {x:.1%}" if x > 0 else f"▼ {abs(x):.1%}") if pd.notnull(x) and x is not None else "—"
             )
+        # Dividend display columns
+        if "DividendYieldPct" in display.columns:
+            display["Div Yield"] = display["DividendYieldPct"].apply(
+                lambda x: f"{x:.2f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DividendRate" in display.columns:
+            display["Div Rate"] = display["DividendRate"].apply(
+                lambda x: f"${x:.2f}" if pd.notnull(x) and x else "—"
+            )
+        if "DividendPayoutRatio" in display.columns:
+            display["Payout %"] = display["DividendPayoutRatio"].apply(
+                lambda x: f"{x:.0f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DividendFrequency" in display.columns:
+            display["Freq"] = display["DividendFrequency"]
         display["OwnerEarnings"]  = display["OwnerEarnings"].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "")
         display["RevenueGrowth"]  = display["RevenueGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
         display["EarningsGrowth"] = display["EarningsGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
@@ -3139,7 +3398,8 @@ with tab_screener:
         # ROIC, OBV, PCV, RSI, MACD, GoldenCross: used in scoring, hidden from table
         # MFI: replaced by MFI_Signal label — hide numeric score
         ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv",
-                         "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze"}
+                         "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
+                         "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendFrequency", "DividendScore"}
 
         # Hide columns for metrics that are toggled off
         all_metric_keys = list(METRICS.keys())
@@ -3155,6 +3415,11 @@ with tab_screener:
             for _sc in ["Short % Float", "Days to Cover", "Short Chg"]:
                 if _sc in display.columns:
                     hidden_cols.append(_sc)
+        # Dividend columns: show when DividendScore is enabled
+        if not metric_enabled.get("DividendScore", False):
+            for _dc in ["Div Yield", "Div Rate", "Payout %", "Freq"]:
+                if _dc in display.columns:
+                    hidden_cols.append(_dc)
         display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
 
         # Save to session state — the always-visible panel below renders from here
