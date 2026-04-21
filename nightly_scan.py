@@ -43,14 +43,14 @@ OUTPUT_DIR      = os.path.join(os.path.dirname(__file__), "data")
 DATA_FILE       = os.path.join(OUTPUT_DIR, "stock_data.json.gz")
 META_FILE       = os.path.join(OUTPUT_DIR, "scan_meta.json")
 
-# Worker count — KEEP THIS LOW for nightly jobs.
-# GitHub Actions IPs are heavily rate-limited by Yahoo Finance.
-# 3 workers = ~3 requests/sec. Too fast = empty responses for everything.
-WORKERS         = 3
+# Worker count — 5 workers is the safe ceiling for GitHub Actions.
+# GitHub Actions IPs are rate-limited by Yahoo Finance; beyond 5 workers
+# you get silent empty responses for most tickers.
+WORKERS         = 5
 # Pause between batches (seconds) — lets Yahoo's rate limiter reset
-BATCH_PAUSE     = 8
+BATCH_PAUSE     = 6
 # Batch size — small batches + pauses prevents sustained hammering
-BATCH_SIZE      = 30
+BATCH_SIZE      = 40
 MFI_PERIOD      = 14
 RANGE_DAYS      = 30
 
@@ -544,13 +544,25 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         "PayoutRatio":       None,
         "DividendFrequency": "None",
         "DividendScore":     0.0,
+        "ExDividendDate":    None,   # Unix timestamp — read by dividend_calendar.py
     }
     try:
         yield_raw = (info.get("trailingAnnualDividendYield") or info.get("dividendYield"))
         div_rate  = (info.get("trailingAnnualDividendRate") or info.get("dividendRate"))
         payout    = info.get("payoutRatio")
+        # Capture ex-dividend date as Unix timestamp
+        ex_div_ts = info.get("exDividendDate")
+        if ex_div_ts and not isinstance(ex_div_ts, (int, float)):
+            ex_div_ts = None
+
         if not yield_raw and not div_rate:
-            return default
+            return {**default, "ExDividendDate": ex_div_ts}
+
+        # Cap yield at 50% — foreign ADRs (PKX, KB, SHG, KEP etc.) sometimes
+        # return raw per-share amounts instead of ratios, causing 3000-15000%
+        # values. Any yield above 50% is a data error from yfinance.
+        if yield_raw and yield_raw > 0.50:
+            return {**default, "ExDividendDate": ex_div_ts}
         yield_pct = round(yield_raw * 100, 2) if yield_raw else None
         y = yield_pct or 0.0
         if y >= 8:    yield_score = 0.60
@@ -598,6 +610,7 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
             "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
             "DividendFrequency": freq_label,
             "DividendScore":     composite,
+            "ExDividendDate":    ex_div_ts,
         }
     except Exception:
         return default
@@ -755,6 +768,7 @@ def process_ticker(args):
                 "DividendPayoutRatio": div_data["PayoutRatio"],
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
+                "ExDividendDate":      div_data["ExDividendDate"],
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
@@ -766,7 +780,7 @@ def process_ticker(args):
 
     return None  # all attempts exhausted
 
-# ── Scan one exchange ─────────────────────────────────────────────────────────
+# ── Scan one exchange (legacy — not called by main, kept for app.py compat) ──
 
 def scan_exchange(exchange_key: str, tickers: list) -> list:
     results   = []
@@ -875,7 +889,7 @@ def main():
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
 
-    date_tag = end_utc.strftime("%Y-%m-%d") if 'end_utc' in dir() else start_utc.strftime("%Y-%m-%d")
+    date_tag = start_utc.strftime("%Y-%m-%d")  # use start time; end_utc set after save
 
     # ── Primary files (always overwritten — what the app reads) ──────
     # Compressed JSON — readable by the Streamlit app with json + gzip
