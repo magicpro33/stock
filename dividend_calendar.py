@@ -73,19 +73,60 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .tbl-wrap {
     max-height: 480px;
     overflow-y: auto;
-    border: 1px solid #efefed;
+    border: 1px solid #2a2a2a;
     border-radius: 8px;
+    background: #111;
 }
-.stbl { width:100%; border-collapse: collapse; }
+.stbl { width: 100%; border-collapse: collapse; }
 .stbl thead th {
     position: sticky; top: 0; z-index: 2;
-    background: #1a1a1a; color: #ccc;
+    background: #1a1a1a; color: #999;
     font-size: 0.66rem; letter-spacing: 0.1em; text-transform: uppercase;
     padding: 10px 10px; text-align: left; white-space: nowrap;
+    border-bottom: 1px solid #333;
 }
-.stbl tbody td { padding:10px; border-bottom:1px solid #f5f5f3; font-size:0.82rem; }
-.stbl tbody tr:last-child td { border-bottom:none; }
-.stbl tbody tr:hover td { background:#fafaf8; }
+.stbl tbody td {
+    padding: 10px 10px;
+    border-bottom: 1px solid #1e1e1e;
+    font-size: 0.82rem;
+    color: #d0d0d0;
+    background: #111;
+    transition: background 0.1s ease, color 0.1s ease;
+}
+.stbl tbody tr:last-child td { border-bottom: none; }
+
+/* Full-row hover: dark green tint, ALL cells affected */
+.stbl tbody tr.tbl-row:hover td { background: #1a2e1a !important; }
+
+/* Per-class cell colors — normal state */
+.td-ticker { font-family: 'DM Mono', monospace; font-weight: 700; color: #ffffff; }
+.td-sector { font-size: 0.74rem; color: #888; }
+.td-num    { font-family: 'DM Mono', monospace; color: #c8c8c8; }
+.td-freq   { font-size: 0.76rem; color: #888; }
+.td-date   { font-family: 'DM Mono', monospace; color: #777; }
+.td-count  { font-family: 'DM Mono', monospace; color: #aaa; white-space: nowrap; }
+
+/* Hover state — all text brightens uniformly */
+.stbl tbody tr.tbl-row:hover .td-ticker { color: #ffffff !important; }
+.stbl tbody tr.tbl-row:hover .td-sector { color: #a0c8a0 !important; }
+.stbl tbody tr.tbl-row:hover .td-num    { color: #e8e8e8 !important; }
+.stbl tbody tr.tbl-row:hover .td-freq   { color: #a0c8a0 !important; }
+.stbl tbody tr.tbl-row:hover .td-date   { color: #c8c8c8 !important; }
+.stbl tbody tr.tbl-row:hover .td-count  { color: #e8e8e8 !important; }
+
+/* Yield badge — CSS custom property for per-row color */
+.yield-badge {
+    padding: 2px 9px;
+    border-radius: 100px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: rgba(255,255,255,0.07);
+    color: var(--yc);
+    border: 1px solid var(--yc);
+    opacity: 0.9;
+}
+.stbl tbody tr.tbl-row:hover .yield-badge { opacity: 1; }
 .mono { font-family:'DM Mono',monospace; font-size:0.78rem; }
 .buy-now { background:#cc0000; color:#fff; padding:2px 8px; border-radius:4px; font-size:0.67rem; font-weight:700; }
 .buy-tmr { background:#2e7d32; color:#fff; padding:2px 8px; border-radius:4px; font-size:0.67rem; font-weight:700; }
@@ -534,20 +575,19 @@ with tab_cal:
             elif da == 1: alert = '<span class="buy-tmr">BUY TOMORROW</span>'
 
             rows_html.append(
-                "<tr>"
-                "<td><strong style=\"font-family:'DM Mono',monospace\">" + row["ticker"] + "</strong></td>"
-                "<td style='color:#aaa;font-size:0.74rem'>" + str(row["sector"]) + "</td>"
-                "<td><span style='background:" + yc + "18;color:" + yc + ";padding:2px 9px;"
-                "border-radius:100px;font-family:DM Mono,monospace;font-size:0.78rem;font-weight:600'>" +
-                str(row["yield_pct"]) + "%</span></td>"
-                "<td class='mono'>$" + "{:.4f}".format(dr) + "</td>"
-                "<td class='mono'>" + mp_str + "</td>"
-                "<td class='mono'>" + pr_str + "</td>"
-                "<td style='font-size:0.76rem;color:#888'>" + freq + "</td>"
-                "<td class='mono'>$" + "{:.2f}".format(px) + "</td>"
-                "<td class='mono'>" + bd_str + "</td>"
-                "<td class='mono' style='color:#bbb'>" + ex_str + "</td>"
-                "<td>" + str(da) + "d " + alert + "</td>"
+                "<tr class='tbl-row'>"
+                "<td class='td-ticker'><strong>" + row["ticker"] + "</strong></td>"
+                "<td class='td-sector'>" + str(row["sector"]) + "</td>"
+                "<td class='td-yield'><span class='yield-badge " + tier(row["yield_pct"]) + "-badge' "
+                "style='--yc:" + yc + "'>" + str(row["yield_pct"]) + "%</span></td>"
+                "<td class='mono td-num'>$" + "{:.4f}".format(dr) + "</td>"
+                "<td class='mono td-num'>" + mp_str + "</td>"
+                "<td class='mono td-num'>" + pr_str + "</td>"
+                "<td class='td-freq'>" + freq + "</td>"
+                "<td class='mono td-num'>$" + "{:.2f}".format(px) + "</td>"
+                "<td class='mono td-date'>" + bd_str + "</td>"
+                "<td class='mono td-date'>" + ex_str + "</td>"
+                "<td class='td-count'>" + str(da) + "d " + alert + "</td>"
                 "</tr>"
             )
 
