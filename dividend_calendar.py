@@ -123,7 +123,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .tag-bad  { background:#ffebee; color:#b71c1c; padding:2px 8px; border-radius:100px; font-size:0.68rem; font-weight:600; }
 .section-hdr {
     font-family: 'DM Serif Display', serif;
-    font-size: 1.2rem; color: #1a1a1a;
+    font-size: 1.2rem; color: #cc0000;
     margin: 24px 0 12px; padding-bottom: 6px;
     border-bottom: 2px solid #cc0000;
 }
@@ -175,16 +175,12 @@ def load_scan_data():
         except (TypeError, ValueError):
             payout = None
 
-        # Monthly payout per share
-        freq  = item.get("DividendFrequency") or "—"
-        freq_map = {
-            "monthly": 1, "monthly (est)": 1,
-            "quarterly": 3, "quarterly (est)": 3,
-            "semi-annual": 6,
-            "annual": 12,
-        }
-        months_per_pay = freq_map.get(freq.lower(), 3)
-        monthly_pay = round((div_rate / months_per_pay), 4) if div_rate else None
+        # Frequency label (for display)
+        freq = item.get("DividendFrequency") or "—"
+
+        # Monthly payout per share — div_rate from yfinance is the ANNUAL rate
+        # so monthly is always annual / 12, regardless of payment frequency
+        monthly_pay = round(div_rate / 12, 4) if div_rate else None
 
         # Ex-date
         ex_date = None
