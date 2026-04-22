@@ -399,6 +399,7 @@ with st.sidebar:
     max_yield   = st.slider("Max yield (%)",  5.0, 50.0, 25.0, 1.0)
     days_ahead  = st.slider("Days ahead",     30,  180,  90)
     freq_filter = st.selectbox("Frequency", ["All","Monthly","Quarterly","Semi-Annual","Annual"])
+    max_price   = st.slider("Max stock price ($)", 1, 1000, 1000, 1)
     st.markdown("---")
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
@@ -441,7 +442,8 @@ with st.sidebar:
 # Apply filters
 df = df_all[
     (df_all["yield_pct"] >= min_yield) &
-    (df_all["yield_pct"] <= max_yield)
+    (df_all["yield_pct"] <= max_yield) &
+    (df_all["price"].fillna(0) <= max_price)
 ].copy()
 if freq_filter != "All":
     df = df[df["frequency"].str.contains(freq_filter, case=False, na=False)]
