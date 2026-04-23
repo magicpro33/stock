@@ -66,8 +66,8 @@ _CSS = (
     '.calc-value.big{font-size:1.3rem;color:#39ff4a}'
     '.section-hdr{font-family:\'DM Serif Display\',serif;font-size:1.2rem;color:#cc0000;margin:24px 0 12px;padding-bottom:6px;border-bottom:2px solid #cc0000}'
     '.tip-wrap{position:relative;display:inline-block}'
-    '.tip-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:#444;color:#ccc;font-size:9px;font-weight:700;cursor:default;flex-shrink:0;line-height:1;margin-left:3px}'
-    '.tip-box{display:none;position:absolute;left:20px;top:-4px;z-index:999;background:#1a1a1a;color:#e0e0e0;border:1px solid #444;border-radius:6px;padding:10px 13px;font-size:.74rem;line-height:1.5;width:280px;box-shadow:0 4px 20px rgba(0,0,0,.5);pointer-events:none}'
+    '.tip-icon{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:#555;color:#ddd;font-size:9px;font-weight:700;cursor:default;flex-shrink:0;line-height:1;margin-left:4px;border:1px solid #777}'
+    '.tip-box{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:9999;background:#1e1e1e;color:#e8e8e8;border:1px solid #555;border-radius:8px;padding:12px 14px;font-size:.76rem;line-height:1.65;width:300px;max-width:min(300px,70vw);word-wrap:break-word;white-space:normal;overflow-wrap:break-word;box-shadow:0 8px 32px rgba(0,0,0,.75);pointer-events:none}'
     '.tip-wrap:hover .tip-box{display:block}'
     '.mrow{border-bottom:1px solid #1e1e1e}'
     '.mrow:last-child{border-bottom:none}'
@@ -117,9 +117,12 @@ def tag(v, good, ok, fmt='{:.1f}', sfx=''):
 
 def tip(label, text):
     safe = text.replace("'", '&#39;').replace('"', '&quot;')
-    return ('<span style="display:inline-flex;align-items:center">' + label +
-            '<span class="tip-wrap"><span class="tip-icon">?</span>'
-            '<span class="tip-box">' + safe + '</span></span></span>')
+    return (
+        '<span style="display:inline-flex;align-items:center;gap:2px">' + label +
+        '<span class="tip-wrap">'  
+        '<span class="tip-icon">?</span>'
+        '<span class="tip-box">' + safe + '</span>'
+        '</span></span>')
 
 def mrow(label, tip_text, val_html):
     return ('<tr class="mrow"><td class="mrow-label">' + tip(label, tip_text) +
