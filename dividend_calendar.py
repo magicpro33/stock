@@ -67,7 +67,7 @@ _CSS = (
     '.section-hdr{font-family:\'DM Serif Display\',serif;font-size:1.2rem;color:#cc0000;margin:24px 0 12px;padding-bottom:6px;border-bottom:2px solid #cc0000}'
     '.tip-wrap{position:relative;display:inline-block}'
     '.tip-icon{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:#555;color:#ddd;font-size:9px;font-weight:700;cursor:default;flex-shrink:0;line-height:1;margin-left:4px;border:1px solid #777}'
-    '.tip-box{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:9999;background:#1e1e1e;color:#e8e8e8;border:1px solid #555;border-radius:8px;padding:12px 14px;font-size:.76rem;line-height:1.65;width:300px;max-width:min(300px,70vw);word-wrap:break-word;white-space:normal;overflow-wrap:break-word;box-shadow:0 8px 32px rgba(0,0,0,.75);pointer-events:none}'
+    '.tip-box{display:none;position:fixed;top:auto;left:50%;transform:translateX(-50%);z-index:9999;background:#1e1e1e;color:#e8e8e8;border:1px solid #555;border-radius:8px;padding:12px 14px;font-size:.76rem;line-height:1.65;width:300px;max-width:min(300px,80vw);word-wrap:break-word;white-space:normal;overflow-wrap:break-word;box-shadow:0 8px 32px rgba(0,0,0,.75);pointer-events:none}'
     '.tip-wrap:hover .tip-box{display:block}'
     '.mrow{border-bottom:1px solid #1e1e1e}'
     '.mrow:last-child{border-bottom:none}'
@@ -83,7 +83,9 @@ _CSS = (
     '.tag-bad{background:#ffebee;color:#b71c1c;padding:2px 8px;border-radius:100px;font-size:.68rem;font-weight:600}'
     '</style>'
 )
-st.markdown(_CSS, unsafe_allow_html=True)
+if '_css_injected' not in st.session_state:
+    st.markdown(_CSS, unsafe_allow_html=True)
+    st.session_state['_css_injected'] = True
 
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'data', 'stock_data.json.gz')
@@ -125,7 +127,12 @@ def tip(label, text):
         '</span></span>')
 
 def mrow(label, tip_text, val_html):
-    return ('<tr class="mrow"><td class="mrow-label">' + tip(label, tip_text) +
+    safe = tip_text.replace("'", '&#39;').replace('"', '&quot;')
+    lbl = ('<span style="display:inline-flex;align-items:center;gap:2px">' + label +
+           '<span class="tip-wrap">'
+           '<span class="tip-icon">?</span>'
+           '<span class="tip-box">' + safe + '</span></span></span>')
+    return ('<tr class="mrow"><td class="mrow-label">' + lbl +
             '</td><td class="mrow-val">' + val_html + '</td></tr>')
 
 def pill(label, bull):
@@ -196,14 +203,22 @@ def fetch_ex_dates_live(tickers_tuple):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym):
-    try:
-        t = yf.Ticker(sym.upper().strip())
-        info = t.info or {}
-        hist = t.history(period='1y')
-        divs = t.dividends
-        return info, hist, divs, None
-    except Exception as e:
-        return {}, pd.DataFrame(), pd.Series(dtype=float), str(e)
+    sym = sym.upper().strip()
+    for attempt in range(2):
+        try:
+            t    = yf.Ticker(sym)
+            info = t.info or {}
+            # yfinance can return {} on rate limit -- retry once
+            if not info and attempt == 0:
+                time.sleep(1.5)
+                continue
+            hist = t.history(period='1y')
+            divs = t.dividends
+            return info, hist, divs, None
+        except Exception as e:
+            if attempt == 0: time.sleep(1.5)
+            else: return {}, pd.DataFrame(), pd.Series(dtype=float), str(e)
+    return {}, pd.DataFrame(), pd.Series(dtype=float), 'No data returned'
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_meta():
@@ -215,7 +230,7 @@ def load_meta():
 def render_calendar(df, year, month):
     today = datetime.date.today()
     day_map = {}
-    for _, row in df.iterrows():
+    for row in df.to_dict('records'):
         bd = safe_date(row.get('buy_date'))
         if bd and bd.year == year and bd.month == month:
             day_map.setdefault(bd.day, []).append(row)
@@ -309,13 +324,13 @@ df['buy_date'] = df['ex_date'].apply(
     lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
 
 cutoff = today + datetime.timedelta(days=days_ahead)
-def in_window(bd):
-    d = safe_date(bd)
-    return d is not None and today <= d <= cutoff
-df_cal = df[df['buy_date'].apply(in_window)].copy().sort_values('yield_pct', ascending=False)
+# Vectorized window filter -- no apply() overhead
+_bd = pd.to_datetime(df['buy_date'].apply(safe_date), errors='coerce')
+df_cal = df[_bd.notna() & (_bd.dt.date >= today) & (_bd.dt.date <= cutoff)].copy()
+df_cal = df_cal.sort_values('yield_pct', ascending=False)
 
 meta_txt = ('  |  Last scan: ' + str(meta.get('scanned_at_utc','--'))) if meta else ''
-ex_found = df['ex_date'].apply(safe_date).notna().sum()
+ex_found = df['ex_date'].notna().sum()
 st.markdown('<div class="src-badge ' + badge_cls + '">&#x2713; ' +
     str(len(df_all)) + ' dividend stocks | ' + str(ex_found) + ' with ex-dates (' + src_label + ')' +
     meta_txt + '</div>', unsafe_allow_html=True)
@@ -323,7 +338,9 @@ st.markdown('<div class="src-badge ' + badge_cls + '">&#x2713; ' +
 tab_cal, tab_calc, tab_az = st.tabs(['Calendar', 'Calculator', 'Stock Analyzer'])
 
 with tab_cal:
-    nxt = df_cal.sort_values('buy_date').iloc[0] if not df_cal.empty else None
+    # Sort once by (buy_date asc, yield desc) -- used for both nxt and table
+    df_cal_sorted = df_cal.sort_values(['buy_date','yield_pct'], ascending=[True,False]).reset_index(drop=True) if not df_cal.empty else df_cal
+    nxt = df_cal_sorted.iloc[0] if not df_cal.empty else None
     c1,c2,c3,c4 = st.columns(4)
     c1.metric('Buy signals ahead', len(df_cal))
     c2.metric('Avg yield', '{:.1f}%'.format(df_cal['yield_pct'].mean()) if not df_cal.empty else '--')
@@ -365,10 +382,11 @@ with tab_cal:
     if df_cal.empty:
         st.info('No buy signals in the next ' + str(days_ahead) + ' days. Try widening the date range.')
     else:
-        df_show = df_cal.sort_values(['buy_date','yield_pct'], ascending=[True,False]).copy()
-        df_show['days_away'] = df_show['buy_date'].apply(lambda d: (safe_date(d) - today).days if safe_date(d) else 0)
+        df_show = df_cal_sorted  # already sorted, no copy needed
+        _dsa = pd.to_datetime(df_show['buy_date'].apply(safe_date), errors='coerce').dt.date
+        df_show = df_show.assign(days_away=(_dsa - today).apply(lambda x: x.days if pd.notna(x) else 0))
         rows_html = []
-        for _, row in df_show.iterrows():
+        for row in df_show.to_dict('records'):
             yc  = ycolor(row['yield_pct'])
             bd  = safe_date(row.get('buy_date'))
             ex  = safe_date(row.get('ex_date'))
@@ -421,7 +439,7 @@ with tab_calc:
     if calc_mode == 'Pick from dividend list':
         if df.empty: st.warning('No dividend stocks match current filters.'); st.stop()
         opts = [r['ticker'] + '  --  ' + str(r['yield_pct']) + '% yield  |  ' + str(r['frequency'])
-            for _, r in df.sort_values('yield_pct', ascending=False).iterrows()]
+            for r in df.sort_values('yield_pct', ascending=False).to_dict('records')]
         sel = st.selectbox('Select stock', opts)
         sel_tk = sel.split('  --  ')[0].strip()
         sel_row = df[df['ticker'] == sel_tk].iloc[0]
@@ -508,13 +526,16 @@ with tab_az:
         with st.spinner('Fetching ' + az_ticker.upper() + '...'):
             ai, ah, ad, ae = fetch_stock_analysis(az_ticker)
         if ae or not ai:
-            st.error('Could not fetch ' + az_ticker.upper() + '. Check the ticker symbol.')
+            st.error('Could not load data for ' + az_ticker.upper() + '. ' +
+                'This may be a rate limit, invalid ticker, or yfinance outage. ' +
+                'Try again in 30 seconds. Error: ' + str(ae or 'empty response'))
         else:
             sym   = az_ticker.upper().strip()
             name  = ai.get('longName') or ai.get('shortName') or sym
             sec   = ai.get('sector') or 'Unknown'
             ind   = ai.get('industry') or 'Unknown'
-            px    = float(ai.get('currentPrice') or ai.get('regularMarketPrice') or 0)
+            px    = float(ai.get('currentPrice') or ai.get('regularMarketPrice') or
+                         ai.get('navPrice') or ai.get('previousClose') or 0)
             mcap  = ai.get('marketCap') or 0
             pe    = ai.get('trailingPE')
             fwpe  = ai.get('forwardPE')
