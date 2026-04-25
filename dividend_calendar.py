@@ -685,10 +685,10 @@ with tab_az:
                     if v is None: return '--'
                     c='#7fff7f' if v>=0 else '#ff9999'
                     return '<span style="color:'+c+';font-family:DM Mono,monospace">'+('+'if v>=0 else '')+'{:.2f}%'.format(v)+'</span>'
-                pr_rows = [('1 Day','How much the stock moved today vs yesterday. Positive=up, negative=down.',pf(pct1d)),
-                    ('5 Day','Price change over the last 5 trading days. Shows short-term momentum.',pf(pct5d)),
-                    ('1 Month','Price change over the last 22 trading days. Shows near-term trend strength.',pf(pct1m)),
-                    ('3 Month','Price change over the last 66 trading days. Shows medium-term trend direction.',pf(pct3m))]
+                pr_rows = [('1 Day','1 Day = one trading day. How much the stock price moved today compared to yesterday. A positive number means the stock went up; negative means it went down.',pf(pct1d)),
+                    ('5 Day','5 Day = five trading days (roughly one calendar week). Shows short-term price momentum. If positive and rising, buyers are in control over the near term.',pf(pct5d)),
+                    ('1 Month','1 Month = approximately 22 trading days. Shows the near-term trend. A stock that is up over one month but down on the day may just be pulling back within a larger uptrend.',pf(pct1m)),
+                    ('3 Month','3 Month = approximately 66 trading days (one quarter). Shows the medium-term trend direction. This is the timeframe most institutional investors use to evaluate recent performance.',pf(pct3m))]
                 pr_html = '<table style="width:100%;border-collapse:collapse"><tbody>'
                 for lbl,tt,val in pr_rows:
                     pr_html += '<tr class="mrow"><td class="mrow-label">' + tip(lbl,tt) + '</td><td class="mrow-val">' + val + '</td></tr>'
@@ -712,13 +712,13 @@ with tab_az:
                     elif rsi_v<70: ri='Strong -- uptrend confirmed'; rc='#7fff7f'
                     else: ri='Overbought -- pullback possible'; rc='#ff9999'
                     tech_rows.append(mrow('RSI (14-day)',
-                        'Below 30: stock may bounce back. Above 70: may have risen too fast. 45-70 is the sweet spot -- momentum without being overheated.',
+                        'RSI = Relative Strength Index. A momentum indicator scored 0-100. Below 30 = oversold, the stock has fallen too far too fast and may bounce. Above 70 = overbought, may have risen too fast and a pullback is likely. 45-70 is the sweet spot -- strong upward momentum without being overheated.',
                         '<span style="font-family:DM Mono,monospace;color:'+rc+'">'+vo(rsi_v,'{:.1f}')+'</span> <span style="font-size:.72rem;color:#888">'+ri+'</span>'))
                 if macd_v is not None:
                     mi = 'Bullish -- momentum building' if macd_v>macd_s else 'Bearish -- momentum fading'
                     mc2 = '#7fff7f' if macd_v>macd_s else '#ff9999'
                     tech_rows.append(mrow('MACD',
-                        'When MACD line is above the signal line, buyers are in control and stock tends to keep rising. Crossing above the signal line is a classic buy signal.',
+                        'MACD = Moving Average Convergence Divergence. Compares a 12-day and 26-day exponential moving average (EMA) of the price. When the MACD line is above its 9-day signal line, buyers are in control. Crossing above the signal line is a classic buy signal. Crossing below is a sell signal.',
                         '<span style="font-family:DM Mono,monospace;color:'+mc2+'">'+vo(macd_v,'{:.4f}')+'</span> <span style="font-size:.72rem;color:#888">'+mi+'</span>'))
                 if ma50_v:
                     pvs=(px-ma50_v)/ma50_v*100
@@ -727,13 +727,13 @@ with tab_az:
                     elif pvs>-5: m5i='Just below -- watch for reclaim'; m5c='#ffe066'
                     else: m5i='Well below -- downtrend'; m5c='#ff9999'
                     tech_rows.append(mrow('50-Day MA',
-                        'Average price over last 50 trading days. When price is just above it, the MA acts as a floor of support. This is often the ideal low-risk entry for an uptrending stock.',
+                        'MA = Moving Average. The 50-Day MA is the average closing price over the past 50 trading days (~2.5 months). It smooths out daily noise to show the short-to-medium trend. When price is just above the 50-Day MA, it often acts as a floor of support -- this is frequently the ideal low-risk entry point for an uptrending stock.',
                         '$'+vo(ma50_v)+' <span style="color:'+m5c+';font-size:.72rem">('+('+'if pvs>=0 else '')+'{:.1f}%'.format(pvs)+')</span> <span style="font-size:.72rem;color:#888">'+m5i+'</span>'))
                 if ma200_v:
                     m2i='Golden Cross -- long-term uptrend' if (ma50_v and ma50_v>ma200_v) else 'Death Cross -- long-term downtrend'
                     m2c='#7fff7f' if (ma50_v and ma50_v>ma200_v) else '#ff9999'
                     tech_rows.append(mrow('200-Day MA',
-                        'Most widely watched long-term trend indicator. 50-day crossing above it is the Golden Cross -- a major bullish signal. Crossing below is the Death Cross -- bearish.',
+                        'MA = Moving Average. The 200-Day MA is the average closing price over the past 200 trading days (~10 months). It is the most widely watched long-term trend line. When the 50-Day MA crosses above the 200-Day MA, that is called the Golden Cross -- a major bullish signal used by large institutions to open long positions. The reverse crossing is called the Death Cross -- a bearish signal.',
                         '$'+vo(ma200_v)+' <span style="font-size:.72rem;color:'+m2c+'">'+m2i+'</span>'))
                 if vol_avg and vol_td:
                     vr=vol_td/vol_avg
@@ -742,12 +742,12 @@ with tab_az:
                     elif vr>0.5: vi='Below average -- quiet session'; vc='#888'
                     else: vi='Very low -- no conviction'; vc='#888'
                     tech_rows.append(mrow('Volume',
-                        'How many shares traded today vs the 20-day average. A price move on high volume has conviction. A move on low volume is less reliable and more likely to reverse.',
+                        'Volume = the total number of shares bought and sold in a given trading session. Shown here as a multiple of the 20-day average volume (e.g. 1.5x means 50% more shares than usual traded today). High volume confirms a price move has conviction behind it -- many investors agree. Low volume moves are unreliable and often reverse. Volume spikes frequently precede or confirm major breakouts.',
                         '<span style="color:'+vc+';font-family:DM Mono,monospace">'+'{:.1f}x avg'.format(vr)+'</span> <span style="font-size:.72rem;color:#888">'+vi+'</span>'))
                 if obv_tr:
                     oc='#7fff7f' if obv_tr=='rising' else '#ff9999'
                     tech_rows.append(mrow('OBV Trend',
-                        'On-Balance Volume: rising means more volume on up-days, signaling institutions quietly buying. Falling means distribution -- big money selling into strength.',
+                        'OBV = On-Balance Volume. A cumulative indicator that adds volume on up-days and subtracts it on down-days. A rising OBV means more shares are trading on days the stock goes up -- this signals that large institutions are quietly accumulating (buying) the stock even if the price has not moved much yet. A falling OBV means distribution -- big money is selling into strength, which often precedes a price decline.',
                         '<span style="color:'+oc+';font-family:DM Mono,monospace">'+obv_tr.capitalize()+'</span>'))
                 if rng is not None:
                     if rng<25: rni='Near 52W low -- historically cheap'; rnc='#7fff7f'
@@ -755,7 +755,7 @@ with tab_az:
                     elif rng<75: rni='Upper half -- momentum zone'; rnc='#ccc'
                     else: rni='Near 52W high -- extended or breakout'; rnc='#ffe066'
                     tech_rows.append(mrow('52W Range Position',
-                        '0%=at yearly low, 100%=at yearly high. Stocks near their low offer better value and higher yield on cost. Near the high may be breaking out or overextended.',
+                        '52W = 52-Week (one full year). Shows where the current price sits within its yearly high-low range. 0% = trading at the 52-week low. 100% = trading at the 52-week high. Stocks near the low end often offer better value and a higher effective dividend yield on your purchase price. Stocks near the high end may be breaking out to new highs or may be overextended and due for a pullback.',
                         '<span style="color:'+rnc+';font-family:DM Mono,monospace">'+'{:.0f}% of range'.format(rng)+'</span><span style="font-size:.72rem;color:#888;display:block">$'+'{:.2f}'.format(lo52)+' -- $'+'{:.2f}'.format(hi52)+'</span><span style="font-size:.72rem;color:#888">'+rni+'</span>'))
                 if tech_rows:
                     st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(tech_rows) + '</tbody></table>', unsafe_allow_html=True)
@@ -765,22 +765,22 @@ with tab_az:
                 st.markdown('<div class="az-section">Dividend Metrics</div>', unsafe_allow_html=True)
                 div_rows = [
                     mrow('Annual Yield',
-                        'Annual dividend income divided by current price. 6% means $6/year per $100 invested. Very high yields above 15% can signal a dividend at risk of being cut.',
+                        'Annual Yield = Dividend Yield. The total annual dividend payments divided by the current stock price, expressed as a percentage. A 6% yield means for every $100 you invest, you receive $6 per year in dividends. Very high yields above 15% can signal the dividend is at risk of being cut -- often called a yield trap.',
                         tag(dy,6,3,'{:.2f}','%')),
                     mrow('Annual Div/Share',
-                        'Total dollar amount of dividends paid per share over the past 12 months. Raw income before considering how many shares you own.',
+                        'Annual Div/Share = Annual Dividend Per Share. The total dollar amount paid in dividends for each share you own over the past 12 months (trailing twelve months or TTM). Multiply this by your number of shares to get your total annual dividend income.',
                         ('$'+'{:.4f}'.format(dr)) if dr else '--'),
                     mrow('Monthly/Share',
-                        'Equivalent monthly dividend income per share (annual rate divided by 12). Useful for monthly income budgeting regardless of payment frequency.',
+                        'Monthly/Share = Monthly Dividend Per Share. The annual dividend rate divided by 12, giving you the equivalent monthly income per share. Useful for monthly income planning regardless of whether the stock actually pays monthly, quarterly, or annually. Multiply by your share count to get total monthly income.',
                         ('$'+'{:.4f}'.format(mp2)) if mp2 else '--'),
                     mrow('Payment Frequency',
                         'How often you receive a dividend payment. Monthly=12 payments/year. Quarterly=4 payments/year. Less frequent means longer gaps between income.',
                         freq2),
                     mrow('Ex-Dividend Date',
-                        'You must OWN the stock BEFORE this date to receive the next dividend. Buy the day before to qualify. The stock price typically drops by roughly the dividend amount on this date.',
+                        'Ex-Dividend Date (also called Ex-Date). The cutoff date set by the company. You must own the stock BEFORE this date to qualify for the upcoming dividend payment. If you buy ON or AFTER the ex-date, you miss that payment. The stock price typically drops by approximately the dividend amount on this date as the value of that payment leaves the stock.',
                         ex_dt.strftime('%b %d, %Y') if ex_dt else '--'),
                     mrow('Payout Ratio',
-                        'Percentage of earnings paid as dividends. Under 60% is sustainable. 60-80% is a yellow flag. Over 100% means the company pays more than it earns -- dividend may be cut.',
+                        'Payout Ratio = Dividend Payout Ratio. What percentage of the company&apos;s net earnings (EPS) is paid out as dividends. Under 60% is generally sustainable -- the company keeps plenty of earnings to reinvest and grow. 60-80% is a yellow flag. Over 100% means the company is paying MORE in dividends than it earns -- this is unsustainable and a dividend cut is likely.',
                         tag((pout or 0)*100,80,100,'{:.0f}','%') if pout else '--'),
                 ]
                 st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(div_rows) + '</tbody></table>', unsafe_allow_html=True)
@@ -788,32 +788,32 @@ with tab_az:
                 st.markdown('<div class="az-section">Valuation</div>', unsafe_allow_html=True)
                 mcstr = ('$'+'{:.1f}B'.format(mcap/1e9) if mcap>=1e9 else '$'+'{:.0f}M'.format(mcap/1e6) if mcap>=1e6 else '--')
                 val_rows = [
-                    mrow('Market Cap','Total market value of all shares. Above $10B=large-cap (stable). $2-10B=mid-cap (growth). Below $2B=small-cap (higher risk/reward).',mcstr),
-                    mrow('P/E (Trailing)','Price divided by last 12 months earnings per share. Lower can mean cheap relative to profits. Very high means investors expect strong growth.','{:.1f}x'.format(pe) if pe else '--'),
-                    mrow('P/E (Forward)','Uses predicted earnings for next 12 months. If lower than trailing P/E, earnings expected to grow -- bullish. If higher, earnings expected to shrink.','{:.1f}x'.format(fwpe) if fwpe else '--'),
-                    mrow('Price/Book','Compares price to net asset value. Under 1x means trading below assets -- potentially undervalued. 1-3x is typical for healthy companies.','{:.2f}x'.format(pb) if pb else '--'),
-                    mrow('Price/Sales','Compares price to revenue per share. Under 1x is generally cheap. Under 2x reasonable. Above 10x means investors pay a large premium for future growth.','{:.2f}x'.format(ps) if ps else '--'),
-                    mrow('Beta','Volatility vs market. 1.0=moves with market. Above 1.5=bigger gains AND drops. Below 0.5=stable, less affected by market swings -- common in utilities and REITs.','{:.2f}'.format(beta) if beta else '--'),
+                    mrow('Market Cap','Market Cap = Market Capitalization. The total dollar value of all outstanding shares (share price x total shares). Large-cap above $10B = established, stable companies. Mid-cap $2-10B = growing companies with moderate risk. Small-cap below $2B = higher growth potential but also higher risk and volatility.',mcstr),
+                    mrow('P/E (Trailing)','P/E = Price-to-Earnings Ratio. Trailing P/E uses actual earnings from the past 12 months (TTM = Trailing Twelve Months). Calculated as: Stock Price / EPS (Earnings Per Share). A P/E of 15x means you pay $15 for every $1 the company earns annually. Lower P/E can mean the stock is cheap relative to profits. Very high P/E means investors expect strong future growth -- or the stock is overvalued.','{:.1f}x'.format(pe) if pe else '--'),
+                    mrow('P/E (Forward)','Forward P/E uses analyst-estimated earnings for the next 12 months instead of past earnings. If forward P/E is lower than trailing P/E, earnings are expected to grow -- a bullish signal. If forward P/E is higher than trailing, earnings are expected to shrink -- a warning sign. NTM = Next Twelve Months is another term for forward P/E.','{:.1f}x'.format(fwpe) if fwpe else '--'),
+                    mrow('Price/Book','P/B = Price-to-Book Ratio. Compares the stock price to the company&apos;s book value (net assets = total assets minus total liabilities). Under 1x means the stock is trading below the value of what the company actually owns -- potentially very undervalued. 1-3x is typical for most healthy companies. Very high P/B means the market values intangibles like brand, patents, or future growth.','{:.2f}x'.format(pb) if pb else '--'),
+                    mrow('Price/Sales','P/S = Price-to-Sales Ratio (also P/Rev). Compares the stock price to revenue per share. Useful when earnings are negative since every company has revenue. Under 1x = generally cheap. Under 2x = reasonable. Above 10x = investors are paying a huge premium for future growth potential -- common in high-growth tech but risky if growth slows.','{:.2f}x'.format(ps) if ps else '--'),
+                    mrow('Beta','Beta measures a stock&apos;s price volatility relative to the overall market (S&P 500). Beta 1.0 = moves exactly with the market. Beta 1.5 = moves 50% more than the market in both directions -- bigger gains AND bigger drops. Beta 0.5 = moves half as much as the market -- stable, defensive. Low-beta stocks (utilities, REITs, consumer staples) are favored during recessions and bear markets.','{:.2f}'.format(beta) if beta else '--'),
                 ]
                 st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(val_rows) + '</tbody></table>', unsafe_allow_html=True)
 
                 st.markdown('<div class="az-section">Financial Health</div>', unsafe_allow_html=True)
                 hlth_rows = [
-                    mrow('Profit Margin','Cents of profit kept per dollar of revenue. 20% means $20 profit per $100 in sales. Higher margins indicate pricing power and efficiency.',tag((pm or 0)*100,15,5,'{:.1f}','%') if pm else '--'),
-                    mrow('Operating Margin','Efficiency of core business before taxes and interest. High operating but low profit margin can reveal heavy debt costs.',tag((om or 0)*100,15,5,'{:.1f}','%') if om else '--'),
-                    mrow('Return on Equity','Profit generated per dollar of shareholder equity. Above 15% is strong. Consistently high ROE is a hallmark of companies with durable competitive advantages.',tag((roe or 0)*100,15,8,'{:.1f}','%') if roe else '--'),
-                    mrow('Return on Assets','Profit relative to all assets owned. Tells you how efficiently the business uses everything it has. Above 5% is solid.',tag((roa or 0)*100,8,3,'{:.1f}','%') if roa else '--'),
-                    mrow('Debt/Equity','How much debt relative to shareholder equity. High debt can be dangerous if earnings fall. Some industries like utilities routinely carry high debt due to predictable cash flows.','{:.1f}%'.format(deq) if deq else '--'),
-                    mrow('Current Ratio','Can the company pay short-term bills? Above 1.5=comfortable. Below 1.0=warning -- may struggle to pay obligations due within a year.',tag(cr or 0,1.5,1.0,'{:.2f}') if cr else '--'),
+                    mrow('Profit Margin','Net Profit Margin = Net Income / Revenue. How many cents of profit the company keeps for every dollar of revenue after ALL expenses including taxes and interest. A 20% margin means the company pockets $20 profit from every $100 in sales. Higher margins signal strong pricing power and operational efficiency. Shrinking margins over time are a warning sign of rising costs or increasing competition.',tag((pm or 0)*100,15,5,'{:.1f}','%') if pm else '--'),
+                    mrow('Operating Margin','EBIT Margin = Operating Income / Revenue. Similar to profit margin but measured BEFORE interest payments and taxes -- shows how efficient the core business is at turning revenue into profit. If operating margin is high but net profit margin is low, the company likely carries heavy debt (high interest costs eating into profits). Useful for comparing companies with different debt levels.',tag((om or 0)*100,15,5,'{:.1f}','%') if om else '--'),
+                    mrow('Return on Equity','ROE = Return on Equity = Net Income / Shareholders Equity. Measures how effectively the company uses shareholder money to generate profit. A 20% ROE means for every $100 of equity, the company earns $20 in profit. Above 15% is considered strong. Warren Buffett looks for consistently high ROE as a sign of durable competitive advantage (a moat). Watch for ROE inflated by high debt.',tag((roe or 0)*100,15,8,'{:.1f}','%') if roe else '--'),
+                    mrow('Return on Assets','ROA = Return on Assets = Net Income / Total Assets. Shows how much profit the company generates relative to everything it owns (cash, factories, equipment, intellectual property). Unlike ROE, ROA is not inflated by debt. Above 5% is solid. Asset-heavy industries like utilities and manufacturing typically have lower ROA than software or consumer brands.',tag((roa or 0)*100,8,3,'{:.1f}','%') if roa else '--'),
+                    mrow('D/E Ratio','D/E = Debt-to-Equity Ratio = Total Debt / Shareholders Equity. Shows how much the company relies on borrowed money vs its own capital. A D/E of 200% means the company has $2 of debt for every $1 of equity. High D/E is dangerous when earnings fall because interest payments are fixed -- it amplifies losses. Some capital-intensive industries (utilities, pipelines, REITs) routinely carry high D/E because their predictable cash flows can service the debt.','{:.1f}%'.format(deq) if deq else '--'),
+                    mrow('Current Ratio','Current Ratio = Current Assets / Current Liabilities. A liquidity measure answering: can the company pay its bills due within the next 12 months? Current assets include cash, receivables, and inventory. Current liabilities include payables and short-term debt. Above 1.5 = comfortable -- plenty of buffer. 1.0-1.5 = manageable but watch closely. Below 1.0 = a warning sign -- the company may struggle to meet near-term financial obligations.',tag(cr or 0,1.5,1.0,'{:.2f}') if cr else '--'),
                 ]
                 st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(hlth_rows) + '</tbody></table>', unsafe_allow_html=True)
 
                 st.markdown('<div class="az-section">Short Interest &amp; Growth</div>', unsafe_allow_html=True)
                 si_rows = [
-                    mrow('Short % Float','Percentage of shares being shorted. Above 10% means significant bearish bets -- but also potential for a short squeeze if stock rises unexpectedly.',tag((spf or 0)*100,20,10,'{:.1f}','%') if spf else '--'),
-                    mrow('Days to Cover','How many average trading days for all short sellers to exit. High days-to-cover means short sellers are trapped -- if stock rises they must buy, pushing price higher.',tag(sratio or 0,5,3,'{:.1f}','d') if sratio else '--'),
-                    mrow('Revenue Growth','Year-over-year change in total revenue. Growing top line means the company is expanding. Consistent double-digit growth is very attractive.',tag((rg or 0)*100,10,3,'{:.1f}','%') if rg else '--'),
-                    mrow('Earnings Growth','Year-over-year change in earnings per share. Growing faster than revenue means increasing efficiency. Shrinking earnings while revenue grows signals rising costs.',tag((eg or 0)*100,10,3,'{:.1f}','%') if eg else '--'),
+                    mrow('Short % Float','Short % of Float = the percentage of a company&apos;s freely tradeable shares (float) that are currently sold short. Short sellers borrow and sell shares betting the price will fall. Above 10% = significant bearish conviction. Above 20% = very heavily shorted -- but this also sets up a potential short squeeze: if the stock rises, short sellers must buy to cover losses, which forces the price even higher. Often called short interest as a percentage of float.',tag((spf or 0)*100,20,10,'{:.1f}','%') if spf else '--'),
+                    mrow('Days to Cover','Days to Cover = Short Interest / Average Daily Volume. Also called the Short Ratio. Estimates how many average trading days it would take ALL short sellers to buy back their shares and exit their positions. High days-to-cover (above 5) means short sellers are effectively trapped -- if good news hits and the stock starts rising, they are forced to buy to limit losses. This forced buying pushes the price higher still, which is the mechanism of a short squeeze.',tag(sratio or 0,5,3,'{:.1f}','d') if sratio else '--'),
+                    mrow('Revenue Growth','YoY Revenue Growth = Year-over-Year change in total revenue (the top line of the income statement). A growing top line means the company is selling more products or services and expanding its business. This is the foundation for long-term stock appreciation. Consistent double-digit revenue growth is highly attractive. Negative growth means the business is shrinking.',tag((rg or 0)*100,10,3,'{:.1f}','%') if rg else '--'),
+                    mrow('Earnings Growth','YoY EPS Growth = Year-over-Year change in Earnings Per Share (EPS = Net Income / Shares Outstanding). If earnings grow faster than revenue, the company is becoming more efficient and profitable -- a sign of a strengthening business. If earnings shrink while revenue grows, rising costs are eating into profits. EPS growth is what ultimately drives dividend increases and stock price appreciation over time.',tag((eg or 0)*100,10,3,'{:.1f}','%') if eg else '--'),
                 ]
                 st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(si_rows) + '</tbody></table>', unsafe_allow_html=True)
 
@@ -822,12 +822,12 @@ with tab_az:
                     rdisp = recky.replace('_',' ').title() if recky else '--'
                     rcol = '#7fff7f' if 'buy' in recky.lower() else ('#ff9999' if 'sell' in recky.lower() else '#ffe066')
                     an_rows = [
-                        mrow('Recommendation','Consensus view of Wall Street analysts. Strong Buy=expect significant outperformance. Hold=average performance expected. Analysts are not always right.',
+                        mrow('Recommendation','Wall Street Consensus Rating. Aggregates the buy/sell/hold ratings from all analysts who cover the stock. Strong Buy = most analysts expect the stock to significantly outperform the market. Buy = expected to outperform. Hold = expected to match the market. Underperform/Sell = expected to lag. Note: analysts employed by banks often have conflicts of interest -- their buy ratings outnumber sells by a large ratio. Use as one data point, not gospel.',
                             '<span style="color:'+rcol+';font-weight:600">'+rdisp+'</span> <span style="font-size:.72rem;color:#888">('+str(nana)+' analysts)</span>'),
-                        mrow('Price Target (Mean)','Average price analysts expect within 12 months. Significantly above current price means analysts see upside. Can be wrong and may have conflicts of interest.',
+                        mrow('Price Target (Mean)','Mean (Average) Price Target = the average 12-month price target across all analysts covering the stock. Represents the consensus expectation for where the stock price will be in one year. The percentage shown is the implied upside or downside from the current price. Treat this as directional guidance -- analysts frequently revise targets and are often wrong on timing.',
                             '$'+'{:.2f}'.format(am)+(
                             ' <span style="font-size:.72rem;color:'+('#7fff7f' if aus and aus>0 else '#ff9999')+'">'+('+'if aus and aus>=0 else '')+'{:.1f}%'.format(aus)+' from current</span>' if aus is not None else '')),
-                        mrow('Target Range','Range from most bearish (low) to most bullish (high) analyst. Wide range=analysts disagree significantly. Narrow=strong consensus.',
+                        mrow('Target Range','Analyst Price Target Range = the spread from the most bearish analyst&apos;s low target to the most bullish analyst&apos;s high target. A wide range (e.g. $10 to $50) means analysts fundamentally disagree about the company&apos;s prospects -- high uncertainty. A narrow range (e.g. $20 to $24) means there is strong consensus and the outlook is well-understood. Wide ranges often occur around companies undergoing major change.',
                             ('$'+'{:.2f}'.format(al)+' -- $'+'{:.2f}'.format(ahigh)) if (al and ahigh) else '--'),
                     ]
                     st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(an_rows) + '</tbody></table>', unsafe_allow_html=True)
