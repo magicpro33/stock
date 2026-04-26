@@ -3458,12 +3458,40 @@ with tab_screener:
                          type="primary" if _is_sel else "secondary"):
                 st.session_state["_inline_ticker"] = _tk
 
-    # Table
+    # Table — show a curated default column set; all columns still in Excel export
+    # Columns not in this list are hidden in the UI but kept in the DataFrame.
+    _DEFAULT_COLS = [
+        "Ticker", "Sector", "Price", "MarketCap", "P/E",
+        "OwnerEarnings", "MA50", "RangeHigh", "RangeLow", "RangePos",
+        "MFI_Signal", "Score",
+    ]
+    # Only include columns that actually exist in the saved display
+    _col_order = [c for c in _DEFAULT_COLS if c in _saved_display.columns]
+    # Append any metric-specific display columns that are enabled
+    # (Short interest, dividend cols etc) — add them after the defaults
+    _extra_cols = [
+        "Short % Float", "Days to Cover", "Short Chg",
+        "Div Yield", "Div Rate", "Payout %", "Freq",
+    ]
+    for _ec in _extra_cols:
+        if _ec in _saved_display.columns and _ec not in _col_order:
+            _col_order.append(_ec)
+
     try:
         _styled2 = _saved_display.style.map(color_score, subset=["Score"])
-        st.dataframe(_styled2, use_container_width=True, height=600)
+        st.dataframe(
+            _styled2,
+            use_container_width=True,
+            height=600,
+            column_order=_col_order,
+        )
     except Exception:
-        st.dataframe(_saved_display, use_container_width=True, height=600)
+        st.dataframe(
+            _saved_display,
+            use_container_width=True,
+            height=600,
+            column_order=_col_order,
+        )
 
     # Download button
     st.divider()
