@@ -367,80 +367,83 @@ with st.sidebar:
 
     # ── Magic Stock preset button ────────────────────────────────
     if st.button("✨ Magic Stock", use_container_width=True, key="preset_magic_stock",
-                 help="Finds stocks matching the perfect entry checklist: "
-                      "price just crossed above MA50 on heavy volume (PCV), "
+                 help="Perfect entry timing: price just crossed the MA50 on heavy volume, "
                       "OBV rising (institutional accumulation), MACD accelerating, "
-                      "RSI in the 55-70 sweet spot, no bearish divergence, "
-                      "golden cross confirmed, and price close to MA50 support "
-                      "for a low-risk entry point."):
-        # ── Filter settings ──────────────────────────────────────
+                      "RSI 55-70 sweet spot, no bearish divergence, golden cross confirmed, "
+                      "and strong earnings growth backing the technical setup."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        # Entry checklist condition: price must be ABOVE MA50 (just crossed)
-        st.session_state["tog_ma50"]           = "above"
-        # Range filter off — we want stocks breaking out, not coiling
+        st.session_state["tog_ma50"]           = "above"  # Must be above MA50 — entry checklist
         st.session_state["tog_range"]          = False
         st.session_state["slider_range_days"]  = 20
         st.session_state["slider_range_pct"]   = 15.0
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
-        # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # ── Entry checklist metric weights ────────────────────────
-        # Checklist item: "OBV rising" — institutional accumulation before the move
-        # Highest weight: this is the single best early signal that big money is buying
+        # OBV ×5 — institutional accumulation before the obvious move (volume precedes price)
+        # Research: OBV rising with flat/rising price = smart money loading quietly
         st.session_state["tog_OBV"]  = True
         st.session_state["wt_OBV"]   = 5.0
 
-        # Checklist item: "Volume 2x+ normal on breakout" — PCV measures up-day volume dominance
-        # High weight: heavy volume on the breakout confirms real covering/buying, not speculation
+        # PCV ×4 — volume surge on up-days confirms real breakout, not a fakeout
+        # Research (Deepvue/Minervini): volume must expand on breakout day to validate institutional buying
         st.session_state["tog_PCV"]  = True
         st.session_state["wt_PCV"]   = 4.0
 
-        # Checklist item: "Price just crossed above MA50" — MA50Proximity scores stocks near MA50
-        # High weight: entry near MA50 = low risk, tight stop, maximum room to run
+        # MA50Proximity ×4 — price just above MA50 = lowest-risk entry with tight stop
+        # Research: stocks entering breakouts from near the 50MA have best risk/reward
         st.session_state["tog_MA50Proximity"] = True
         st.session_state["wt_MA50Proximity"]  = 4.0
 
-        # Checklist item: "Golden cross confirmed" — 50MA above 200MA = institutional uptrend
-        # The long-term structural backdrop that makes the MA50 breakout meaningful
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 3.0
-
-        # Checklist item: "MACD accelerating" — histogram positive and growing = momentum building
-        # Confirms the breakout has real momentum behind it, not just a one-day spike
+        # MACD ×3 — histogram positive and rising = momentum accelerating
+        # Research (Schwab/Minervini): MACD line crossing signal line with rising histogram = acceleration
         st.session_state["tog_MACD"] = True
         st.session_state["wt_MACD"]  = 3.0
 
-        # Checklist item: "No bearish divergence" — price and MFI making higher highs together
-        # Rules out false breakouts where price moves but buying pressure doesn't confirm
+        # NoBearDiv ×3 — price and MFI confirming each other = no hidden distribution
+        # Research: bearish divergence is the primary false-breakout warning sign
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 3.0
 
-        # Checklist item: "RSI in the 55-70 sweet spot" — uptrend confirmed, not yet overbought
-        # RSI below 55 = no real momentum. RSI above 70 = extended, higher reversal risk.
+        # RSI ×3 — 55-70 range: uptrend confirmed, not yet overbought
+        # Research (Schwab): RSI 50-70 on a breakout = trend with room to run
         st.session_state["tog_RSI"] = True
         st.session_state["wt_RSI"]  = 3.0
 
-        # MFI sweet spot — money flowing in without being overbought (55-75 range)
-        # Confirms buying pressure is sustained, not a short-term spike
+        # GoldenCross ×2 — 50MA above 200MA = long-term institutional uptrend backdrop
+        # Research: 90%+ of successful breakouts occur with MA stack aligned (Minervini)
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 2.0
+
+        # MFISweetSpot ×2 — money flowing in, not overbought (MFI 55-75 range)
         st.session_state["tog_MFISweetSpot"] = True
         st.session_state["wt_MFISweetSpot"]  = 2.0
+
+        # EarningsGrowth ×2 — fundamental validation: institutions buy earnings acceleration
+        # Research (Deepvue): 20%+ EPS growth is primary institutional accumulation trigger
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # ROIC ×1 — quality filter: high ROIC companies have durable competitive advantages
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 1.0
 
         st.rerun()
 
     # ── Short Squeeze preset button ──────────────────────────────
     if st.button("🎯 Short Squeeze", use_container_width=True, key="preset_short_squeeze",
-                 help="Finds stocks with high short interest that are starting to move up. "
-                      "High short float = lots of fuel. Rising price + volume = the trigger. "
-                      "Shorts are forced to cover, accelerating the move."):
+                 help="Finds stocks with high short interest starting to move up. "
+                      "Short float >15% = fuel. Rising OBV + volume surge = the trigger. "
+                      "DTC above 5 = shorts trapped. Price crossing MA50 forces covering."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"   # price must be recovering
+        # MA50 OFF — squeezes happen both above and below MA50;
+        # forcing above-MA50 filter misses early-stage squeezes where price is just recovering
+        st.session_state["tog_ma50"]           = "off"
         st.session_state["tog_range"]          = False
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
@@ -448,27 +451,46 @@ with st.sidebar:
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
-        # Short squeeze core signals
+
+        # ShortSqueeze ×5 — composite short interest score: float %, DTC, covering direction
+        # Research (Fintel/LuxAlgo): DTC >8-10 = high squeeze probability; float >20% = maximum fuel
         st.session_state["tog_ShortSqueeze"] = True
-        st.session_state["wt_ShortSqueeze"]  = 5.0   # primary signal
-        st.session_state["tog_OBV"]          = True
-        st.session_state["wt_OBV"]           = 3.0   # volume confirming move
-        st.session_state["tog_RSI"]          = True
-        st.session_state["wt_RSI"]           = 2.0   # momentum building
-        st.session_state["tog_MACD"]         = True
-        st.session_state["wt_MACD"]          = 2.0   # acceleration
-        st.session_state["tog_GoldenCross"]  = True
-        st.session_state["wt_GoldenCross"]   = 1.0   # longer-term trend support
+        st.session_state["wt_ShortSqueeze"]  = 5.0
+
+        # OBV ×4 — volume is the squeeze trigger detector
+        # Research: OBV spike while shorted stock rises = shorts panic-covering + new buyers entering
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 4.0
+
+        # PCV ×3 — dominant up-day volume = covering in progress
+        # Research (Scanz): volume surge on up-days is the primary squeeze confirmation signal
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 3.0
+
+        # RSI ×2 — momentum building from oversold toward 50-60 = early squeeze phase
+        # Research: RSI moving from oversold toward overbought in heavily shorted stock = demand building
+        st.session_state["tog_RSI"]  = True
+        st.session_state["wt_RSI"]   = 2.0
+
+        # MACD ×2 — bullish crossover = momentum shift confirmed
+        # Research: MACD line crossing signal line in heavily shorted stock = buying momentum gaining strength
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 2.0
+
+        # NoBearDiv ×1 — price and MFI rising together = squeeze is real, not a dead-cat bounce
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 1.0
+
         st.rerun()
 
     # ── High Dividend preset button ──────────────────────────────
     if st.button("💰 High Dividend", use_container_width=True, key="preset_high_dividend",
                  help="Finds stocks with the highest sustainable dividend yield. "
                       "Scores on yield, payout safety, and payment frequency. "
-                      "Monthly payers with yields above 4% and sustainable payout ratios score highest."):
+                      "Filters for earnings growth to ensure the dividend can keep growing."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"    # dividend stocks can be anywhere vs MA50
+        st.session_state["tog_ma50"]           = "off"   # yield hunters care about income, not price position
         st.session_state["tog_range"]          = False
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
@@ -477,66 +499,85 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # DividendScore ×5 — primary signal: composite yield + safety + frequency
+        # DividendScore ×5 — composite: yield % + payout sustainability + payment frequency
+        # Research (Dividend.com/ChartMill): sustainable yield + payout <60% + frequency = quality dividend
         st.session_state["tog_DividendScore"] = True
         st.session_state["wt_DividendScore"]  = 5.0
 
-        # OE_Yield ×2 — owner earnings yield: ensures company actually generates
-        # cash to sustain the dividend, not just paying from debt
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 2.0
-
-        # Piotroski ×1 — financial health check: dividends from weak companies get cut
+        # Piotroski ×3 — financial health: 9-point system flags companies that will cut dividends
+        # Research (Quant-Investing): Piotroski F-Score ≥8 combined with yield outperforms by 200%+
         st.session_state["tog_Piotroski"] = True
-        st.session_state["wt_Piotroski"]  = 1.0
+        st.session_state["wt_Piotroski"]  = 3.0
 
-        # ROIC ×1 — ensures company has durable returns to keep paying
+        # EarningsGrowth ×2 — growing earnings = growing dividend; the best dividends grow over time
+        # Research (Dividend.com): earnings growth is primary indicator of dividend sustainability
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # ROIC ×2 — high ROIC companies generate the durable excess cash that funds reliable dividends
+        # Research: ROIC above WACC = company creates value and can sustain/grow the dividend
         st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 1.0
+        st.session_state["wt_ROIC"]  = 2.0
+
+        # RevenueGrowth ×1 — revenue growth sustains earnings which sustains the dividend
+        st.session_state["tog_RevenueGrowth"] = True
+        st.session_state["wt_RevenueGrowth"]  = 1.0
+
+        # OBV ×1 — rising OBV on dividend stocks = institutions adding to income positions
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 1.0
 
         st.rerun()
 
     # ── Low Price Position preset button ──────────────────────────
     if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
-                 help="Finds stocks trading at or near the bottom 10% of their recent price range. "
-                      "Price near the range low with rising OBV = coiling for a breakout. "
-                      "The lower the position in the range, the more upside before hitting resistance."):
+                 help="Finds stocks in the bottom 10-15% of their recent range with rising OBV. "
+                      "Price near the range low = maximum upside before resistance. "
+                      "Rising OBV at the low = accumulation, not distribution. "
+                      "Quality fundamentals confirm it's cheap temporarily, not for a reason."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        # MA50 filter off — stocks near range low may be below MA50 and still valid setups
-        st.session_state["tog_ma50"]           = "off"
-        # Range filter ON — tight range confirms consolidation, not a freefall
-        st.session_state["tog_range"]          = True
-        st.session_state["slider_range_days"]  = 30    # 30-day window — enough to define current range
-        st.session_state["slider_range_pct"]   = 15.0  # max 15% width — coiling, not crashing
+        st.session_state["tog_ma50"]           = "off"   # near-low stocks may be below MA50 — still valid
+        st.session_state["tog_range"]          = True    # tight range = coiling, not crashing
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 15.0   # max 15% width — consolidation, not freefall
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
         st.session_state["tog_rev_filter"]     = False
-        # ── Turn off all metrics first ────────────────────────────
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # RangePosScore ×5 — CORE: score = 1 - RangePos, so 1.0 = price at range LOW
-        # This is the primary sort — stocks at the very bottom of their range score highest
+        # RangePosScore ×5 — CORE: 1.0 = price at range low, 0.0 = at range high
+        # Primary sort: stocks at the bottom of a tight 30-day range score highest
         st.session_state["tog_RangePosScore"] = True
         st.session_state["wt_RangePosScore"]  = 5.0
 
-        # OBV ×3 — rising OBV near the range low = accumulation, not distribution
-        # Distinguishes a coiling setup from a stock that's low for a reason
+        # OBV ×4 — THE critical filter: rising OBV at range low = accumulation not distribution
+        # Research (Granville/Heygotrade): OBV rising while price flat/low = institutional buying quietly
+        # A stock low for a bad reason has FALLING OBV — this separates the two
         st.session_state["tog_OBV"]  = True
-        st.session_state["wt_OBV"]   = 3.0
+        st.session_state["wt_OBV"]   = 4.0
 
-        # MFISweetSpot ×2 — buying pressure present even while price sits low
-        # Confirms money is flowing in quietly before the breakout
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 2.0
-
-        # NoBearDiv ×2 — price and MFI not diverging = the low is not a warning sign
+        # NoBearDiv ×2 — price and MFI not diverging = the low is a buying opportunity, not a warning
+        # Research: bullish divergence (price low, OBV higher low) = classic bottom formation signal
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 2.0
 
-        # GoldenCross ×1 — long-term uptrend intact even if short-term price pulled back
+        # ROIC ×2 — quality check: high ROIC companies bounce; low ROIC companies stay down
+        # Research: cheap temporarily vs cheap for good reason — ROIC separates the two
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 2.0
+
+        # EarningsGrowth ×2 — growing earnings at the range low = coiling before re-rating
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # MFISweetSpot ×1 — money flowing in quietly even at the range low
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
+
+        # GoldenCross ×1 — long-term uptrend intact: pullback to range low is a dip, not a downtrend
         st.session_state["tog_GoldenCross"] = True
         st.session_state["wt_GoldenCross"]  = 1.0
 
@@ -544,62 +585,65 @@ with st.sidebar:
 
     # ── Insider Buying preset button ──────────────────────────────
     if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
-                 help="Searches for stocks showing signs of institutional/insider accumulation: "
-                      "rising OBV while price is flat, strong money flow, dominant up-day volume. "
-                      "Uses a 60-day range window — the sweet spot for catching slow institutional accumulation."): 
-        # ── Filter settings ──────────────────────────────────────
-        st.session_state["slider_max_price"]   = 200    # Wider price range — insiders buy mid-cap too
+                 help="Finds stocks showing institutional/smart-money accumulation signals. "
+                      "Rising OBV while price consolidates = institutions loading quietly. "
+                      "Strong earnings growth (20%+) is the #1 institutional buy trigger. "
+                      "60-day window captures slow multi-week institutional accumulation."):
+        st.session_state["slider_max_price"]   = 200
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"  # Insiders buying into strength — above 50MA
-        st.session_state["tog_range"]          = True   # Insiders accumulate in a quiet range
-        st.session_state["slider_range_days"]  = 60     # 60-day window — institutional accumulation takes months
-        st.session_state["slider_range_pct"]   = 18.0   # Slightly wider — 60-day ranges naturally have more width
-        st.session_state["slider_mfi_period"]  = 14     # Standard MFI period
-        # ── Turn off all metrics first ────────────────────────────
+        st.session_state["tog_ma50"]           = "above"  # institutions buy into established uptrends
+        st.session_state["tog_range"]          = True     # institutions accumulate in quiet ranges
+        st.session_state["slider_range_days"]  = 60       # 60-day window captures multi-week accumulation
+        st.session_state["slider_range_pct"]   = 18.0    # slightly wider for 60-day natural range
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
         for _k in METRICS:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # ── Insider accumulation metric weights ───────────────────
-        # OBV ×4 — CORE: insiders can't hide volume. Rising OBV with flat price = pure accumulation
+        # OBV ×5 — THE signature of institutional accumulation
+        # Research (Granville/Deepvue/Kavout): rising OBV during price consolidation = institutions loading
+        # "Institutions cannot hide their volume footprints" — OBV reveals the invisible buying
         st.session_state["tog_OBV"]  = True
-        st.session_state["wt_OBV"]   = 4.0
+        st.session_state["wt_OBV"]   = 5.0
 
-        # GoldenCross ×3 — insiders buy into confirmed long-term uptrends (50MA > 200MA)
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 3.0
+        # EarningsGrowth ×4 — PRIMARY institutional buy trigger (20%+ EPS growth)
+        # Research (Deepvue/Minervini): 20%+ earnings growth is the single biggest predictor
+        # of institutional accumulation — funds buy companies beating and raising estimates
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 4.0
 
-        # MFISweetSpot ×3 — sustained buying pressure without overbought risk
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 3.0
-
-        # PCV ×3 — heavy up-day volume = insiders buying aggressively on certain days
+        # PCV ×3 — dominant up-day volume = institutions buying aggressively on specific days
+        # Research: volume expansion on up-days vs contraction on down-days = institutional accumulation pattern
         st.session_state["tog_PCV"]  = True
         st.session_state["wt_PCV"]   = 3.0
 
-        # NoBearDiv ×2 — price and MFI aligned higher = accumulation is genuine
+        # ROIC ×3 — institutions target high-ROIC companies with durable competitive advantages
+        # Research (Minervini): institutional portfolios concentrate in companies with 15%+ ROIC
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 3.0
+
+        # MFISweetSpot ×2 — sustained money inflow without overbought readings = quiet accumulation
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 2.0
+
+        # NoBearDiv ×2 — price and MFI aligned: no hidden distribution behind the accumulation
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 2.0
 
-        # MACD ×2 — momentum building confirms the accumulation is starting to move price
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 2.0
+        # GoldenCross ×2 — institutions buy Stage 2 uptrends (50MA above 200MA)
+        # Research (Minervini): 90%+ of institutional buying occurs in confirmed Stage 2 uptrends
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 2.0
 
-        # RangePosScore ×2 — insiders buy near the low, not after it's already moved
+        # RevenueGrowth ×1 — revenue growth validates that earnings growth is real, not one-time
+        st.session_state["tog_RevenueGrowth"] = True
+        st.session_state["wt_RevenueGrowth"]  = 1.0
+
+        # RangePosScore ×1 — institutions buy near the range low, not after a 30% run
         st.session_state["tog_RangePosScore"] = True
-        st.session_state["wt_RangePosScore"]  = 2.0
-
-        # ROIC ×2 — insiders buy companies they know are earning well on capital
-        st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 2.0
-
-        # RSI ×1 — confirm momentum is building without being overbought
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 1.0
-
-        # EarningsGrowth ×1 — insiders know earnings direction ahead of the market
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
+        st.session_state["wt_RangePosScore"]  = 1.0
 
         st.rerun()
 
