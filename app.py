@@ -583,6 +583,89 @@ with st.sidebar:
 
         st.rerun()
 
+    # ── Breakout Setup preset button ─────────────────────────────
+    if st.button("🚀 Breakout Setup", use_container_width=True, key="preset_breakout_setup",
+                 help="Finds stocks coiling tight at the range low, ready to explode through resistance. "
+                      "The exact pattern seen in RAIL (+183%), SEZL (+115%), PM (+30%). "
+                      "Tight 30-day range + price at low + OBV rising + volume building = "
+                      "maximum compression before breakout."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 OFF — breakouts start from BELOW the MA50
+        # The breakout IS the MA50 crossing event — you want in before it happens
+        # Forcing above-MA50 would have missed RAIL entirely
+        st.session_state["tog_ma50"]           = "off"
+        # Range filter ON — tight coil required, NOT a freefall
+        # 30-day window + 12% max width = maximum compression = maximum explosive energy
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 12.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # RangePosScore ×5 — CORE: price must be at the range LOW
+        # All three chart examples (PM, RAIL, SEZL) were at range low before exploding
+        # Score = 1 - RangePos, so 1.0 = price at absolute range low = maximum upside to resistance
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+
+        # OBV ×5 — the invisible signal that the breakout is loading
+        # Rising OBV while price is flat/low = smart money quietly accumulating before the move
+        # RAIL's OBV was diverging upward while price sat at lows — that was the tell
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # PCV ×4 — volume surge on up-days = breakout is real, not a fakeout
+        # Every breakout in the three charts was confirmed by extreme up-day volume dominance
+        # Without PCV confirmation, range-low breakouts fail 60%+ of the time
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 4.0
+
+        # MA50Proximity ×3 — price near MA50 = lowest-risk entry, tight stop below it
+        # PM and SEZL both broke from just under/at the MA50 — maximum risk/reward entry
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 3.0
+
+        # GoldenCross ×3 — 50MA curling up toward 200MA = structural support forming below
+        # All three charts had the MA stack aligning below price as the breakout happened
+        # The aligned MA stack is what makes breakouts hold and not immediately reverse
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 3.0
+
+        # MACD ×3 — histogram turning positive = coil energy releasing, momentum starting
+        # MACD catching fire before the obvious price breakout = early warning signal
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
+
+        # NoBearDiv ×2 — price and MFI confirming each other at the low
+        # Bullish divergence (price low, OBV higher low) = classic accumulation bottom signal
+        # Bearish divergence at the low = trap, not a breakout setup
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # RSI ×2 — RSI building from 40-55 range = momentum recovering without being overbought
+        # A breakout from range low with RSI already at 70+ is extended — lower probability
+        # RSI in recovery zone (40-60) at the range low = fuel still available for the move
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 2.0
+
+        # MFISweetSpot ×1 — money quietly flowing in at the range low
+        # Light weight — supporting signal, not a primary driver for this setup
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
+
+        # EarningsGrowth ×1 — light fundamental filter only
+        # RAIL was a cyclical industrial — strict fundamental filters would have excluded it
+        # These breakouts are primarily technical; fundamentals are a light tiebreaker only
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+
+        st.rerun()
+
     # ── Insider Buying preset button ──────────────────────────────
     if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
                  help="Finds stocks showing institutional/smart-money accumulation signals. "
