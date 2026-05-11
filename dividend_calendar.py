@@ -219,24 +219,55 @@ def fetch_ex_dates_live(tickers_tuple):
     prog.empty()
     return result
 
+def _make_yf_session():
+    # Use browser-like headers to avoid Streamlit Cloud IP rate limits
+    # Yahoo Finance blocks raw Python requests from shared cloud IPs
+    import requests
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/120.0.0.0 Safari/537.36'),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    })
+    return s
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym):
     sym = sym.upper().strip()
-    for attempt in range(2):
+    delays = [0, 2, 5]  # seconds between attempts
+    last_err = 'No data returned'
+    for attempt, delay in enumerate(delays):
+        if delay > 0:
+            time.sleep(delay)
         try:
-            t    = yf.Ticker(sym)
+            # Pass browser session to yfinance to bypass rate limiting
+            sess = _make_yf_session()
+            t    = yf.Ticker(sym, session=sess)
             info = t.info or {}
-            # yfinance can return {} on rate limit -- retry once
-            if not info and attempt == 0:
-                time.sleep(1.5)
+            # Empty dict = rate limited or bad ticker
+            if not info:
+                last_err = 'Yahoo Finance returned no data (rate limit or invalid ticker)'
+                continue
+            # Must have at least a price to be useful
+            has_price = (info.get('currentPrice') or info.get('regularMarketPrice')
+                         or info.get('navPrice') or info.get('previousClose'))
+            if not has_price and attempt < len(delays) - 1:
+                last_err = 'No price data returned yet'
                 continue
             hist = t.history(period='1y')
             divs = t.dividends
             return info, hist, divs, None
         except Exception as e:
-            if attempt == 0: time.sleep(1.5)
-            else: return {}, pd.DataFrame(), pd.Series(dtype=float), str(e)
-    return {}, pd.DataFrame(), pd.Series(dtype=float), 'No data returned'
+            last_err = str(e)
+            # Rate limit error -- wait longer before next attempt
+            if 'rate' in last_err.lower() or '429' in last_err or 'too many' in last_err.lower():
+                if attempt < len(delays) - 1:
+                    time.sleep(3)
+    return {}, pd.DataFrame(), pd.Series(dtype=float), last_err
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_meta():
@@ -544,9 +575,14 @@ with tab_az:
         with st.spinner('Fetching ' + az_ticker.upper() + '...'):
             ai, ah, ad, ae = fetch_stock_analysis(az_ticker)
         if ae or not ai:
-            st.error('Could not load data for ' + az_ticker.upper() + '. ' +
-                'This may be a rate limit, invalid ticker, or yfinance outage. ' +
-                'Try again in 30 seconds. Error: ' + str(ae or 'empty response'))
+            st.error('Could not load data for ' + az_ticker.upper() + '.')
+            st.info(
+                'Yahoo Finance rate limits shared cloud IPs. Try these steps:\n'
+                '1. Wait 15-30 seconds and click Analyze again\n'
+                '2. Check the ticker is correct (e.g. AKAM not akam -- it auto-uppercases)\n'
+                '3. Try a different ticker first to warm up the session, then retry\n'
+                'Error detail: ' + str(ae or 'empty response')
+            )
         else:
             sym   = az_ticker.upper().strip()
             name  = ai.get('longName') or ai.get('shortName') or sym
