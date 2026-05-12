@@ -1,12 +1,12 @@
 {
-  "scanned_at_utc": "2026-05-11 11:44 UTC",
-  "scanned_at_est": "2026-05-11 11:44 AM UTC",
-  "elapsed_minutes": 63.8,
-  "total_tickers": 5751,
-  "valid_results": 5540,
+  "scanned_at_utc": "2026-05-12 11:17 UTC",
+  "scanned_at_est": "2026-05-12 11:17 AM UTC",
+  "elapsed_minutes": 93.3,
+  "total_tickers": 5754,
+  "valid_results": 5023,
   "exchanges": {
     "sp500": 501,
-    "nyse": 2401,
-    "nasdaq": 3296
+    "nyse": 2402,
+    "nasdaq": 3298
   }
 }
