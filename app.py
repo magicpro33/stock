@@ -583,6 +583,68 @@ with st.sidebar:
 
         st.rerun()
 
+    # ── Magic Volume preset button ────────────────────────────────
+    if st.button("⚡ Magic Volume", use_container_width=True, key="preset_magic_volume",
+                 help="Finds stocks with an unusual surge in buying volume before the price move is obvious. "
+                      "OBV rising sharply + PCV dominant + MFI sweet spot = volume signature of a stock "
+                      "about to break out. Catches the move BEFORE it shows up in price."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 above — volume surges on stocks already in uptrends are more reliable
+        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # OBV ×5 — the primary volume signal: cumulative buying vs selling pressure
+        # A sudden OBV surge while price is flat = smart money loading before the move
+        # Volume precedes price — OBV is the earliest leading indicator available
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # PCV ×5 — price-confirmed volume: measures whether volume happens on up-days vs down-days
+        # Score of 1.0 = ALL volume is on up-days = pure buying with zero distribution
+        # The single best measure of whether a volume spike is bullish or just noise
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 5.0
+
+        # MFISweetSpot ×4 — Money Flow Index in 55-75 range: buying pressure without being overbought
+        # MFI is a volume-weighted RSI — it shows BOTH price movement AND volume strength together
+        # Sweet spot means money is flowing in aggressively but the move hasn't exhausted itself
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 4.0
+
+        # NoBearDiv ×3 — price and MFI making higher highs together = volume surge is confirmed real
+        # Bearish divergence on a volume surge = distribution (selling into the spike), not accumulation
+        # This filter eliminates the false volume spikes caused by selling into strength
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 3.0
+
+        # MFI ×3 — raw MFI score: measures total money flow strength over the period
+        # Complements MFISweetSpot — ensures the money flow is both strong AND in the right range
+        st.session_state["tog_MFI"] = True
+        st.session_state["wt_MFI"]  = 3.0
+
+        # MACD ×2 — momentum catching up to the volume surge = price starting to follow the money
+        # Volume leads, price follows — MACD turning positive confirms price is beginning to respond
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 2.0
+
+        # RSI ×1 — light momentum confirmation: not overbought, trend is up
+        # Low weight — volume is the story here, RSI is a minor tiebreaker only
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 1.0
+
+        # GoldenCross ×1 — structural backdrop: volume surges in aligned uptrends follow through more
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
+
+        st.rerun()
+
     # ── Breakout Setup preset button ─────────────────────────────
     if st.button("🚀 Breakout Setup", use_container_width=True, key="preset_breakout_setup",
                  help="Finds stocks coiling tight at the range low, ready to explode through resistance. "
