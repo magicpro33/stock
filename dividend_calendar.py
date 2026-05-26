@@ -711,6 +711,8 @@ with tab_az:
     with az1:
         az_ticker = st.text_input('Ticker symbol', placeholder='e.g. ET, WPM, DOC', key='az_ticker')
         az_btn = st.button('Analyze', type='primary', key='az_analyze')
+    # Trigger fetch on button click, store in session_state so
+    # the number_input below doesn't reset the whole analysis
     if az_btn and az_ticker:
         _has_api = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
         _spin_msg = ('Fetching live data for ' + az_ticker.upper() +
@@ -720,7 +722,15 @@ with tab_az:
             ai, ah, ad, ae = fetch_stock_analysis(az_ticker)
         if ae or not ai:
             st.error('Could not load ' + az_ticker.upper() + ': ' + str(ae or 'no data returned'))
+            st.session_state.pop('az_result', None)  # clear stale result
         else:
+            # Save result so reruns (e.g. from number_input) keep it
+            st.session_state['az_result'] = (ai, ah, ad)
+    # Render from session_state -- survives reruns caused by number_input
+    if 'az_result' in st.session_state:
+        ai, ah, ad = st.session_state['az_result']
+        ae = None
+    if 'az_result' in st.session_state:
             sym   = az_ticker.upper().strip()
             name  = ai.get('longName') or ai.get('shortName') or sym
             sec   = ai.get('sector') or 'Unknown'
