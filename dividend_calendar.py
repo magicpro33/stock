@@ -219,24 +219,184 @@ def fetch_ex_dates_live(tickers_tuple):
     prog.empty()
     return result
 
+# ── GitHub scan data (loaded once, keyed by ticker) ─────────────────────
+_SCAN_URL = ('https://raw.githubusercontent.com/magicpro33/stock'
+             '/main/data/stock_data.json.gz')
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_scan_dict():
+    try:
+        import urllib.request as ur, gzip as gz_
+        req = ur.Request(_SCAN_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with ur.urlopen(req, timeout=15) as r:
+            raw = json.loads(gz_.decompress(r.read()))
+        return {x['Ticker']: x for x in raw if isinstance(x, dict) and x.get('Ticker')}
+    except Exception:
+        return {}
+
+def _hist_to_df(hist_dict):
+    if not hist_dict or not isinstance(hist_dict, dict):
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame({
+            'Open':   hist_dict.get('open', []),
+            'High':   hist_dict.get('high', []),
+            'Low':    hist_dict.get('low', []),
+            'Close':  hist_dict.get('close', []),
+            'Volume': hist_dict.get('volume', []),
+        }, index=pd.to_datetime(hist_dict.get('dates', [])))
+        return df.dropna(subset=['Close'])
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_live_data(sym):
+    # Use Anthropic Claude API with web_search to get live stock data.
+    # This bypasses all IP-level rate limiting since Claude fetches from the web.
+    # Requires ANTHROPIC_API_KEY in Streamlit secrets.
+    try:
+        api_key = st.secrets.get('ANTHROPIC_API_KEY', '')
+        if not api_key:
+            return {}
+        import urllib.request as ur, ssl
+        ctx = ssl.create_default_context()
+        prompt = (
+            'Fetch the latest stock data for ticker ' + sym + ' and return ONLY a JSON object '
+            'with exactly these fields (use null for unavailable fields): '
+            '{"longName": str, "sector": str, "industry": str, '
+            '"currentPrice": float, "marketCap": float, '
+            '"trailingPE": float, "forwardPE": float, '
+            '"priceToBook": float, "priceToSalesTrailing12Months": float, '
+            '"beta": float, "profitMargins": float, "operatingMargins": float, '
+            '"returnOnEquity": float, "returnOnAssets": float, '
+            '"debtToEquity": float, "currentRatio": float, '
+            '"revenueGrowth": float, "earningsGrowth": float, '
+            '"trailingAnnualDividendYield": float, "trailingAnnualDividendRate": float, '
+            '"payoutRatio": float, "exDividendDate": str, '
+            '"fiftyTwoWeekHigh": float, "fiftyTwoWeekLow": float, '
+            '"shortPercentOfFloat": float, "shortRatio": float, '
+            '"targetMeanPrice": float, "targetLowPrice": float, '
+            '"targetHighPrice": float, "numberOfAnalystOpinions": int, '
+            '"recommendationKey": str} '
+            'Return ONLY the JSON, no explanation, no markdown, no extra text. '
+            'For revenueGrowth/earningsGrowth/profitMargins/operatingMargins/'
+            'returnOnEquity/returnOnAssets/payoutRatio use decimal form (0.15 not 15%). '
+            'For shortPercentOfFloat use decimal form (0.05 not 5%).'
+        )
+        body = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 800,
+            'tools': [{'type': 'web_search_20250305', 'name': 'web_search'}],
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode('utf-8')
+        req = ur.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=body,
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'anthropic-beta': 'web-search-2025-03-05',
+            },
+            method='POST'
+        )
+        with ur.urlopen(req, timeout=30, context=ctx) as r:
+            resp = json.loads(r.read())
+        # Extract text content from response
+        text = ''
+        for block in resp.get('content', []):
+            if block.get('type') == 'text':
+                text += block.get('text', '')
+        # Parse JSON from response
+        text = text.strip()
+        # Strip markdown code fences if present
+        if text.startswith('```'):
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:]
+        text = text.strip()
+        data = json.loads(text)
+        # Convert exDividendDate string to Unix timestamp if present
+        if data.get('exDividendDate') and isinstance(data['exDividendDate'], str):
+            try:
+                import datetime
+                for fmt in ('%Y-%m-%d', '%B %d, %Y', '%b %d, %Y', '%m/%d/%Y'):
+                    try:
+                        dt = datetime.datetime.strptime(data['exDividendDate'], fmt)
+                        data['exDividendDate'] = int(dt.timestamp())
+                        break
+                    except ValueError:
+                        continue
+            except Exception:
+                data['exDividendDate'] = None
+        return data
+    except Exception:
+        return {}
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym):
     sym = sym.upper().strip()
-    for attempt in range(2):
-        try:
-            t    = yf.Ticker(sym)
-            info = t.info or {}
-            # yfinance can return {} on rate limit -- retry once
-            if not info and attempt == 0:
-                time.sleep(1.5)
-                continue
-            hist = t.history(period='1y')
-            divs = t.dividends
-            return info, hist, divs, None
-        except Exception as e:
-            if attempt == 0: time.sleep(1.5)
-            else: return {}, pd.DataFrame(), pd.Series(dtype=float), str(e)
-    return {}, pd.DataFrame(), pd.Series(dtype=float), 'No data returned'
+    # Layer 1: scan data (price history + screener signals, always fast)
+    scan_dict = _load_scan_dict()
+    rec = scan_dict.get(sym, {})
+    hist = _hist_to_df(rec.get('_hist')) if rec else pd.DataFrame()
+    divs = pd.Series(dtype=float)
+    # Layer 2: live data via Claude web search (fundamentals + analyst data)
+    live = _fetch_live_data(sym)
+    # If we have neither source, error
+    if not rec and not live:
+        return {}, pd.DataFrame(), divs, (
+            sym + ' not found. Check the ticker symbol is correct '
+            '(e.g. IONQ, AAPL, ET). If correct, the live data fetch '
+            'may need ANTHROPIC_API_KEY set in Streamlit secrets.')
+    # Merge: live data takes priority, scan fills in signals + history
+    info = {}
+    # Start with live data (full fundamentals)
+    info.update(live)
+    # Fill in from scan anything not provided by live
+    if rec:
+        scan_base = {
+            'shortName':                  rec.get('Ticker', sym),
+            'longName':                   rec.get('Ticker', sym),
+            'sector':                     rec.get('Sector'),
+            'currentPrice':               rec.get('Price'),
+            'regularMarketPrice':         rec.get('Price'),
+            'marketCap':                  rec.get('MarketCap'),
+            'trailingPE':                 rec.get('P/E'),
+            'fiftyTwoWeekHigh':           rec.get('RangeHigh'),
+            'fiftyTwoWeekLow':            rec.get('RangeLow'),
+            'trailingAnnualDividendYield': (rec.get('DividendYieldPct') or 0) / 100
+                                          if rec.get('DividendYieldPct') else 0,
+            'trailingAnnualDividendRate': rec.get('DividendRate'),
+            'dividendRate':               rec.get('DividendRate'),
+            'payoutRatio':                (rec.get('DividendPayoutRatio') or 0) / 100
+                                          if rec.get('DividendPayoutRatio') else None,
+            'exDividendDate':             rec.get('ExDividendDate'),
+            'shortPercentOfFloat':        (rec.get('ShortPctFloatRaw') or 0) / 100
+                                          if rec.get('ShortPctFloatRaw') else None,
+            'shortRatio':                 rec.get('DaysToCover'),
+            'revenueGrowth':              (rec.get('RevenueGrowth') or 0) / 100
+                                          if rec.get('RevenueGrowth') else None,
+            'earningsGrowth':             (rec.get('EarningsGrowth') or 0) / 100
+                                          if rec.get('EarningsGrowth') else None,
+        }
+        for k, v in scan_base.items():
+            if not info.get(k) and v is not None:
+                info[k] = v
+    # Always add screener signal scores from scan (not in live data)
+    if rec:
+        info.update({
+            '_rsi_score':    rec.get('RSI'),
+            '_macd_score':   rec.get('MACD'),
+            '_obv_score':    rec.get('OBV'),
+            '_gc_score':     rec.get('GoldenCross'),
+            '_ma50_val':     rec.get('MA50'),
+            '_mfi_score':    rec.get('MFI'),
+            '_piotroski':    rec.get('Piotroski'),
+            '_range_pos':    rec.get('RangePct'),
+            '_short_squeeze':rec.get('ShortSqueeze'),
+        })
+    return info, hist, divs, None
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_meta():
@@ -536,17 +696,30 @@ with tab_calc:
 with tab_az:
     st.markdown('<div class="section-hdr">Stock Analyzer</div>', unsafe_allow_html=True)
     st.markdown('Enter any ticker for a full breakdown with metric explanations.')
+    # Show setup tip if no API key configured
+    _has_key = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
+    if not _has_key:
+        st.info(
+            'For live fundamental data (P/B, P/S, Beta, Margins, Analyst targets), '
+            'add your Anthropic API key to Streamlit secrets:\n'
+            '1. Click the 3-dot menu (top right) -> Settings -> Secrets\n'
+            '2. Add: ANTHROPIC_API_KEY = "sk-ant-..."\n'
+            'Without it, the analyzer still works using your scan data '
+            'for price history, technicals, and dividend metrics.'
+        )
     az1, az2 = st.columns([2,3])
     with az1:
         az_ticker = st.text_input('Ticker symbol', placeholder='e.g. ET, WPM, DOC', key='az_ticker')
         az_btn = st.button('Analyze', type='primary', key='az_analyze')
     if az_btn and az_ticker:
-        with st.spinner('Fetching ' + az_ticker.upper() + '...'):
+        _has_api = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
+        _spin_msg = ('Fetching live data for ' + az_ticker.upper() +
+                     ' via web search...' if _has_api else
+                     'Loading scan data for ' + az_ticker.upper() + '...')
+        with st.spinner(_spin_msg):
             ai, ah, ad, ae = fetch_stock_analysis(az_ticker)
         if ae or not ai:
-            st.error('Could not load data for ' + az_ticker.upper() + '. ' +
-                'This may be a rate limit, invalid ticker, or yfinance outage. ' +
-                'Try again in 30 seconds. Error: ' + str(ae or 'empty response'))
+            st.error('Could not load ' + az_ticker.upper() + ': ' + str(ae or 'no data returned'))
         else:
             sym   = az_ticker.upper().strip()
             name  = ai.get('longName') or ai.get('shortName') or sym
