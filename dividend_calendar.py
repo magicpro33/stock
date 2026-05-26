@@ -219,7 +219,7 @@ def fetch_ex_dates_live(tickers_tuple):
     prog.empty()
     return result
 
-# ── GitHub scan data (loaded once, keyed by ticker) ─────────────────────
+# ── Scan data helpers (GitHub nightly dump) ──────────────────────────────
 _SCAN_URL = ('https://raw.githubusercontent.com/magicpro33/stock'
              '/main/data/stock_data.json.gz')
 
@@ -249,43 +249,61 @@ def _hist_to_df(hist_dict):
     except Exception:
         return pd.DataFrame()
 
+# Fields the analyzer uses -- used to detect what is missing after yfinance
+_YF_FIELDS = [
+    'longName', 'sector', 'industry',
+    'currentPrice', 'marketCap',
+    'trailingPE', 'forwardPE',
+    'priceToBook', 'priceToSalesTrailing12Months',
+    'beta', 'profitMargins', 'operatingMargins',
+    'returnOnEquity', 'returnOnAssets',
+    'debtToEquity', 'currentRatio',
+    'revenueGrowth', 'earningsGrowth',
+    'trailingAnnualDividendYield', 'trailingAnnualDividendRate',
+    'payoutRatio', 'exDividendDate',
+    'fiftyTwoWeekHigh', 'fiftyTwoWeekLow',
+    'shortPercentOfFloat', 'shortRatio',
+    'targetMeanPrice', 'targetLowPrice', 'targetHighPrice',
+    'numberOfAnalystOpinions', 'recommendationKey',
+]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_yfinance(sym):
+    # Step 1: try yfinance directly (works when not rate-limited)
+    try:
+        import yfinance as yf
+        t    = yf.Ticker(sym)
+        info = t.info or {}
+        if info.get('currentPrice') or info.get('regularMarketPrice'):
+            hist = t.history(period='1y')
+            divs = t.dividends
+            return info, hist, divs, True   # True = success
+    except Exception:
+        pass
+    return {}, pd.DataFrame(), pd.Series(dtype=float), False
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_live_data(sym):
-    # Use Anthropic Claude API with web_search to get live stock data.
-    # This bypasses all IP-level rate limiting since Claude fetches from the web.
-    # Requires ANTHROPIC_API_KEY in Streamlit secrets.
+def _fetch_claude_live(sym, missing_fields):
+    # Step 3 (only called when yfinance missing data): Claude web search
+    # Only requests the specific fields that are still missing
     try:
         api_key = st.secrets.get('ANTHROPIC_API_KEY', '')
         if not api_key:
             return {}
         import urllib.request as ur, ssl
-        ctx = ssl.create_default_context()
+        ctx  = ssl.create_default_context()
+        flds = ', '.join('"' + f + '": number_or_str_or_null' for f in missing_fields)
         prompt = (
-            'Fetch the latest stock data for ticker ' + sym + ' and return ONLY a JSON object '
-            'with exactly these fields (use null for unavailable fields): '
-            '{"longName": str, "sector": str, "industry": str, '
-            '"currentPrice": float, "marketCap": float, '
-            '"trailingPE": float, "forwardPE": float, '
-            '"priceToBook": float, "priceToSalesTrailing12Months": float, '
-            '"beta": float, "profitMargins": float, "operatingMargins": float, '
-            '"returnOnEquity": float, "returnOnAssets": float, '
-            '"debtToEquity": float, "currentRatio": float, '
-            '"revenueGrowth": float, "earningsGrowth": float, '
-            '"trailingAnnualDividendYield": float, "trailingAnnualDividendRate": float, '
-            '"payoutRatio": float, "exDividendDate": str, '
-            '"fiftyTwoWeekHigh": float, "fiftyTwoWeekLow": float, '
-            '"shortPercentOfFloat": float, "shortRatio": float, '
-            '"targetMeanPrice": float, "targetLowPrice": float, '
-            '"targetHighPrice": float, "numberOfAnalystOpinions": int, '
-            '"recommendationKey": str} '
-            'Return ONLY the JSON, no explanation, no markdown, no extra text. '
-            'For revenueGrowth/earningsGrowth/profitMargins/operatingMargins/'
-            'returnOnEquity/returnOnAssets/payoutRatio use decimal form (0.15 not 15%). '
-            'For shortPercentOfFloat use decimal form (0.05 not 5%).'
+            'Get the latest stock data for ' + sym + '. '
+            'Return ONLY a JSON object with these fields (null if unavailable): '
+            '{' + flds + '} '
+            'Return ONLY raw JSON, no markdown, no explanation. '
+            'Decimals for ratios: revenueGrowth 0.15 not 15%. '
+            'shortPercentOfFloat 0.05 not 5%. payoutRatio 0.45 not 45%.'
         )
         body = json.dumps({
             'model': 'claude-haiku-4-5-20251001',
-            'max_tokens': 800,
+            'max_tokens': 600,
             'tools': [{'type': 'web_search_20250305', 'name': 'web_search'}],
             'messages': [{'role': 'user', 'content': prompt}]
         }).encode('utf-8')
@@ -302,24 +320,19 @@ def _fetch_live_data(sym):
         )
         with ur.urlopen(req, timeout=30, context=ctx) as r:
             resp = json.loads(r.read())
-        # Extract text content from response
         text = ''
         for block in resp.get('content', []):
             if block.get('type') == 'text':
                 text += block.get('text', '')
-        # Parse JSON from response
         text = text.strip()
-        # Strip markdown code fences if present
         if text.startswith('```'):
             text = text.split('```')[1]
             if text.startswith('json'):
                 text = text[4:]
-        text = text.strip()
-        data = json.loads(text)
-        # Convert exDividendDate string to Unix timestamp if present
+        data = json.loads(text.strip())
+        # Convert exDividendDate string to Unix timestamp
         if data.get('exDividendDate') and isinstance(data['exDividendDate'], str):
             try:
-                import datetime
                 for fmt in ('%Y-%m-%d', '%B %d, %Y', '%b %d, %Y', '%m/%d/%Y'):
                     try:
                         dt = datetime.datetime.strptime(data['exDividendDate'], fmt)
@@ -336,39 +349,37 @@ def _fetch_live_data(sym):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym):
     sym = sym.upper().strip()
-    # Layer 1: scan data (price history + screener signals, always fast)
+    divs = pd.Series(dtype=float)
+
+    # ── Step 1: Try yfinance for live data ────────────────────────────────
+    yf_info, hist, yf_divs, yf_ok = _fetch_yfinance(sym)
+    if yf_ok:
+        info = dict(yf_info)
+        if not yf_divs.empty:
+            divs = yf_divs
+    else:
+        info = {}
+        hist = pd.DataFrame()
+
+    # ── Step 2: Check what fields are missing ─────────────────────────────
+    missing = [f for f in _YF_FIELDS if not info.get(f)]
+
+    # ── Step 3: Fill missing fields from nightly scan dump ────────────────
     scan_dict = _load_scan_dict()
     rec = scan_dict.get(sym, {})
-    hist = _hist_to_df(rec.get('_hist')) if rec else pd.DataFrame()
-    divs = pd.Series(dtype=float)
-    # Layer 2: live data via Claude web search (fundamentals + analyst data)
-    live = _fetch_live_data(sym)
-    # If we have neither source, error
-    if not rec and not live:
-        return {}, pd.DataFrame(), divs, (
-            sym + ' not found. Check the ticker symbol is correct '
-            '(e.g. IONQ, AAPL, ET). If correct, the live data fetch '
-            'may need ANTHROPIC_API_KEY set in Streamlit secrets.')
-    # Merge: live data takes priority, scan fills in signals + history
-    info = {}
-    # Start with live data (full fundamentals)
-    info.update(live)
-    # Fill in from scan anything not provided by live
-    if rec:
-        scan_base = {
-            'shortName':                  rec.get('Ticker', sym),
+    if rec and missing:
+        scan_map = {
             'longName':                   rec.get('Ticker', sym),
             'sector':                     rec.get('Sector'),
+            'industry':                   rec.get('Sector'),
             'currentPrice':               rec.get('Price'),
-            'regularMarketPrice':         rec.get('Price'),
             'marketCap':                  rec.get('MarketCap'),
             'trailingPE':                 rec.get('P/E'),
             'fiftyTwoWeekHigh':           rec.get('RangeHigh'),
             'fiftyTwoWeekLow':            rec.get('RangeLow'),
-            'trailingAnnualDividendYield': (rec.get('DividendYieldPct') or 0) / 100
-                                          if rec.get('DividendYieldPct') else 0,
+            'trailingAnnualDividendYield':(rec.get('DividendYieldPct') or 0) / 100
+                                          if rec.get('DividendYieldPct') else None,
             'trailingAnnualDividendRate': rec.get('DividendRate'),
-            'dividendRate':               rec.get('DividendRate'),
             'payoutRatio':                (rec.get('DividendPayoutRatio') or 0) / 100
                                           if rec.get('DividendPayoutRatio') else None,
             'exDividendDate':             rec.get('ExDividendDate'),
@@ -380,10 +391,32 @@ def fetch_stock_analysis(sym):
             'earningsGrowth':             (rec.get('EarningsGrowth') or 0) / 100
                                           if rec.get('EarningsGrowth') else None,
         }
-        for k, v in scan_base.items():
-            if not info.get(k) and v is not None:
+        for field in missing:
+            val = scan_map.get(field)
+            if val is not None:
+                info[field] = val
+                missing = [f for f in missing if f != field]
+
+    # ── Step 4: Still missing fields? Call Claude web search ──────────────
+    # Only triggered if yfinance failed AND scan didn't have it either
+    if missing and not info.get('currentPrice'):
+        # yfinance completely failed (rate limited) -- use Claude for everything
+        claude_data = _fetch_claude_live(sym, _YF_FIELDS)
+        for k, v in claude_data.items():
+            if v is not None and not info.get(k):
                 info[k] = v
-    # Always add screener signal scores from scan (not in live data)
+    elif missing:
+        # yfinance worked but some fields missing -- fill remaining from Claude
+        claude_data = _fetch_claude_live(sym, missing)
+        for k, v in claude_data.items():
+            if v is not None and not info.get(k):
+                info[k] = v
+
+    # ── Price history: use yfinance if we got it, else scan _hist ─────────
+    if hist.empty and rec:
+        hist = _hist_to_df(rec.get('_hist'))
+
+    # ── Screener signal scores from scan (always override -- most accurate) 
     if rec:
         info.update({
             '_rsi_score':    rec.get('RSI'),
@@ -396,6 +429,11 @@ def fetch_stock_analysis(sym):
             '_range_pos':    rec.get('RangePct'),
             '_short_squeeze':rec.get('ShortSqueeze'),
         })
+
+    if not info:
+        return {}, pd.DataFrame(), divs, (
+            sym + ' not found. Check ticker is correct (e.g. IONQ, AAPL, ET).')
+
     return info, hist, divs, None
 
 @st.cache_data(ttl=1800, show_spinner=False)
