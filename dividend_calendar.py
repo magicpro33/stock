@@ -351,12 +351,16 @@ def fetch_stock_analysis(sym):
     sym = sym.upper().strip()
     divs = pd.Series(dtype=float)
 
+    # Track where each piece of data came from
+    sources = {'yfinance': [], 'scan': [], 'claude': [], 'none': []}
+
     # ── Step 1: Try yfinance for live data ────────────────────────────────
     yf_info, hist, yf_divs, yf_ok = _fetch_yfinance(sym)
     if yf_ok:
         info = dict(yf_info)
         if not yf_divs.empty:
             divs = yf_divs
+        sources['yfinance'] = [f for f in _YF_FIELDS if info.get(f) is not None]
     else:
         info = {}
         hist = pd.DataFrame()
@@ -391,30 +395,39 @@ def fetch_stock_analysis(sym):
             'earningsGrowth':             (rec.get('EarningsGrowth') or 0) / 100
                                           if rec.get('EarningsGrowth') else None,
         }
-        for field in missing:
+        for field in list(missing):
             val = scan_map.get(field)
             if val is not None:
                 info[field] = val
+                sources['scan'].append(field)
                 missing = [f for f in missing if f != field]
 
     # ── Step 4: Still missing fields? Call Claude web search ──────────────
-    # Only triggered if yfinance failed AND scan didn't have it either
+    claude_data = {}
     if missing and not info.get('currentPrice'):
-        # yfinance completely failed (rate limited) -- use Claude for everything
         claude_data = _fetch_claude_live(sym, _YF_FIELDS)
         for k, v in claude_data.items():
             if v is not None and not info.get(k):
                 info[k] = v
+                sources['claude'].append(k)
+                missing = [f for f in missing if f != k]
     elif missing:
-        # yfinance worked but some fields missing -- fill remaining from Claude
         claude_data = _fetch_claude_live(sym, missing)
         for k, v in claude_data.items():
             if v is not None and not info.get(k):
                 info[k] = v
+                sources['claude'].append(k)
+                missing = [f for f in missing if f != k]
+
+    # Track anything still unavailable
+    sources['none'] = [f for f in _YF_FIELDS if not info.get(f)]
 
     # ── Price history: use yfinance if we got it, else scan _hist ─────────
+    hist_source = 'yfinance' if not hist.empty else 'none'
     if hist.empty and rec:
         hist = _hist_to_df(rec.get('_hist'))
+        if not hist.empty:
+            hist_source = 'scan'
 
     # ── Screener signal scores from scan (always override -- most accurate) 
     if rec:
@@ -432,9 +445,22 @@ def fetch_stock_analysis(sym):
 
     if not info:
         return {}, pd.DataFrame(), divs, (
-            sym + ' not found. Check ticker is correct (e.g. IONQ, AAPL, ET).')
+            sym + ' not found. Check ticker is correct (e.g. IONQ, AAPL, ET).'), {}
 
-    return info, hist, divs, None
+    # Build human-readable source summary
+    source_summary = {
+        'yf_ok':       yf_ok,
+        'yf_count':    len(sources['yfinance']),
+        'scan_count':  len(sources['scan']),
+        'claude_count':len(sources['claude']),
+        'none_count':  len(sources['none']),
+        'hist_source': hist_source,
+        'scan_in_repo': bool(rec),
+        'scan_fields': sources['scan'],
+        'claude_fields': sources['claude'],
+        'none_fields': sources['none'],
+    }
+    return info, hist, divs, None, source_summary
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_meta():
@@ -757,16 +783,20 @@ with tab_az:
                      ' via web search...' if _has_api else
                      'Loading scan data for ' + az_ticker.upper() + '...')
         with st.spinner(_spin_msg):
-            ai, ah, ad, ae = fetch_stock_analysis(az_ticker)
+            _res = fetch_stock_analysis(az_ticker)
+        # fetch returns 5 values now (added source_summary)
+        ai, ah, ad, ae = _res[0], _res[1], _res[2], _res[3]
+        _src = _res[4] if len(_res) > 4 else {}
         if ae or not ai:
             st.error('Could not load ' + az_ticker.upper() + ': ' + str(ae or 'no data returned'))
-            st.session_state.pop('az_result', None)  # clear stale result
+            st.session_state.pop('az_result', None)
         else:
-            # Save result so reruns (e.g. from number_input) keep it
-            st.session_state['az_result'] = (ai, ah, ad)
+            st.session_state['az_result'] = (ai, ah, ad, _src)
     # Render from session_state -- survives reruns caused by number_input
     if 'az_result' in st.session_state:
-        ai, ah, ad = st.session_state['az_result']
+        _stored = st.session_state['az_result']
+        ai, ah, ad = _stored[0], _stored[1], _stored[2]
+        _src = _stored[3] if len(_stored) > 3 else {}
         ae = None
     if 'az_result' in st.session_state:
             sym   = az_ticker.upper().strip()
@@ -890,6 +920,44 @@ with tab_az:
                 unsafe_allow_html=True)
             if pills:
                 st.markdown('<div style="margin:6px 0 14px">' + ''.join(pills) + '</div>', unsafe_allow_html=True)
+
+            # ── Data source readout ─────────────────────────────────────
+            def _src_badge(label, count, total, color, bg):
+                if count == 0: return ''
+                pct = int(count / total * 100) if total else 0
+                return (
+                    '<span style="display:inline-flex;align-items:center;gap:5px;'
+                    'background:' + bg + ';border:1px solid ' + color + ';'
+                    'border-radius:5px;padding:3px 10px;font-size:0.72rem;'
+                    'font-family:DM Mono,monospace;color:' + color + ';margin-right:6px">'
+                    + label + ' ' + str(count) + ' fields (' + str(pct) + '%)</span>'
+                )
+            _total = len(_YF_FIELDS)
+            _yfc   = _src.get('yf_count', 0)
+            _sc    = _src.get('scan_count', 0)
+            _cc    = _src.get('claude_count', 0)
+            _nc    = _src.get('none_count', 0)
+            _hs    = _src.get('hist_source', 'unknown')
+            _hist_label = {'yfinance': 'Yahoo Finance', 'scan': 'Nightly Scan', 'none': 'unavailable'}.get(_hs, _hs)
+            _badges = (
+                _src_badge('Yahoo Finance', _yfc, _total, '#4ac4ff', 'rgba(74,196,255,0.08)') +
+                _src_badge('Nightly Scan', _sc, _total, '#ffe066', 'rgba(255,224,102,0.08)') +
+                _src_badge('Claude Web Search', _cc, _total, '#b388ff', 'rgba(179,136,255,0.08)') +
+                (_src_badge('Unavailable', _nc, _total, '#ff6666', 'rgba(255,102,102,0.08)') if _nc > 0 else '')
+            )
+            _price_chart_note = 'Price chart: ' + _hist_label
+            _scan_note = ' | In nightly scan: Yes' if _src.get('scan_in_repo') else ' | Not in nightly scan'
+            if _src:
+                st.markdown(
+                    '<div style="margin:4px 0 12px">'
+                    '<span style="font-size:0.65rem;color:#666;text-transform:uppercase;'
+                    'letter-spacing:0.1em;font-family:DM Mono,monospace">Data sources: </span>'
+                    + _badges +
+                    '<span style="font-size:0.68rem;color:#666;font-family:DM Mono,monospace">'
+                    ' | ' + _price_chart_note + _scan_note + '</span>'
+                    '</div>',
+                    unsafe_allow_html=True
+                )
             st.markdown('---')
             colA, colB, colC = st.columns(3)
 
