@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parent
 CREATOR_NAME = "AIupscale"
 CREATOR_URL = "https://aiupscalellc.netlify.app/"
 LOGO_PATH = ROOT / "assets" / "aiupscale_logo.png"
+LOGO_BG = "#081325"
+LOGO_BG_PANEL = "#0c1829"
+LOGO_TEXT = "#F6F4E9"
 
 # ───────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -33,6 +36,41 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+
+def _inject_theme_css() -> None:
+    st.markdown(
+        f"""
+        <style>
+            .stApp {{
+                background-color: {LOGO_BG};
+                color: {LOGO_TEXT};
+            }}
+            [data-testid="stSidebar"] {{
+                background-color: {LOGO_BG_PANEL};
+                color: {LOGO_TEXT};
+            }}
+            [data-testid="stHeader"] {{
+                background-color: transparent;
+            }}
+            h1, h2, h3, h4, h5, h6,
+            p, label, span, li,
+            .stMarkdown, .stCaption,
+            [data-testid="stMarkdownContainer"] p,
+            [data-testid="stWidgetLabel"] {{
+                color: {LOGO_TEXT} !important;
+            }}
+            .stExpander details summary,
+            [data-baseweb="tab"] {{
+                color: {LOGO_TEXT};
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_inject_theme_css()
 
 
 def _clickable_logo(width: int = 200) -> None:
