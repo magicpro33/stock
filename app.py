@@ -9,6 +9,7 @@
 import io
 import sys
 import time
+import base64
 import requests
 import numpy as np
 import pandas as pd
@@ -16,7 +17,13 @@ import streamlit as st
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl.utils import get_column_letter
+from pathlib import Path
 import yfinance as yf
+
+ROOT = Path(__file__).resolve().parent
+CREATOR_NAME = "AIupscale"
+CREATOR_URL = "https://aiupscalellc.netlify.app/"
+LOGO_PATH = ROOT / "assets" / "aiupscale_logo.png"
 
 # ───────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -27,8 +34,29 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📈 Hybrid Stock Screener")
-st.caption("Screens S&P 500, NYSE, or NASDAQ for individual companies — ETFs, funds, and index products excluded.")
+
+def _clickable_logo(width: int = 200) -> None:
+    if not LOGO_PATH.is_file():
+        return
+    encoded = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+    st.markdown(
+        f'<a href="{CREATOR_URL}" target="_blank" rel="noopener noreferrer">'
+        f'<img src="data:image/png;base64,{encoded}" width="{width}" '
+        f'style="cursor:pointer;" alt="{CREATOR_NAME}">'
+        f"</a>",
+        unsafe_allow_html=True,
+    )
+
+
+_header_logo, _header_title = st.columns([1, 4])
+with _header_logo:
+    _clickable_logo()
+with _header_title:
+    st.title("📈 Hybrid Stock Screener")
+    st.caption(
+        "Screens S&P 500, NYSE, or NASDAQ for individual companies — "
+        "ETFs, funds, and index products excluded."
+    )
 
 tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
 
