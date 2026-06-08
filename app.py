@@ -1902,7 +1902,7 @@ def calculate_short_squeeze(info: dict) -> dict:
 
 def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                            raw, sticker, selected, fetched_at,
-                           range_days=30, mfi_period=14, key_prefix="analyze"):
+                           range_days=30, mfi_period=14):
     """
     Full stock analysis render — identical to the Analyze a Stock tab.
     Called from both the analyze tab and the inline screener panel.
@@ -2418,14 +2418,14 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 chart_type = st.selectbox(
                     "Chart Type",
                     ["Candlestick", "Heikin Ashi", "Line"],
-                    index=0, key=f"{key_prefix}_chart_type",
+                    index=0, key="chart_type",
                     help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
                 )
             with cc2:
                 interval = st.selectbox(
                     "Candle Interval",
                     ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
-                    index=6, key=f"{key_prefix}_chart_interval",
+                    index=6, key="chart_interval",
                     help=(
                         "1m/5m: last 7 days max  |  "
                         "15m/30m/1h: last 60 days max  |  "
@@ -2450,11 +2450,11 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
                 pc = st.selectbox(
                     "Time Period", period_opts,
-                    index=period_def, key=f"{key_prefix}_price_history_period"
+                    index=period_def, key="price_history_period"
                 )
             with cc4:
                 chart_theme = st.selectbox(
-                    "Theme", ["Dark","Light"], index=0, key=f"{key_prefix}_chart_theme"
+                    "Theme", ["Dark","Light"], index=0, key="chart_theme"
                 )
 
             # ── Custom date range (daily+ only) ───────────
@@ -2465,28 +2465,28 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                         "Start Date",
                         value=pd.Timestamp.today() - pd.Timedelta(days=365),
                         max_value=pd.Timestamp.today(),
-                        key=f"{key_prefix}_chart_custom_start",
+                        key="chart_custom_start",
                     )
                 with dr2:
                     custom_end = st.date_input(
                         "End Date",
                         value=pd.Timestamp.today(),
                         max_value=pd.Timestamp.today(),
-                        key=f"{key_prefix}_chart_custom_end",
+                        key="chart_custom_end",
                     )
 
             st.markdown("**Overlays**")
             ov1,ov2,ov3,ov4 = st.columns(4)
-            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key=f"{key_prefix}_show_ema20")
-            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key=f"{key_prefix}_show_ema50")
-            show_ema200 = ov3.checkbox("EMA 200", value=False, key=f"{key_prefix}_show_ema200")
-            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key=f"{key_prefix}_show_bb")
+            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
+            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
+            show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
+            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
 
             st.markdown("**Sub-Charts**")
             sc1,sc2,sc3 = st.columns(3)
-            show_vol  = sc1.checkbox("Volume",  value=True,  key=f"{key_prefix}_show_vol")
-            show_rsi  = sc2.checkbox("RSI",     value=True,  key=f"{key_prefix}_show_rsi")
-            show_macd = sc3.checkbox("MACD",    value=False, key=f"{key_prefix}_show_macd")
+            show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
+            show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
+            show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
 
             # ── Fetch history with correct interval ───────
             # yfinance interval/period compatibility:
@@ -3983,7 +3983,6 @@ with tab_screener:
             fetched_at = _il_fetched_at,
             range_days = _il_rdays,
             mfi_period = _il_mfi_p,
-            key_prefix = f"inline_{_inline_tk.lower()}",
         )
     else:
         st.warning(
@@ -4349,5 +4348,4 @@ with tab_analyze:
             fetched_at = _d.get("fetched_at", ""),
             range_days = st.session_state.get("slider_range_days", 30),
             mfi_period = st.session_state.get("slider_mfi_period", 14),
-            key_prefix = "analyze",
         )
