@@ -693,7 +693,8 @@ with tab_calc:
         ctk = st.text_input('Enter ticker symbol', placeholder='e.g. ET, EPD, DOC', key='calc_ticker')
         if ctk:
             with st.spinner('Fetching ' + ctk.upper() + '...'):
-                li, _, _, le = fetch_stock_analysis(ctk)
+                _calc_res = fetch_stock_analysis(ctk)
+                li, le = _calc_res[0], _calc_res[3]
             if le or not li: st.error('Could not fetch ' + ctk.upper() + '. Check ticker.')
             else:
                 ry = li.get('trailingAnnualDividendYield') or li.get('dividendYield') or 0
