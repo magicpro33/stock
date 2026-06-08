@@ -259,18 +259,51 @@ METRICS = {
 
 ALL_SECTORS = [
     "All Sectors",
+    "Basic Materials",
     "Communication Services",
-    "Consumer Discretionary",
-    "Consumer Staples",
+    "Consumer Cyclical",
+    "Consumer Defensive",
     "Energy",
-    "Financials",
-    "Health Care",
+    "Financial Services",
+    "Healthcare",
     "Industrials",
-    "Information Technology",
-    "Materials",
     "Real Estate",
+    "Technology",
     "Utilities",
 ]
+
+# yfinance uses its own sector names which differ from GICS standard labels.
+# This map handles any legacy data or mixed sources — keys are lowercase for
+# case-insensitive matching; values are the canonical yfinance names above.
+_SECTOR_ALIASES = {
+    # yfinance → canonical (identity mappings — keep for explicit match)
+    "basic materials":          "Basic Materials",
+    "communication services":   "Communication Services",
+    "consumer cyclical":        "Consumer Cyclical",
+    "consumer defensive":       "Consumer Defensive",
+    "energy":                   "Energy",
+    "financial services":       "Financial Services",
+    "healthcare":               "Healthcare",
+    "industrials":              "Industrials",
+    "real estate":              "Real Estate",
+    "technology":               "Technology",
+    "utilities":                "Utilities",
+    # GICS standard → yfinance equivalents (for any live-scan data using GICS names)
+    "materials":                "Basic Materials",
+    "consumer discretionary":   "Consumer Cyclical",
+    "consumer staples":         "Consumer Defensive",
+    "financials":               "Financial Services",
+    "finance":                  "Financial Services",
+    "health care":              "Healthcare",
+    "information technology":   "Technology",
+    "it":                       "Technology",
+}
+
+def _normalise_sector(raw: str) -> str:
+    """Normalise a raw sector string to the canonical yfinance sector name."""
+    if not raw:
+        return "Unknown"
+    return _SECTOR_ALIASES.get(raw.strip().lower(), raw.strip())
 
 EXCHANGES = {
     "S&P 500":  "sp500",
@@ -3384,6 +3417,12 @@ with tab_screener:
     df = pd.DataFrame(results)
     df.replace(["N/A", "None", "-", ""], pd.NA, inplace=True)
 
+    # Normalise sector names — yfinance uses its own names (e.g. "Financial Services",
+    # "Consumer Cyclical") which differ from GICS standard names. Normalise here
+    # so the sector filter dropdown always matches the data correctly.
+    if "Sector" in df.columns:
+        df["Sector"] = df["Sector"].fillna("Unknown").apply(_normalise_sector)
+
     # ── Ensure ALL expected columns exist — fills missing ones with 0/NaN ──
     # This prevents KeyError crashes when cached data predates new metrics
     # or when recompute_indicators couldn't rebuild them (missing _hist).
@@ -3424,7 +3463,9 @@ with tab_screener:
 
     # ── Sector filter ──────────────────────────────────────────────
     if sector != "All Sectors":
-        df = df[df["Sector"].str.strip().str.lower() == sector.strip().lower()]
+        # Normalise both sides so yfinance names, GICS names, and mixed-case
+        # all resolve to the same canonical value before comparing
+        df = df[df["Sector"].apply(_normalise_sector).str.lower() == sector.strip().lower()]
         if df.empty:
             st.error(f"No results found for sector: **{sector}**. The sector name may differ from yfinance labels.")
             st.stop()
