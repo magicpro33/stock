@@ -270,6 +270,7 @@ ALL_SECTORS = [
     "Real Estate",
     "Technology",
     "Utilities",
+    "Unknown",          # stocks where yfinance returned no sector (198 in current data)
 ]
 
 # yfinance uses its own sector names which differ from GICS standard labels.
