@@ -29,6 +29,14 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yfinance as yf
+try:
+    from alpha_vantage_fallback import (
+        av_fill_info, av_fill_history, av_fill_financials,
+        av_needs_fallback, av_needs_history_fallback, av_needs_financials_fallback,
+    )
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -43,14 +51,14 @@ OUTPUT_DIR      = os.path.join(os.path.dirname(__file__), "data")
 DATA_FILE       = os.path.join(OUTPUT_DIR, "stock_data.json.gz")
 META_FILE       = os.path.join(OUTPUT_DIR, "scan_meta.json")
 
-# Worker count — 5 workers is the safe ceiling for GitHub Actions.
-# GitHub Actions IPs are rate-limited by Yahoo Finance; beyond 5 workers
-# you get silent empty responses for most tickers.
-WORKERS         = 5
+# Worker count — KEEP THIS LOW for nightly jobs.
+# GitHub Actions IPs are heavily rate-limited by Yahoo Finance.
+# 3 workers = ~3 requests/sec. Too fast = empty responses for everything.
+WORKERS         = 3
 # Pause between batches (seconds) — lets Yahoo's rate limiter reset
-BATCH_PAUSE     = 6
+BATCH_PAUSE     = 8
 # Batch size — small batches + pauses prevents sustained hammering
-BATCH_SIZE      = 40
+BATCH_SIZE      = 30
 MFI_PERIOD      = 14
 RANGE_DAYS      = 30
 
@@ -544,25 +552,13 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         "PayoutRatio":       None,
         "DividendFrequency": "None",
         "DividendScore":     0.0,
-        "ExDividendDate":    None,   # Unix timestamp — read by dividend_calendar.py
     }
     try:
         yield_raw = (info.get("trailingAnnualDividendYield") or info.get("dividendYield"))
         div_rate  = (info.get("trailingAnnualDividendRate") or info.get("dividendRate"))
         payout    = info.get("payoutRatio")
-        # Capture ex-dividend date as Unix timestamp
-        ex_div_ts = info.get("exDividendDate")
-        if ex_div_ts and not isinstance(ex_div_ts, (int, float)):
-            ex_div_ts = None
-
         if not yield_raw and not div_rate:
-            return {**default, "ExDividendDate": ex_div_ts}
-
-        # Cap yield at 50% — foreign ADRs (PKX, KB, SHG, KEP etc.) sometimes
-        # return raw per-share amounts instead of ratios, causing 3000-15000%
-        # values. Any yield above 50% is a data error from yfinance.
-        if yield_raw and yield_raw > 0.50:
-            return {**default, "ExDividendDate": ex_div_ts}
+            return default
         yield_pct = round(yield_raw * 100, 2) if yield_raw else None
         y = yield_pct or 0.0
         if y >= 8:    yield_score = 0.60
@@ -610,7 +606,6 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
             "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
             "DividendFrequency": freq_label,
             "DividendScore":     composite,
-            "ExDividendDate":    ex_div_ts,
         }
     except Exception:
         return default
@@ -670,15 +665,29 @@ def process_ticker(args):
             if attempt > 0:
                 time.sleep(attempt * 5 + random.uniform(0, 3))
 
-            stock = yf.Ticker(t)
-            info  = stock.info or {}
+            stock   = yf.Ticker(t)
+            _av_key = _get_av_key() if _AV_AVAILABLE else ""
+            info    = stock.info or {}
 
             if not info or len(info) < 5:
-                # Rate-limited: wait and retry
-                if attempt < 2:
-                    time.sleep(10 + random.uniform(0, 5))
-                    continue
-                return None
+                # Rate-limited — try Alpha Vantage before giving up
+                if _AV_AVAILABLE and _av_key:
+                    try:
+                        info = av_fill_info(t, info, _av_key)
+                    except Exception:
+                        pass
+                if not info or len(info) < 5:
+                    if attempt < 2:
+                        time.sleep(10 + random.uniform(0, 5))
+                        continue
+                    return None
+
+            # AV patch for unknown sector even when info is otherwise healthy
+            if _AV_AVAILABLE and _av_key and av_needs_fallback(info):
+                try:
+                    info = av_fill_info(t, info, _av_key)
+                except Exception:
+                    pass
 
             if is_etf_or_fund(info):
                 return None
@@ -693,6 +702,15 @@ def process_ticker(args):
                     hist = stock.history(period="6mo")
             except Exception:
                 hist = pd.DataFrame()
+
+            # AV fallback for missing history
+            if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
+                try:
+                    av_hist = av_fill_history(t, _av_key)
+                    if not av_hist.empty:
+                        hist = av_hist
+                except Exception:
+                    pass
 
             try:
                 fin = stock.financials
@@ -710,6 +728,16 @@ def process_ticker(args):
                 cf = stock.cashflow
             except Exception:
                 cf = pd.DataFrame()
+
+            # AV fallback for missing financials
+            if _AV_AVAILABLE and _av_key and av_needs_financials_fallback(fin, bal, cf):
+                try:
+                    av_fin, av_bal, av_cf = av_fill_financials(t, _av_key)
+                    if fin.empty and not av_fin.empty:   fin = av_fin
+                    if bal.empty and not av_bal.empty:   bal = av_bal
+                    if cf.empty  and not av_cf.empty:    cf  = av_cf
+                except Exception:
+                    pass
 
             vol_signals  = get_volume_signals(hist, mfi_period)
             tech_signals = calculate_technical_signals(hist)
@@ -768,7 +796,6 @@ def process_ticker(args):
                 "DividendPayoutRatio": div_data["PayoutRatio"],
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
-                "ExDividendDate":      div_data["ExDividendDate"],
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
@@ -780,7 +807,7 @@ def process_ticker(args):
 
     return None  # all attempts exhausted
 
-# ── Scan one exchange (legacy — not called by main, kept for app.py compat) ──
+# ── Scan one exchange ─────────────────────────────────────────────────────────
 
 def scan_exchange(exchange_key: str, tickers: list) -> list:
     results   = []
@@ -815,6 +842,11 @@ def scan_exchange(exchange_key: str, tickers: list) -> list:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+def _get_av_key() -> str:
+    """Read AV_API_KEY from environment (nightly scan runs as GitHub Action)."""
+    return os.environ.get("AV_API_KEY", "")
+
 
 def main():
     start_utc = datetime.now(timezone.utc)
@@ -889,7 +921,7 @@ def main():
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
 
-    date_tag = start_utc.strftime("%Y-%m-%d")  # use start time; end_utc set after save
+    date_tag = end_utc.strftime("%Y-%m-%d") if 'end_utc' in dir() else start_utc.strftime("%Y-%m-%d")
 
     # ── Primary files (always overwritten — what the app reads) ──────
     # Compressed JSON — readable by the Streamlit app with json + gzip

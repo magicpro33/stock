@@ -19,6 +19,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl.utils import get_column_letter
 from pathlib import Path
 import yfinance as yf
+try:
+    from alpha_vantage_fallback import (
+        av_fill_info, av_fill_history, av_fill_financials,
+        av_needs_fallback, av_needs_history_fallback, av_needs_financials_fallback,
+    )
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
 
 ROOT = Path(__file__).resolve().parent
 CREATOR_NAME = "AIupscale"
@@ -1256,6 +1264,14 @@ def _get_github_repo() -> str:
         return st.secrets.get("GITHUB_REPO", "")
     except Exception:
         return _os.environ.get("GITHUB_REPO", "")
+
+
+def _get_av_key() -> str:
+    """Read AV_API_KEY from Streamlit secrets or environment variable."""
+    try:
+        return st.secrets.get("AV_API_KEY", "")
+    except Exception:
+        return _os.environ.get("AV_API_KEY", "")
 
 @st.cache_data(ttl=1800)   # check GitHub for new data at most every 30 minutes
 def _fetch_github_meta() -> dict:
@@ -2721,30 +2737,35 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
 def process_ticker(args):
     """
-    Fetch all data for one ticker — optimised for minimum wall-clock time.
+    Fetch all data for one ticker — yfinance primary, Alpha Vantage fallback.
 
     Speed notes
     -----------
-    • stock.info         — 1 call for price/sector/fundamentals.
-    • stock.history(1y)  — 1 year is enough for all indicators; fall back
-                           to 6mo if empty.  Previously fetched 2y.
-    • Financials ×3      — fetched once each, shared across all compute fns.
-    • No retry loop      — failed tickers return None immediately; the
-                           dynamic batch engine adjusts worker count.
-    • Hard timeout       — future.result(timeout=12) in the scan loop kills
-                           any ticker that takes >12s wall-clock time.
+    • yfinance is tried first for everything (fast, no key needed).
+    • Alpha Vantage is called only when yfinance returns sparse/empty data.
+    • AV calls: OVERVIEW (1), TIME_SERIES_DAILY (1), INCOME+BAL+CF (3).
+    • Hard timeout — future.result(timeout=12) in the scan loop kills
+      any ticker that takes >12s wall-clock time.
     NOTE: Do NOT inject a custom requests Session into yfinance — it breaks
     the internal cookie/crumb authentication and causes all requests to fail.
     """
     t, mfi_period, range_days = args
     try:
-        stock = yf.Ticker(t)
+        stock  = yf.Ticker(t)
+        _av_key = _get_av_key() if _AV_AVAILABLE else ""
 
         # ── 1. Info — price, ETF check, sector, fundamentals ──────────
         try:
             info = stock.info or {}
         except Exception:
-            return None
+            info = {}
+
+        # Alpha Vantage fallback for sparse/missing info
+        if _AV_AVAILABLE and _av_key and av_needs_fallback(info):
+            try:
+                info = av_fill_info(t, info, _av_key)
+            except Exception:
+                pass
 
         if not info or len(info) < 5:
             return None
@@ -2763,6 +2784,15 @@ def process_ticker(args):
         except Exception:
             hist = pd.DataFrame()
 
+        # Alpha Vantage fallback for missing history
+        if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
+            try:
+                av_hist = av_fill_history(t, _av_key)
+                if not av_hist.empty:
+                    hist = av_hist
+            except Exception:
+                pass
+
         # ── 4. Financial statements ─────────────────────────────────────
         try:
             fin = stock.financials
@@ -2771,7 +2801,7 @@ def process_ticker(args):
 
         # ── 4b. Dividend history — needed for payment frequency ─────
         try:
-            div_hist = stock.dividends   # pandas Series indexed by date
+            div_hist = stock.dividends
         except Exception:
             div_hist = pd.Series(dtype=float)
         try:
@@ -2782,6 +2812,16 @@ def process_ticker(args):
             cf = stock.cashflow
         except Exception:
             cf = pd.DataFrame()
+
+        # Alpha Vantage fallback for missing financials
+        if _AV_AVAILABLE and _av_key and av_needs_financials_fallback(fin, bal, cf):
+            try:
+                av_fin, av_bal, av_cf = av_fill_financials(t, _av_key)
+                if fin.empty and not av_fin.empty:   fin = av_fin
+                if bal.empty and not av_bal.empty:   bal = av_bal
+                if cf.empty  and not av_cf.empty:    cf  = av_cf
+            except Exception:
+                pass
 
         # ── 5. Compute all indicators — pure CPU, no network ───────────
         vol_signals    = get_volume_signals(hist, mfi_period)
