@@ -796,6 +796,7 @@ def process_ticker(args):
                 "DividendPayoutRatio": div_data["PayoutRatio"],
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
+                "ExDividendDate":      info.get("exDividendDate"),
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }

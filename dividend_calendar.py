@@ -188,15 +188,9 @@ def load_scan_data():
         except (TypeError, ValueError): pr = None
         freq = item.get('DividendFrequency') or '--'
         mp = round(dr / 12, 4) if dr else None
-        ex_date = None
-        ex_ts = item.get('ExDividendDate')
-        if ex_ts:
-            try:
-                ts = float(ex_ts)
-                if ts > 1e9:
-                    ex_date = datetime.datetime.utcfromtimestamp(ts).date()
-                    ex_count += 1
-            except (TypeError, ValueError): pass
+        ex_date = _parse_ex_date(item.get('ExDividendDate'))
+        if ex_date:
+            ex_count += 1
         rows.append({'ticker': ticker, 'sector': item.get('Sector') or 'Unknown',
             'price': item.get('Price'), 'yield_pct': round(yp, 2),
             'div_rate': dr, 'monthly_pay': mp, 'payout': pr,
@@ -224,26 +218,24 @@ def fetch_ex_dates_live(tickers_tuple):
     prog.empty()
     return result
 
-# ── Scan data helpers (GitHub nightly dump) ──────────────────────────────
-_SCAN_URL = ('https://raw.githubusercontent.com/magicpro33/stock'
-             '/main/data/stock_data.json.gz')
+def _parse_ex_date(ex_ts):
+    if not ex_ts:
+        return None
+    try:
+        ts = float(ex_ts)
+        if ts > 1e9:
+            return datetime.datetime.utcfromtimestamp(ts).date()
+    except (TypeError, ValueError):
+        pass
+    return None
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_scan_dict():
-    # First try: reuse the already-loaded local scan file (fastest, no network call)
-    if os.path.exists(DATA_FILE):
-        try:
-            with gzip.open(DATA_FILE, 'rt', encoding='utf-8') as f:
-                raw = json.load(f)
-            return {x['Ticker']: x for x in raw if isinstance(x, dict) and x.get('Ticker')}
-        except Exception:
-            pass
-    # Fallback: fetch from GitHub (only if local file missing -- shouldn't happen on Cloud)
+    if not os.path.exists(DATA_FILE):
+        return {}
     try:
-        import urllib.request as ur, gzip as gz_
-        req = ur.Request(_SCAN_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with ur.urlopen(req, timeout=15) as r:
-            raw = json.loads(gz_.decompress(r.read()))
+        with gzip.open(DATA_FILE, 'rt', encoding='utf-8') as f:
+            raw = json.load(f)
         return {x['Ticker']: x for x in raw if isinstance(x, dict) and x.get('Ticker')}
     except Exception:
         return {}
@@ -361,31 +353,32 @@ def _fetch_claude_live(sym, missing_fields):
         return {}
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_stock_analysis(sym):
+def fetch_stock_analysis(sym, live=False):
     sym = sym.upper().strip()
     divs = pd.Series(dtype=float)
+    scan_dict = _load_scan_dict()
+    rec = scan_dict.get(sym, {})
 
     # Track where each piece of data came from
     sources = {'yfinance': [], 'scan': [], 'claude': [], 'none': []}
+    info = {}
+    hist = pd.DataFrame()
 
-    # ── Step 1: Try yfinance for live data ────────────────────────────────
-    yf_info, hist, yf_divs, yf_ok = _fetch_yfinance(sym)
-    if yf_ok:
-        info = dict(yf_info)
-        if not yf_divs.empty:
-            divs = yf_divs
-        sources['yfinance'] = [f for f in _YF_FIELDS if info.get(f) is not None]
+    if live:
+        # ── Step 1: Try yfinance for live data (Refresh / explicit live mode) ──
+        yf_info, hist, yf_divs, yf_ok = _fetch_yfinance(sym)
+        if yf_ok:
+            info = dict(yf_info)
+            if not yf_divs.empty:
+                divs = yf_divs
+            sources['yfinance'] = [f for f in _YF_FIELDS if info.get(f) is not None]
+        missing = [f for f in _YF_FIELDS if not info.get(f)]
     else:
-        info = {}
-        hist = pd.DataFrame()
+        yf_ok = False
+        missing = list(_YF_FIELDS)
 
-    # ── Step 2: Check what fields are missing ─────────────────────────────
-    missing = [f for f in _YF_FIELDS if not info.get(f)]
-
-    # ── Step 3: Fill missing fields from nightly scan dump ────────────────
-    scan_dict = _load_scan_dict()
-    rec = scan_dict.get(sym, {})
-    if rec and missing:
+    # ── Fill from nightly scan dump ─────────────────────────────────────
+    if rec:
         scan_map = {
             'longName':                   rec.get('Ticker', sym),
             'sector':                     rec.get('Sector'),
@@ -409,23 +402,24 @@ def fetch_stock_analysis(sym):
             'earningsGrowth':             (rec.get('EarningsGrowth') or 0) / 100
                                           if rec.get('EarningsGrowth') else None,
         }
-        for field in list(missing):
+        fields_to_fill = list(missing) if live else list(_YF_FIELDS)
+        for field in fields_to_fill:
             val = scan_map.get(field)
-            if val is not None:
+            if val is not None and not info.get(field):
                 info[field] = val
                 sources['scan'].append(field)
-                missing = [f for f in missing if f != field]
+                if live:
+                    missing = [f for f in missing if f != field]
 
-    # ── Step 4: Still missing fields? Call Claude web search ──────────────
-    claude_data = {}
-    if missing and not info.get('currentPrice'):
+    # ── Claude web search only in live mode ───────────────────────────────
+    if live and missing and not info.get('currentPrice'):
         claude_data = _fetch_claude_live(sym, _YF_FIELDS)
         for k, v in claude_data.items():
             if v is not None and not info.get(k):
                 info[k] = v
                 sources['claude'].append(k)
                 missing = [f for f in missing if f != k]
-    elif missing:
+    elif live and missing:
         claude_data = _fetch_claude_live(sym, missing)
         for k, v in claude_data.items():
             if v is not None and not info.get(k):
@@ -476,8 +470,84 @@ def fetch_stock_analysis(sym):
     }
     return info, hist, divs, None, source_summary
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def load_meta():
+def _calc_info_from_scan_row(row):
+    return {
+        'ticker': row['ticker'],
+        'price': float(row.get('price') or 0),
+        'yield_pct': float(row['yield_pct']),
+        'div_rate': float(row.get('div_rate') or 0),
+        'monthly_pay': row.get('monthly_pay'),
+        'frequency': row.get('frequency') or '--',
+        'payout': row.get('payout'),
+        'sector': row.get('sector') or 'Unknown',
+    }
+
+def _calc_info_from_scan_rec(sym, rec):
+    try:
+        yp = float(rec.get('DividendYieldPct') or 0)
+    except (TypeError, ValueError):
+        return None
+    if yp <= 0:
+        return None
+    dr = float(rec.get('DividendRate') or 0)
+    return {
+        'ticker': sym,
+        'price': float(rec.get('Price') or 0),
+        'yield_pct': round(yp, 2),
+        'div_rate': dr,
+        'monthly_pay': round(dr / 12, 4) if dr else None,
+        'frequency': rec.get('DividendFrequency') or '--',
+        'payout': rec.get('DividendPayoutRatio'),
+        'sector': rec.get('Sector') or 'Unknown',
+    }
+
+def _render_dividend_table(df_show, today, show_buy_cols=True):
+    rows_html = []
+    for row in df_show.to_dict('records'):
+        yc  = ycolor(row['yield_pct'])
+        bd  = safe_date(row.get('buy_date'))
+        ex  = safe_date(row.get('ex_date'))
+        da  = int(row.get('days_away') or 0)
+        dr  = float(row.get('div_rate') or 0)
+        mp  = row.get('monthly_pay')
+        px  = float(row.get('price') or 0)
+        pr  = row.get('payout')
+        freq = str(row.get('frequency') or '--')
+        mp_str = ('$' + '{:.4f}'.format(mp)) if mp else '--'
+        pr_str = '{:.0f}%'.format(pr) if pr else '--'
+        bd_str = bd.strftime('%b %d, %Y') if bd else '--'
+        ex_str = ex.strftime('%b %d, %Y') if ex else '--'
+        alert = ''
+        if show_buy_cols:
+            if da == 0:   alert = '<span class="buy-now">BUY TODAY</span>'
+            elif da == 1: alert = '<span class="buy-tmr">BUY TOMORROW</span>'
+        buy_cols = ''
+        if show_buy_cols:
+            buy_cols = (
+                '<td class="td-date">' + bd_str + '</td>'
+                '<td class="td-date">' + ex_str + '</td>'
+                '<td class="td-count">' + str(da) + 'd ' + alert + '</td>')
+        rows_html.append(
+            '<tr class="tbl-row">'
+            '<td class="td-ticker"><strong>' + row['ticker'] + '</strong></td>'
+            '<td class="td-sector">' + str(row['sector']) + '</td>'
+            '<td class="td-yield"><span class="yield-badge" style="--yc:' + yc + '">' + str(row['yield_pct']) + '%</span></td>'
+            '<td class="td-num">$' + '{:.4f}'.format(dr) + '</td>'
+            '<td class="td-num">' + mp_str + '</td>'
+            '<td class="td-num">' + pr_str + '</td>'
+            '<td class="td-freq">' + freq + '</td>'
+            '<td class="td-num">$' + '{:.2f}'.format(px) + '</td>'
+            + buy_cols +
+            '</tr>')
+    hdr_buy = ''
+    if show_buy_cols:
+        hdr_buy = '<th>Buy Before</th><th>Ex-Date</th><th>Countdown</th>'
+    tbl = ('<div class="tbl-wrap"><table class="stbl"><thead><tr>'
+        '<th>Ticker</th><th>Sector</th><th>Yield</th><th>Div/Share</th>'
+        '<th>Monthly/Share</th><th>Payout</th><th>Frequency</th>'
+        '<th>Price</th>' + hdr_buy +
+        '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
+    st.markdown(tbl, unsafe_allow_html=True)
     if not os.path.exists(META_FILE): return None
     try:
         with open(META_FILE) as f: return json.load(f)
@@ -527,14 +597,17 @@ with st.sidebar:
         help='Type any dollar amount - only shows stocks at or below this price')
     freq_filter = st.selectbox('Frequency', ['All','Monthly','Quarterly','Semi-Annual','Annual'], key='sb_freq')
     st.markdown('---')
-    if st.button('Refresh', key='sb_refresh'):
+    if st.button('Refresh', key='sb_refresh',
+                 help='Reload scan file and fetch live ex-dividend dates from Yahoo'):
+        st.session_state['live_mode'] = True
+        st.session_state['fetch_ex_dates'] = True
         st.cache_data.clear()
         st.rerun()
     st.markdown('---')
     st.markdown('**How it works:**\n'
-        '- Reads data/stock_data.json.gz (nightly)\n'
+        '- Loads data/stock_data.json.gz only (no live API on startup)\n'
         '- Calendar = day before ex-date\n'
-        '- Own shares before that day = dividend paid\n'
+        '- Hit **Refresh** to fetch live ex-dates + enable live analyzer\n'
         '- Calculator tab to model returns\n'
         '- Analyzer tab for full stock deep-dive')
 
@@ -552,6 +625,23 @@ if scan_result[0] is None:
 
 # Unpack 4 values -- raw_dict reused by analyzer so file is read only once
 df_all, _err, has_ex_dates, _raw_scan_dict = scan_result
+live_mode = bool(st.session_state.get('live_mode'))
+
+# On Refresh only: fetch live ex-dates; persist in session for this visit
+if st.session_state.get('fetch_ex_dates'):
+    with st.spinner('Fetching ex-dividend dates (Refresh)...'):
+        st.session_state['ex_date_overrides'] = fetch_ex_dates_live(
+            tuple(df_all['ticker'].tolist()))
+    st.session_state['fetch_ex_dates'] = False
+
+ex_overrides = st.session_state.get('ex_date_overrides') or {}
+if ex_overrides:
+    df_all = df_all.copy()
+    df_all['ex_date'] = df_all.apply(
+        lambda row: ex_overrides.get(row['ticker']) or row.get('ex_date')
+            or _parse_ex_date((_raw_scan_dict.get(row['ticker']) or {}).get('ExDividendDate')),
+        axis=1)
+    has_ex_dates = df_all['ex_date'].notna().any()
 
 with st.sidebar:
     sectors = ['All sectors'] + sorted(df_all['sector'].dropna().unique().tolist())
@@ -572,13 +662,14 @@ if sector_filter != 'All sectors':
 # If scan has no ex-dates (old scan file), show a warning but don't
 # block the app or make 1600+ slow yfinance calls.
 if not has_ex_dates:
-    src_label, badge_cls = 'scan data (no ex-dates -- re-run scan)', 'src-warn'
+    src_label, badge_cls = 'scan data (no ex-dates -- click Refresh)', 'src-warn'
     st.warning(
-        'No ex-dividend dates found in scan data. '
-        'Push the updated nightly_scan.py and trigger a new scan to populate the calendar.'
+        'No ex-dividend dates in scan data. Dividend stocks are listed below by yield. '
+        'Click **Refresh** in the sidebar to fetch live ex-dates for the calendar.'
     )
 else:
-    src_label, badge_cls = 'scan data', 'src-ok'
+    src_label = 'scan data + live ex-dates' if live_mode else 'scan data'
+    badge_cls = 'src-ok'
 df['buy_date'] = df['ex_date'].apply(
     lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
 
@@ -605,10 +696,13 @@ with tab_cal:
     nxt = df_cal_sorted.iloc[0] if not df_cal.empty else None
     c1,c2,c3,c4 = st.columns(4)
     c1.metric('Buy signals ahead', len(df_cal))
-    c2.metric('Avg yield', '{:.1f}%'.format(df_cal['yield_pct'].mean()) if not df_cal.empty else '--')
+    c2.metric('Avg yield', '{:.1f}%'.format(df_cal['yield_pct'].mean()) if not df_cal.empty else (
+        '{:.1f}%'.format(df['yield_pct'].mean()) if not df.empty else '--'))
     c3.metric('Highest yield',
-        '{:.1f}%'.format(df_cal['yield_pct'].max()) if not df_cal.empty else '--',
-        delta=str(df_cal.iloc[0]['ticker']) if not df_cal.empty else '')
+        '{:.1f}%'.format(df_cal['yield_pct'].max()) if not df_cal.empty else (
+            '{:.1f}%'.format(df['yield_pct'].max()) if not df.empty else '--'),
+        delta=str((df_cal if not df_cal.empty else df.sort_values('yield_pct', ascending=False)).iloc[0]['ticker'])
+            if not (df_cal.empty and df.empty) else '')
     nd = safe_date(nxt['buy_date']) if nxt is not None else None
     c4.metric('Next buy date', nd.strftime('%b %d') if nd else '--',
         delta=str(nxt['ticker']) if nxt is not None else '')
@@ -642,50 +736,20 @@ with tab_cal:
 
     st.markdown('<div class="section-hdr">Upcoming Buy Signals &mdash; Ranked by Yield</div>', unsafe_allow_html=True)
     if df_cal.empty:
-        st.info('No buy signals in the next ' + str(days_ahead) + ' days. Try widening the date range.')
+        if df.empty:
+            st.info('No dividend stocks match current filters.')
+        else:
+            st.info(
+                'No buy signals in the next ' + str(days_ahead) + ' days. '
+                + ('Click **Refresh** to fetch ex-dates, or widen the date range. '
+                   if not has_ex_dates else 'Try widening the date range. ')
+                + 'Showing all matching dividend stocks below.')
+            df_show = df.sort_values('yield_pct', ascending=False).reset_index(drop=True)
+            _render_dividend_table(df_show, today, show_buy_cols=False)
     else:
-        df_show = df_cal_sorted  # already sorted, no copy needed
-        # Calculate days away using pure Python -- avoids pandas dtype issues
-        df_show = df_show.assign(days_away=df_show['buy_date'].apply(
+        df_show = df_cal_sorted.assign(days_away=df_cal_sorted['buy_date'].apply(
             lambda bd: (safe_date(bd) - today).days if safe_date(bd) else 0))
-        rows_html = []
-        for row in df_show.to_dict('records'):
-            yc  = ycolor(row['yield_pct'])
-            bd  = safe_date(row.get('buy_date'))
-            ex  = safe_date(row.get('ex_date'))
-            da  = int(row['days_away'])
-            dr  = float(row.get('div_rate') or 0)
-            mp  = row.get('monthly_pay')
-            px  = float(row.get('price') or 0)
-            pr  = row.get('payout')
-            freq = str(row.get('frequency') or '--')
-            mp_str = ('$' + '{:.4f}'.format(mp)) if mp else '--'
-            pr_str = '{:.0f}%'.format(pr) if pr else '--'
-            bd_str = bd.strftime('%b %d, %Y') if bd else '--'
-            ex_str = ex.strftime('%b %d, %Y') if ex else '--'
-            alert = ''
-            if da == 0:   alert = '<span class="buy-now">BUY TODAY</span>'
-            elif da == 1: alert = '<span class="buy-tmr">BUY TOMORROW</span>'
-            rows_html.append(
-                '<tr class="tbl-row">'
-                '<td class="td-ticker"><strong>' + row['ticker'] + '</strong></td>'
-                '<td class="td-sector">' + str(row['sector']) + '</td>'
-                '<td class="td-yield"><span class="yield-badge" style="--yc:' + yc + '">' + str(row['yield_pct']) + '%</span></td>'
-                '<td class="td-num">$' + '{:.4f}'.format(dr) + '</td>'
-                '<td class="td-num">' + mp_str + '</td>'
-                '<td class="td-num">' + pr_str + '</td>'
-                '<td class="td-freq">' + freq + '</td>'
-                '<td class="td-num">$' + '{:.2f}'.format(px) + '</td>'
-                '<td class="td-date">' + bd_str + '</td>'
-                '<td class="td-date">' + ex_str + '</td>'
-                '<td class="td-count">' + str(da) + 'd ' + alert + '</td>'
-                '</tr>')
-        tbl = ('<div class="tbl-wrap"><table class="stbl"><thead><tr>'
-            '<th>Ticker</th><th>Sector</th><th>Yield</th><th>Div/Share</th>'
-            '<th>Monthly/Share</th><th>Payout</th><th>Frequency</th>'
-            '<th>Price</th><th>Buy Before</th><th>Ex-Date</th><th>Countdown</th>'
-            '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
-        st.markdown(tbl, unsafe_allow_html=True)
+        _render_dividend_table(df_show, today, show_buy_cols=True)
 
     st.markdown('<br>', unsafe_allow_html=True)
     with st.expander('Full dividend universe -- ' + str(len(df)) + ' stocks (' + str(len(df_all)) + ' total)'):
@@ -706,28 +770,33 @@ with tab_calc:
         sel = st.selectbox('Select stock', opts, key='calc_sel')
         sel_tk = sel.split('  --  ')[0].strip()
         sel_row = df[df['ticker'] == sel_tk].iloc[0]
-        calc_info = {'ticker': sel_tk, 'price': float(sel_row['price'] or 0),
-            'yield_pct': float(sel_row['yield_pct']), 'div_rate': float(sel_row['div_rate'] or 0),
-            'monthly_pay': sel_row.get('monthly_pay'), 'frequency': sel_row['frequency'],
-            'payout': sel_row.get('payout'), 'sector': sel_row['sector']}
+        calc_info = _calc_info_from_scan_row(sel_row)
     else:
         ctk = st.text_input('Enter ticker symbol', placeholder='e.g. ET, EPD, DOC', key='calc_ticker')
         if ctk:
-            with st.spinner('Fetching ' + ctk.upper() + '...'):
-                _calc_res = fetch_stock_analysis(ctk)
-                li, le = _calc_res[0], _calc_res[3]
-            if le or not li: st.error('Could not fetch ' + ctk.upper() + '. Check ticker.')
+            sym = ctk.upper().strip()
+            rec = _raw_scan_dict.get(sym)
+            if rec:
+                calc_info = _calc_info_from_scan_rec(sym, rec)
+            elif live_mode:
+                with st.spinner('Fetching ' + sym + '...'):
+                    _calc_res = fetch_stock_analysis(sym, live=True)
+                    li, le = _calc_res[0], _calc_res[3]
+                if le or not li:
+                    st.error('Could not fetch ' + sym + '. Check ticker.')
+                else:
+                    ry = li.get('trailingAnnualDividendYield') or li.get('dividendYield') or 0
+                    if ry > 0.50: ry = 0
+                    rr = float(li.get('trailingAnnualDividendRate') or li.get('dividendRate') or 0)
+                    calc_info = {'ticker': sym,
+                        'price': float(li.get('currentPrice') or li.get('regularMarketPrice') or 0),
+                        'yield_pct': round(ry * 100, 2), 'div_rate': rr,
+                        'monthly_pay': round(rr / 12, 4) if rr else None,
+                        'frequency': 'Quarterly (est)',
+                        'payout': round((li.get('payoutRatio') or 0) * 100, 1) or None,
+                        'sector': li.get('sector') or 'Unknown'}
             else:
-                ry = li.get('trailingAnnualDividendYield') or li.get('dividendYield') or 0
-                if ry > 0.50: ry = 0
-                rr = float(li.get('trailingAnnualDividendRate') or li.get('dividendRate') or 0)
-                calc_info = {'ticker': ctk.upper().strip(),
-                    'price': float(li.get('currentPrice') or li.get('regularMarketPrice') or 0),
-                    'yield_pct': round(ry * 100, 2), 'div_rate': rr,
-                    'monthly_pay': round(rr / 12, 4) if rr else None,
-                    'frequency': 'Quarterly (est)',
-                    'payout': round((li.get('payoutRatio') or 0) * 100, 1) or None,
-                    'sector': li.get('sector') or 'Unknown'}
+                st.warning(sym + ' not in scan data. Click **Refresh** for live lookup, or pick from the list.')
     if calc_info and calc_info.get('price', 0) > 0:
         st.markdown('---')
         ci1, ci2 = st.columns([1, 1])
@@ -782,6 +851,8 @@ with tab_calc:
 with tab_az:
     st.markdown('<div class="section-hdr">Stock Analyzer</div>', unsafe_allow_html=True)
     st.markdown('Enter any ticker for a full breakdown with metric explanations.')
+    if not live_mode:
+        st.caption('Using scan data only. Click **Refresh** in the sidebar for live Yahoo/Claude data.')
     # Show setup tip if no API key configured
     _has_key = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
     if not _has_key:
@@ -802,10 +873,10 @@ with tab_az:
     if az_btn and az_ticker:
         _has_api = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
         _spin_msg = ('Fetching live data for ' + az_ticker.upper() +
-                     ' via web search...' if _has_api else
+                     ' via web search...' if (_has_api and live_mode) else
                      'Loading scan data for ' + az_ticker.upper() + '...')
         with st.spinner(_spin_msg):
-            _res = fetch_stock_analysis(az_ticker)
+            _res = fetch_stock_analysis(az_ticker, live=live_mode)
         # fetch returns 5 values now (added source_summary)
         ai, ah, ad, ae = _res[0], _res[1], _res[2], _res[3]
         _src = _res[4] if len(_res) > 4 else {}
