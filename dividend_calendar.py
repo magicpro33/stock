@@ -159,19 +159,24 @@ def pill(label, bull):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_scan_data():
+    # Reads the local scan file (data/stock_data.json.gz in the repo).
+    # Returns (df, error, has_ex_dates, raw_dict) -- raw_dict shared with
+    # _load_scan_dict() so the file is never read or fetched twice.
     if not os.path.exists(DATA_FILE):
-        return None, 'data/stock_data.json.gz not found -- run nightly_scan.py first', False
+        return None, 'data/stock_data.json.gz not found -- run nightly_scan.py first', False, {}
     try:
         with gzip.open(DATA_FILE, 'rt', encoding='utf-8') as f:
             raw = json.load(f)
     except Exception as e:
-        return None, 'Could not read data file: ' + str(e), False
+        return None, 'Could not read data file: ' + str(e), False, {}
     rows = []
     ex_count = 0
+    raw_dict = {}  # keyed by ticker -- reused by _load_scan_dict()
     for item in raw:
         if not isinstance(item, dict): continue
         ticker = (item.get('Ticker') or '').strip()
         if not ticker: continue
+        raw_dict[ticker] = item  # store full record for analyzer
         try: yp = float(item.get('DividendYieldPct') or 0)
         except (TypeError, ValueError): continue
         if yp <= 0 or yp > 50: continue
@@ -197,9 +202,9 @@ def load_scan_data():
             'div_rate': dr, 'monthly_pay': mp, 'payout': pr,
             'frequency': freq, 'div_score': float(item.get('DividendScore') or 0),
             'ex_date': ex_date})
-    if not rows: return None, 'No valid dividend stocks found.', False
+    if not rows: return None, 'No valid dividend stocks found.', False, raw_dict
     df = pd.DataFrame(rows).sort_values('yield_pct', ascending=False).reset_index(drop=True)
-    return df, None, ex_count > 0
+    return df, None, ex_count > 0, raw_dict
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ex_dates_live(tickers_tuple):
@@ -225,6 +230,15 @@ _SCAN_URL = ('https://raw.githubusercontent.com/magicpro33/stock'
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_scan_dict():
+    # First try: reuse the already-loaded local scan file (fastest, no network call)
+    if os.path.exists(DATA_FILE):
+        try:
+            with gzip.open(DATA_FILE, 'rt', encoding='utf-8') as f:
+                raw = json.load(f)
+            return {x['Ticker']: x for x in raw if isinstance(x, dict) and x.get('Ticker')}
+        except Exception:
+            pass
+    # Fallback: fetch from GitHub (only if local file missing -- shouldn't happen on Cloud)
     try:
         import urllib.request as ur, gzip as gz_
         req = ur.Request(_SCAN_URL, headers={'User-Agent': 'Mozilla/5.0'})
@@ -536,7 +550,8 @@ if scan_result[0] is None:
     st.info('Run python nightly_scan.py and push data/ to GitHub. GitHub Actions regenerates it nightly.')
     st.stop()
 
-df_all, _err, has_ex_dates = scan_result
+# Unpack 4 values -- raw_dict reused by analyzer so file is read only once
+df_all, _err, has_ex_dates, _raw_scan_dict = scan_result
 
 with st.sidebar:
     sectors = ['All sectors'] + sorted(df_all['sector'].dropna().unique().tolist())
@@ -553,13 +568,15 @@ if freq_filter != 'All':
 if sector_filter != 'All sectors':
     df = df[df['sector'] == sector_filter]
 
+# Ex-dates come directly from scan data -- no live API calls needed.
+# If scan has no ex-dates (old scan file), show a warning but don't
+# block the app or make 1600+ slow yfinance calls.
 if not has_ex_dates:
-    st.info('Fetching live ex-dates for ' + str(len(df)) + ' stocks from Yahoo Finance...')
-    with st.spinner('Fetching ex-dates...'):
-        live_map = fetch_ex_dates_live(tuple(df['ticker'].tolist()))
-    df = df.copy()
-    df['ex_date'] = df['ticker'].map(live_map)
-    src_label, badge_cls = 'live Yahoo Finance', 'src-warn'
+    src_label, badge_cls = 'scan data (no ex-dates -- re-run scan)', 'src-warn'
+    st.warning(
+        'No ex-dividend dates found in scan data. '
+        'Push the updated nightly_scan.py and trigger a new scan to populate the calendar.'
+    )
 else:
     src_label, badge_cls = 'scan data', 'src-ok'
 df['buy_date'] = df['ex_date'].apply(
@@ -693,7 +710,8 @@ with tab_calc:
         ctk = st.text_input('Enter ticker symbol', placeholder='e.g. ET, EPD, DOC', key='calc_ticker')
         if ctk:
             with st.spinner('Fetching ' + ctk.upper() + '...'):
-                li, _, _, le = fetch_stock_analysis(ctk)
+                _calc_res = fetch_stock_analysis(ctk)
+                li, le = _calc_res[0], _calc_res[3]
             if le or not li: st.error('Could not fetch ' + ctk.upper() + '. Check ticker.')
             else:
                 ry = li.get('trailingAnnualDividendYield') or li.get('dividendYield') or 0
