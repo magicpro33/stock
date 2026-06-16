@@ -669,9 +669,12 @@ df['buy_date'] = df['ex_date'].apply(
     lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
 
 cutoff = today + datetime.timedelta(days=days_ahead)
-# Vectorized window filter -- no apply() overhead
-_bd = pd.to_datetime(df['buy_date'].apply(safe_date), errors='coerce')
-df_cal = df[_bd.notna() & (_bd.dt.date >= today) & (_bd.dt.date <= cutoff)].copy()
+
+def _in_window(bd):
+    d = safe_date(bd)
+    return d is not None and today <= d <= cutoff
+
+df_cal = df[df['buy_date'].apply(_in_window)].copy()
 df_cal = df_cal.sort_values('yield_pct', ascending=False)
 
 meta_txt = ('  |  Last scan: ' + str(meta.get('scanned_at_utc','--'))) if meta else ''
