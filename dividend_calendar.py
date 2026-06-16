@@ -543,6 +543,9 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         '<th>Price</th>' + hdr_buy +
         '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
     st.markdown(tbl, unsafe_allow_html=True)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_meta():
     if not os.path.exists(META_FILE): return None
     try:
         with open(META_FILE) as f: return json.load(f)
