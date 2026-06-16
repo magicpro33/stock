@@ -88,15 +88,36 @@ st.markdown(_CSS, unsafe_allow_html=True)
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'data', 'stock_data.json.gz')
 META_FILE = os.path.join(BASE_DIR, 'data', 'scan_meta.json')
+APP_VERSION = '2026-06-01b'  # bump when deploying -- verify in sidebar footer
 
 def safe_date(v):
-    if v is None: return None
-    if isinstance(v, datetime.datetime): return v.date()
-    if isinstance(v, datetime.date): return v
+    if v is None:
+        return None
+    if isinstance(v, datetime.datetime):
+        return v.date()
+    if isinstance(v, datetime.date):
+        return v
     try:
-        if pd.isna(v): return None
-    except Exception: pass
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+    try:
+        if isinstance(v, pd.Timestamp):
+            return v.date()
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(v, errors='coerce')
+        if ts is not pd.NaT and not pd.isna(ts):
+            return ts.date()
+    except Exception:
+        pass
     return None
+
+def _in_buy_window(bd, start, end):
+    d = safe_date(bd)
+    return d is not None and start <= d <= end
 
 def tier(y):
     if y >= 8: return 't1'
@@ -608,6 +629,7 @@ with st.sidebar:
         '- Hit **Refresh** to fetch live ex-dates + enable live analyzer\n'
         '- Calculator tab to model returns\n'
         '- Analyzer tab for full stock deep-dive')
+    st.caption('v' + APP_VERSION)
 
 st.markdown('<div class="main-title">Dividend Capture Calendar</div>', unsafe_allow_html=True)
 st.markdown('<div class="main-sub">buy 24h before ex-date | highest yield first | magicpro33/stock</div>', unsafe_allow_html=True)
@@ -669,12 +691,8 @@ df['buy_date'] = df['ex_date'].apply(
     lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
 
 cutoff = today + datetime.timedelta(days=days_ahead)
-
-def _in_window(bd):
-    d = safe_date(bd)
-    return d is not None and today <= d <= cutoff
-
-df_cal = df[df['buy_date'].apply(_in_window)].copy()
+# Pure Python dates only -- pandas datetime comparisons break on Python 3.14
+df_cal = df[df['buy_date'].apply(lambda bd: _in_buy_window(bd, today, cutoff))].copy()
 df_cal = df_cal.sort_values('yield_pct', ascending=False)
 
 meta_txt = ('  |  Last scan: ' + str(meta.get('scanned_at_utc','--'))) if meta else ''
