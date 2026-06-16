@@ -583,9 +583,12 @@ df['buy_date'] = df['ex_date'].apply(
     lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
 
 cutoff = today + datetime.timedelta(days=days_ahead)
-# Vectorized window filter -- no apply() overhead
-_bd = pd.to_datetime(df['buy_date'].apply(safe_date), errors='coerce')
-df_cal = df[_bd.notna() & (_bd.dt.date >= today) & (_bd.dt.date <= cutoff)].copy()
+# Pure Python date comparison -- avoids pandas tz-aware dtype mismatch
+# on Python 3.14 where pd.to_datetime().dt.date != datetime.date comparisons fail
+def _in_window(bd):
+    d = safe_date(bd)
+    return d is not None and today <= d <= cutoff
+df_cal = df[df['buy_date'].apply(_in_window)].copy()
 df_cal = df_cal.sort_values('yield_pct', ascending=False)
 
 meta_txt = ('  |  Last scan: ' + str(meta.get('scanned_at_utc','--'))) if meta else ''
@@ -642,8 +645,9 @@ with tab_cal:
         st.info('No buy signals in the next ' + str(days_ahead) + ' days. Try widening the date range.')
     else:
         df_show = df_cal_sorted  # already sorted, no copy needed
-        _dsa = pd.to_datetime(df_show['buy_date'].apply(safe_date), errors='coerce').dt.date
-        df_show = df_show.assign(days_away=(_dsa - today).apply(lambda x: x.days if pd.notna(x) else 0))
+        # Calculate days away using pure Python -- avoids pandas dtype issues
+        df_show = df_show.assign(days_away=df_show['buy_date'].apply(
+            lambda bd: (safe_date(bd) - today).days if safe_date(bd) else 0))
         rows_html = []
         for row in df_show.to_dict('records'):
             yc  = ycolor(row['yield_pct'])
