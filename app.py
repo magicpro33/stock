@@ -1902,7 +1902,7 @@ def calculate_short_squeeze(info: dict) -> dict:
 
 def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                            raw, sticker, selected, fetched_at,
-                           range_days=30, mfi_period=14):
+                           range_days=30, mfi_period=14, key_prefix="analyze"):
     """
     Full stock analysis render — identical to the Analyze a Stock tab.
     Called from both the analyze tab and the inline screener panel.
@@ -1912,18 +1912,79 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
         name    = info.get("longName") or info.get("shortName") or sticker
         price   = info.get("currentPrice") or info.get("regularMarketPrice")
         mktcap  = info.get("marketCap")
+        sector  = info.get("sector", "")
+        industry= info.get("industry", "")
+        pe      = info.get("trailingPE")
+        change  = info.get("regularMarketChangePercent", 0) or 0
+        chg_col = "#26c485" if change >= 0 else "#ef5350"
+        chg_sym = "▲" if change >= 0 else "▼"
 
-        st.markdown(f"## {name} &nbsp; `{sticker}`")
-        # Always show when data was fetched — analyze tab always pulls live
-        pass  # placeholder
-        if fetched_at:
-            st.caption(f"Live data fetched: {fetched_at} · Source: Yahoo Finance via yfinance")
-        h1, h2, h3, h4 = st.columns(4)
-        h1.metric("Price",    f"${price:,.2f}" if price else "N/A")
-        h2.metric("Sector",   info.get("sector", "N/A"))
-        h3.metric("Industry", info.get("industry", "N/A"))
-        h4.metric("Mkt Cap",  f"${mktcap/1e9:.1f}B" if mktcap else "N/A")
-        st.divider()
+        # ── Stock header card ─────────────────────────────────────────
+        st.markdown(
+            f"""<div style='background:linear-gradient(135deg,#0d1b2a 0%,#1a2d45 100%);
+            border:1px solid #1e3a5f;border-radius:14px;padding:20px 24px;margin-bottom:16px;'>
+            <div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;'>
+              <div>
+                <div style='font-size:1.6em;font-weight:700;color:#e8f4fd;letter-spacing:-0.5px;'>
+                  {name}
+                  <span style='font-size:0.6em;font-weight:500;color:#5b9bd5;
+                  background:#0d2137;padding:3px 10px;border-radius:6px;margin-left:10px;
+                  vertical-align:middle;'>{sticker}</span>
+                </div>
+                <div style='font-size:0.88em;color:#7fb3d3;margin-top:4px;'>
+                  {sector}{" · " + industry if industry else ""}
+                </div>
+                {f"<div style='font-size:0.78em;color:#4a7fa0;margin-top:2px;'>📅 {fetched_at}</div>" if fetched_at else ""}
+              </div>
+              <div style='text-align:right;'>
+                <div style='font-size:2.2em;font-weight:700;color:#e8f4fd;line-height:1;'>
+                  {"$" + f"{price:,.2f}" if price else "N/A"}
+                </div>
+                <div style='font-size:1em;color:{chg_col};font-weight:600;margin-top:2px;'>
+                  {chg_sym} {abs(change):.2f}% today
+                </div>
+              </div>
+            </div>
+            <div style='display:flex;gap:24px;margin-top:16px;flex-wrap:wrap;'>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Market Cap</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{mktcap/1e9:.1f}B" if mktcap and mktcap >= 1e9 else ("$" + f"{mktcap/1e6:.0f}M" if mktcap else "N/A")}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>P/E Ratio</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{pe:.1f}x" if pe else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>52W High</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{info.get('fiftyTwoWeekHigh',0):,.2f}" if info.get("fiftyTwoWeekHigh") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>52W Low</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{info.get('fiftyTwoWeekLow',0):,.2f}" if info.get("fiftyTwoWeekLow") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Volume</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{info.get('volume',0)/1e6:.2f}M" if info.get("volume") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Avg Volume</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{info.get('averageVolume',0)/1e6:.2f}M" if info.get("averageVolume") else "N/A"}
+                </div>
+              </div>
+            </div></div>""",
+            unsafe_allow_html=True
+        )
 
         if not selected:
             st.warning("No metrics were selected when Analyze was run.")
@@ -1992,10 +2053,75 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 f"<span style='font-weight:600;'>{value}</span></div>",
                 unsafe_allow_html=True)
 
-        # ── Metric cards ─────────────────────────────────
-        st.markdown("### Metric Results")
+        # ── Metric cards — ignition scanner style ────────────────────
+        import html as _html
 
-        # Compute MFI signal for use in card and banner
+        def _score_color(val):
+            """Return color for a 0-1 score value."""
+            if val is None: return "#555"
+            if val >= 0.8:  return "#26c485"
+            if val >= 0.5:  return "#f5a623"
+            return "#ef5350"
+
+        def _arc_svg(score, size=64):
+            """SVG semicircle arc gauge matching ignition scanner style."""
+            if score is None: score = 0
+            score = max(0.0, min(1.0, float(score)))
+            col   = _score_color(score)
+            # Arc parameters
+            cx, cy, r = size/2, size/2, size/2 - 6
+            circ      = 2 * 3.14159 * r
+            dash      = circ * score
+            pct_txt   = f"{int(score*100)}"
+            return (
+                f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='none' stroke='#1e3a5f' stroke-width='6'/>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='none' stroke='{col}' stroke-width='6'"
+                f" stroke-dasharray='{dash:.1f} {circ:.1f}'"
+                f" stroke-dashoffset='{circ/4:.1f}' stroke-linecap='round'"
+                f" style='transition:stroke-dasharray .4s ease;'/>"
+                f"<text x='{cx}' y='{cy+5}' text-anchor='middle'"
+                f" fill='{col}' font-size='13' font-weight='700' font-family='monospace'>"
+                f"{pct_txt}</text>"
+                f"</svg>"
+            )
+
+        def _bar_html(score, col):
+            """Gradient progress bar."""
+            if score is None: score = 0
+            pct = int(max(0, min(100, float(score) * 100)))
+            return (
+                f"<div style='height:4px;background:#1e3a5f;border-radius:2px;margin-top:8px;'>"
+                f"<div style='height:4px;width:{pct}%;border-radius:2px;"
+                f"background:linear-gradient(90deg,{col}88,{col});transition:width .4s;'></div>"
+                f"</div>"
+            )
+
+        def _signal_pill(key, val):
+            """Colored signal pill label."""
+            if val is None: return "<span style='background:#1e3a5f;color:#4a7fa0;padding:2px 8px;border-radius:10px;font-size:0.75em;'>N/A</span>"
+            col = _score_color(val)
+            g, n, hi = THRESHOLDS.get(key, (None, None, True))
+            if g is None:
+                label = "N/A"
+            elif hi:
+                label = "Strong" if val >= g else ("Moderate" if val >= n else "Weak")
+            else:
+                label = "Strong" if val <= g else ("Moderate" if val <= n else "Weak")
+            return f"<span style='background:{col}22;color:{col};padding:2px 10px;border-radius:10px;font-size:0.75em;font-weight:600;border:1px solid {col}44;'>{label}</span>"
+
+        # ── Compute overall composite score for arc gauge ──────────
+        _total_score = 0.0
+        _total_weight = 0.0
+        for _sk in selected:
+            _sv = raw.get(_sk)
+            if _sv is not None and not (isinstance(_sv, float) and np.isnan(_sv)):
+                _total_score  += float(_sv)
+                _total_weight += 1.0
+        _composite = (_total_score / _total_weight) if _total_weight > 0 else 0.0
+        _comp_col  = _score_color(_composite)
+
+        # ── MFI signal ─────────────────────────────────────────────
         _mfi_raw = raw.get("MFI")
         def _mfi_label(v):
             if v is None or (isinstance(v, float) and np.isnan(v)): return None, None
@@ -2005,44 +2131,77 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             if mfi >= 40: return "➡️ Neutral",      "#888888"
             if mfi >= 20: return "📉 Selling",      "#f59e0b"
             return         "🧊 Oversold",           "#60a5fa"
-
         _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
 
-        # Show MFI signal banner if MFI is selected
-        if "MFI" in selected and _mfi_lbl:
-            _mfi_pct = f"{_mfi_raw*100:.1f}" if _mfi_raw is not None else "N/A"
-            st.markdown(
-                f"<div style='background:{_mfi_col}22;border:1px solid {_mfi_col};"
-                f"border-radius:8px;padding:10px 16px;margin-bottom:12px;"
-                f"display:flex;justify-content:space-between;align-items:center;'>"
-                f"<span style='font-weight:600;font-size:1.05em;'>{_mfi_lbl}</span>"
-                f"<span style='color:#ccc;font-size:0.9em;'>MFI = {_mfi_pct} &nbsp;·&nbsp; "
-                f"Oversold ≤20 · Selling 20–40 · Neutral 40–60 · Buying 60–80 · Overbought ≥80</span>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+        # ── Composite score banner ──────────────────────────────────
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,#0d1b2a,#1a2d45);"
+            f"border:1px solid #1e3a5f;border-radius:14px;padding:18px 24px;"
+            f"display:flex;align-items:center;gap:24px;margin-bottom:16px;'>"
+            f"<div style='flex-shrink:0;'>{_arc_svg(_composite, 80)}</div>"
+            f"<div style='flex:1;'>"
+            f"<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
+            f"letter-spacing:.08em;margin-bottom:4px;'>Composite Score</div>"
+            f"<div style='font-size:1.8em;font-weight:700;color:{_comp_col};line-height:1;'>"
+            f"{_composite:.3f}"
+            f"</div>"
+            f"<div style='font-size:0.8em;color:#4a7fa0;margin-top:4px;'>"
+            f"{len(selected)} metrics active · "
+            f"{'Strong setup' if _composite >= 0.7 else ('Moderate' if _composite >= 0.4 else 'Weak setup')}"
+            f"</div>"
+            f"</div>"
+            f"<div style='display:flex;flex-wrap:wrap;gap:8px;'>"
+            + "".join([
+                f"<div style='background:#0a1929;border-radius:8px;padding:6px 12px;"
+                f"border:1px solid #1e3a5f;text-align:center;min-width:90px;'>"
+                f"<div style='font-size:0.7em;color:#4a7fa0;'>{METRICS[k]["label"]}</div>"
+                f"<div style='font-size:0.95em;font-weight:600;color:{_score_color(raw.get(k))};'>"
+                f"{_fv(k,raw.get(k))}</div></div>"
+                for k in selected[:8]
+            ])
+            + f"</div></div>",
+            unsafe_allow_html=True
+        )
 
+        # ── Metric cards grid ───────────────────────────────────────
+        st.markdown(
+            "<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
+            "letter-spacing:.08em;margin:16px 0 12px;'>Signal Breakdown</div>",
+            unsafe_allow_html=True
+        )
         cols = st.columns(3)
         for i, key in enumerate(selected):
-            cfg = METRICS[key]; val = raw.get(key)
-            # HTML-escape the description so special chars don't break the markup
-            import html as _html
-            safe_desc = _html.escape(cfg['desc'][:120])
-            # Build extra badge line for MFI card
-            extra = ""
+            cfg = METRICS[key]
+            val = raw.get(key)
+            col_hex = _score_color(val)
+            safe_desc = _html.escape(cfg['desc'][:110])
+            extra_badge = ""
             if key == "MFI" and _mfi_lbl:
-                extra = (f"<div style='margin-top:6px;padding:3px 8px;border-radius:4px;"
-                         f"background:{_mfi_col}33;color:{_mfi_col};"
-                         f"font-size:0.85em;font-weight:600;display:inline-block;'>"
-                         f"{_mfi_lbl}</div>")
+                extra_badge = (
+                    f"<div style='margin-top:6px;padding:2px 8px;border-radius:4px;"
+                    f"background:{_mfi_col}22;color:{_mfi_col};"
+                    f"font-size:0.78em;font-weight:600;display:inline-block;"
+                    f"border:1px solid {_mfi_col}44;'>{_mfi_lbl}</div>"
+                )
             with cols[i % 3]:
                 st.markdown(
-                    f"<div style='border:1px solid #444;border-radius:8px;"
-                    f"padding:14px;margin-bottom:12px;'>"
-                    f"<div style='font-size:1.1em;font-weight:600;'>{_sig(key,val)} {cfg['label']}</div>"
-                    f"<div style='font-size:1.8em;font-weight:700;margin:6px 0;'>{_fv(key,val)}</div>"
-                    f"{extra}"
-                    f"<div style='font-size:0.78em;color:#aaa;margin-top:6px;'>{safe_desc}...</div>"
+                    f"<div style='background:linear-gradient(135deg,#0d1b2a,#142236);"
+                    f"border:1px solid #1e3a5f;border-radius:12px;"
+                    f"padding:14px 16px;margin-bottom:10px;height:100%;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<div style='font-size:0.8em;font-weight:600;color:#7fb3d3;text-transform:uppercase;"
+                    f"letter-spacing:.06em;'>{cfg['label']}</div>"
+                    f"{_signal_pill(key, val)}"
+                    f"</div>"
+                    f"<div style='display:flex;align-items:center;gap:14px;margin:10px 0 2px;'>"
+                    f"<div style='flex-shrink:0;'>{_arc_svg(val, 52)}</div>"
+                    f"<div>"
+                    f"<div style='font-size:1.5em;font-weight:700;color:{col_hex};line-height:1;'>{_fv(key,val)}</div>"
+                    f"{extra_badge}"
+                    f"</div>"
+                    f"</div>"
+                    f"{_bar_html(val, col_hex)}"
+                    f"<div style='font-size:0.72em;color:#4a7fa0;margin-top:8px;line-height:1.4;'>{safe_desc}…</div>"
                     f"</div>",
                     unsafe_allow_html=True
                 )
@@ -2418,14 +2577,14 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 chart_type = st.selectbox(
                     "Chart Type",
                     ["Candlestick", "Heikin Ashi", "Line"],
-                    index=0, key="chart_type",
+                    index=0, key=f"{key_prefix}_chart_type",
                     help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
                 )
             with cc2:
                 interval = st.selectbox(
                     "Candle Interval",
                     ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
-                    index=6, key="chart_interval",
+                    index=6, key=f"{key_prefix}_chart_interval",
                     help=(
                         "1m/5m: last 7 days max  |  "
                         "15m/30m/1h: last 60 days max  |  "
@@ -2450,11 +2609,11 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
                 pc = st.selectbox(
                     "Time Period", period_opts,
-                    index=period_def, key="price_history_period"
+                    index=period_def, key=f"{key_prefix}_price_history_period"
                 )
             with cc4:
                 chart_theme = st.selectbox(
-                    "Theme", ["Dark","Light"], index=0, key="chart_theme"
+                    "Theme", ["Dark","Light"], index=0, key=f"{key_prefix}_chart_theme"
                 )
 
             # ── Custom date range (daily+ only) ───────────
@@ -2465,28 +2624,28 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                         "Start Date",
                         value=pd.Timestamp.today() - pd.Timedelta(days=365),
                         max_value=pd.Timestamp.today(),
-                        key="chart_custom_start",
+                        key=f"{key_prefix}_chart_custom_start",
                     )
                 with dr2:
                     custom_end = st.date_input(
                         "End Date",
                         value=pd.Timestamp.today(),
                         max_value=pd.Timestamp.today(),
-                        key="chart_custom_end",
+                        key=f"{key_prefix}_chart_custom_end",
                     )
 
             st.markdown("**Overlays**")
             ov1,ov2,ov3,ov4 = st.columns(4)
-            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key="show_ema20")
-            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key="show_ema50")
-            show_ema200 = ov3.checkbox("EMA 200", value=False, key="show_ema200")
-            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key="show_bb")
+            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key=f"{key_prefix}_show_ema20")
+            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key=f"{key_prefix}_show_ema50")
+            show_ema200 = ov3.checkbox("EMA 200", value=False, key=f"{key_prefix}_show_ema200")
+            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key=f"{key_prefix}_show_bb")
 
             st.markdown("**Sub-Charts**")
             sc1,sc2,sc3 = st.columns(3)
-            show_vol  = sc1.checkbox("Volume",  value=True,  key="show_vol")
-            show_rsi  = sc2.checkbox("RSI",     value=True,  key="show_rsi")
-            show_macd = sc3.checkbox("MACD",    value=False, key="show_macd")
+            show_vol  = sc1.checkbox("Volume",  value=True,  key=f"{key_prefix}_show_vol")
+            show_rsi  = sc2.checkbox("RSI",     value=True,  key=f"{key_prefix}_show_rsi")
+            show_macd = sc3.checkbox("MACD",    value=False, key=f"{key_prefix}_show_macd")
 
             # ── Fetch history with correct interval ───────
             # yfinance interval/period compatibility:
@@ -3983,6 +4142,7 @@ with tab_screener:
             fetched_at = _il_fetched_at,
             range_days = _il_rdays,
             mfi_period = _il_mfi_p,
+            key_prefix = f"inline_{_inline_tk.lower()}",
         )
     else:
         st.warning(
@@ -4348,4 +4508,5 @@ with tab_analyze:
             fetched_at = _d.get("fetched_at", ""),
             range_days = st.session_state.get("slider_range_days", 30),
             mfi_period = st.session_state.get("slider_mfi_period", 14),
+            key_prefix = "analyze",
         )
