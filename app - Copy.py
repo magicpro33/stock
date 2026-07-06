@@ -1,0 +1,4512 @@
+# -----------------------------------
+# REQUIREMENTS
+# pip install streamlit yfinance pandas numpy openpyxl tqdm requests
+#
+# RUN:
+#   streamlit run app.py
+# -----------------------------------
+
+import io
+import sys
+import time
+import base64
+import requests
+import numpy as np
+import pandas as pd
+import streamlit as st
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from openpyxl.utils import get_column_letter
+from pathlib import Path
+import yfinance as yf
+try:
+    from alpha_vantage_fallback import (
+        av_fill_info, av_fill_history, av_fill_financials,
+        av_needs_fallback, av_needs_history_fallback, av_needs_financials_fallback,
+    )
+    _AV_AVAILABLE = True
+except ImportError:
+    _AV_AVAILABLE = False
+
+ROOT = Path(__file__).resolve().parent
+CREATOR_NAME = "AIupscale"
+CREATOR_URL = "https://aiupscalellc.netlify.app/"
+LOGO_PATH = ROOT / "assets" / "aiupscale_logo.png"
+LOGO_BG = "#081325"
+LOGO_BG_PANEL = "#0c1829"
+LOGO_TEXT = "#F6F4E9"
+
+# ───────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Stock Screener",
+    page_icon="📈",
+    layout="wide",
+)
+
+
+def _inject_theme_css() -> None:
+    st.markdown(
+        f"""
+        <style>
+            .stApp {{
+                background-color: {LOGO_BG};
+                color: {LOGO_TEXT};
+            }}
+            [data-testid="stSidebar"] {{
+                background-color: {LOGO_BG_PANEL};
+                color: {LOGO_TEXT};
+            }}
+            [data-testid="stHeader"] {{
+                background-color: transparent;
+            }}
+            h1, h2, h3, h4, h5, h6,
+            p, label, span, li,
+            .stMarkdown, .stCaption,
+            [data-testid="stMarkdownContainer"] p,
+            [data-testid="stWidgetLabel"] {{
+                color: {LOGO_TEXT} !important;
+            }}
+            .stExpander details summary,
+            [data-baseweb="tab"] {{
+                color: {LOGO_TEXT};
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_inject_theme_css()
+
+
+def _clickable_logo(width: int = 200) -> None:
+    if not LOGO_PATH.is_file():
+        return
+    encoded = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+    st.markdown(
+        f'<a href="{CREATOR_URL}" target="_blank" rel="noopener noreferrer">'
+        f'<img src="data:image/png;base64,{encoded}" width="{width}" '
+        f'style="cursor:pointer;" alt="{CREATOR_NAME}">'
+        f"</a>",
+        unsafe_allow_html=True,
+    )
+
+
+_header_logo, _header_title = st.columns([1, 4])
+with _header_logo:
+    _clickable_logo()
+with _header_title:
+    st.title("📈 Hybrid Stock Screener")
+    st.caption(
+        "Screens S&P 500, NYSE, or NASDAQ for individual companies — "
+        "ETFs, funds, and index products excluded."
+    )
+
+tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
+
+# ───────────────────────────────────────────────────────────────
+# METRIC CONFIG  — name, default weight, full description
+# ───────────────────────────────────────────────────────────────
+METRICS = {
+    "OE_Yield": {
+        "label":   "OE Yield",
+        "weight":  3,
+        "desc":    "Owner Earnings Yield = (Net Income + Depreciation − CapEx) ÷ Market Cap. "
+                   "Warren Buffett's preferred measure of true cash profitability relative to price. "
+                   "Higher is better — above 5% is considered good value.",
+    },
+    "ROIC": {
+        "label":   "ROIC",
+        "weight":  2,
+        "desc":    "Return on Invested Capital = NOPAT ÷ Invested Capital. "
+                   "Measures how efficiently a company generates profit from the capital deployed. "
+                   "Above 15% suggests a durable competitive advantage (moat).",
+    },
+    "ROIC_Trend": {
+        "label":   "ROIC Trend",
+        "weight":  2,
+        "desc":    "Year-over-year change in ROIC. A rising ROIC means the company's moat is "
+                   "widening — it's earning more from each dollar of capital over time. "
+                   "Positive = improving; negative = deteriorating.",
+    },
+    "RevenueGrowth": {
+        "label":   "Revenue Growth",
+        "weight":  1,
+        "desc":    "Year-over-year revenue growth rate. Measures top-line expansion. "
+                   "Above 5% annually is considered healthy for a mature company; "
+                   "high-growth companies often show 15–30%+.",
+    },
+    "EarningsGrowth": {
+        "label":   "Earnings Growth",
+        "weight":  1,
+        "desc":    "Year-over-year earnings (EPS) growth rate. Confirms that revenue growth "
+                   "is translating into real profit. Ideally grows faster than revenue, "
+                   "indicating improving operating leverage.",
+    },
+    "Piotroski": {
+        "label":   "Piotroski Score",
+        "weight":  1,
+        "desc":    "9-point accounting health score (F-Score) developed by Stanford professor "
+                   "Joseph Piotroski. Tests profitability, leverage, and operating efficiency. "
+                   "7–9 = financially strong; 0–2 = weak or potentially distressed.",
+    },
+    "OBV": {
+        "label":   "OBV (On-Balance Volume)",
+        "weight":  1,
+        "desc":    "On-Balance Volume tracks cumulative buying vs selling pressure by adding "
+                   "volume on up-days and subtracting on down-days. A rising OBV slope over "
+                   "the last 20 days means institutions are quietly accumulating shares. "
+                   "Score: 1.0 if slope is positive, 0.0 if negative.",
+    },
+    "MFI": {
+        "label":   "MFI (Money Flow Index)",
+        "weight":  1,
+        "desc":    "Money Flow Index is a volume-weighted RSI (0–100). It measures whether "
+                   "money is flowing into or out of a stock. Score = MFI ÷ 100, so it ranges "
+                   "0.0–1.0 across the full scale. Below 0.3 = oversold/outflow. "
+                   "0.5 = neutral. Above 0.6 = buying pressure. Above 0.8 = strong inflow.",
+    },
+    "PCV": {
+        "label":   "PCV (Price-Confirmed Volume)",
+        "weight":  1,
+        "desc":    "Price-Confirmed Volume measures what fraction of recent volume occurred "
+                   "on days the stock closed higher than the prior day. If >55% of volume "
+                   "happens on up-days, buyers are in control. Score scales from 0 (50/50) "
+                   "to 1.0 (all up-day volume).",
+    },
+    "RangePosScore": {
+        "label":   "Range Position Score",
+        "weight":  2,
+        "desc":    "Breakout proximity score — measures how close the current price is to the "
+                   "LOW end of its trading range. Score = 1 − RangePos, so 1.0 means price is "
+                   "sitting exactly at range support (maximum coiled energy), and 0.0 means "
+                   "price is at the top of the range (already extended). Use this with the "
+                   "Price Range Filter to find stocks coiling at the bottom of a tight range.",
+    },
+    "RSI": {
+        "label":   "RSI (Momentum Zone)",
+        "weight":  2,
+        "desc":    "14-day Relative Strength Index scored for continuation potential. "
+                   "1.0 = RSI 55–70 (sweet spot: uptrend confirmed, not overbought). "
+                   "0.6 = RSI 50–55 (momentum building). "
+                   "0.2 = RSI 70–80 (caution: extended). "
+                   "0.0 = RSI >80 (overbought/reversal risk) or <50 (no uptrend).",
+    },
+    "MACD": {
+        "label":   "MACD Momentum",
+        "weight":  2,
+        "desc":    "MACD histogram score — measures short-term momentum acceleration. "
+                   "1.0 = histogram positive AND growing (momentum accelerating upward). "
+                   "0.6 = histogram positive but shrinking (momentum slowing). "
+                   "0.2 = histogram just crossed zero (early signal). "
+                   "0.0 = histogram negative (downward momentum). "
+                   "MACD line = 12-day EMA minus 26-day EMA. Signal = 9-day EMA of MACD.",
+    },
+    "GoldenCross": {
+        "label":   "Golden Cross",
+        "weight":  3,
+        "desc":    "Golden Cross = 50-day MA is above the 200-day MA (long-term uptrend confirmed). "
+                   "1.0 = 50MA > 200MA (golden cross in effect — institutional buy signal). "
+                   "0.5 = 50MA within 2% of 200MA (about to cross — early setup). "
+                   "0.0 = 50MA < 200MA (death cross — downtrend). "
+                   "Requires at least 200 bars of history.",
+    },
+    "MFISweetSpot": {
+        "label":   "MFI Sweet Spot",
+        "weight":  2,
+        "desc":    "MFI scored specifically for continuation potential (not just high flow). "
+                   "1.0 = MFI 55–75: buying pressure without overbought risk — ideal for continuation. "
+                   "0.7 = MFI 75–80: strong inflow but approaching caution zone. "
+                   "0.3 = MFI 80–90: overbought — reversal risk elevated. "
+                   "0.0 = MFI >90 or <50: extreme overbought or no buying pressure.",
+    },
+    "NoBearDiv": {
+        "label":   "No Bearish Divergence",
+        "weight":  2,
+        "desc":    "Checks that price highs and MFI highs are aligned (no bearish divergence). "
+                   "1.0 = price and MFI both making higher highs — momentum confirmed. "
+                   "0.5 = no clear divergence signal either way. "
+                   "0.0 = bearish divergence detected: price made new high but MFI did not "
+                   "(rally losing conviction — often precedes a reversal). "
+                   "Measured over the last 20 trading days.",
+    },
+    "MA50Proximity": {
+        "label":   "MA50 Proximity",
+        "weight":  1,
+        "desc":    "How close price is to the 50-day MA — rewards stocks near but above it. "
+                   "1.0 = price 0–5% above MA50 (just reclaimed or sitting on support — low risk entry). "
+                   "0.7 = price 5–10% above MA50 (healthy uptrend, not extended). "
+                   "0.3 = price 10–20% above MA50 (extended — higher entry risk). "
+                   "0.0 = price >20% above MA50 (very extended) or below MA50.",
+    },
+    "ShortSqueeze": {
+        "label":   "Short Squeeze Score",
+        "weight":  3,
+        "desc":    "Composite short squeeze setup score. Rewards stocks with high short interest "
+                   "(fuel for a squeeze) AND rising price momentum (the trigger). "
+                   "1.0 = short float >20% + days-to-cover >5 + price above MA50 (maximum squeeze potential). "
+                   "0.7 = short float 10–20% OR days-to-cover 3–5 (elevated short interest). "
+                   "0.3 = short float 5–10% (moderate short interest). "
+                   "0.0 = short float <5% (little short interest — squeeze unlikely). "
+                   "Short interest data from Yahoo Finance / FINRA (updated twice monthly).",
+    },
+    "DividendScore": {
+        "label":   "Dividend Score",
+        "weight":  4,
+        "desc":    "Composite dividend quality score combining yield, payout sustainability, and payment frequency. "
+                   "1.0 = yield ≥6% + payout ratio <60% + monthly payments (highest income + safest + most frequent). "
+                   "0.8 = yield 4–6% + quarterly payments + sustainable payout. "
+                   "0.5 = yield 2–4% + annual or semi-annual payments. "
+                   "0.2 = yield <2% (token dividend). "
+                   "0.0 = no dividend. "
+                   "Payout ratio >100% penalised — company paying more than it earns is unsustainable.",
+    },
+}
+
+ALL_SECTORS = [
+    "All Sectors",
+    "Basic Materials",
+    "Communication Services",
+    "Consumer Cyclical",
+    "Consumer Defensive",
+    "Energy",
+    "Financial Services",
+    "Healthcare",
+    "Industrials",
+    "Real Estate",
+    "Technology",
+    "Utilities",
+    "Unknown",          # stocks where yfinance returned no sector (198 in current data)
+]
+
+# yfinance uses its own sector names which differ from GICS standard labels.
+# This map handles any legacy data or mixed sources — keys are lowercase for
+# case-insensitive matching; values are the canonical yfinance names above.
+_SECTOR_ALIASES = {
+    # yfinance → canonical (identity mappings — keep for explicit match)
+    "basic materials":          "Basic Materials",
+    "communication services":   "Communication Services",
+    "consumer cyclical":        "Consumer Cyclical",
+    "consumer defensive":       "Consumer Defensive",
+    "energy":                   "Energy",
+    "financial services":       "Financial Services",
+    "healthcare":               "Healthcare",
+    "industrials":              "Industrials",
+    "real estate":              "Real Estate",
+    "technology":               "Technology",
+    "utilities":                "Utilities",
+    # GICS standard → yfinance equivalents (for any live-scan data using GICS names)
+    "materials":                "Basic Materials",
+    "consumer discretionary":   "Consumer Cyclical",
+    "consumer staples":         "Consumer Defensive",
+    "financials":               "Financial Services",
+    "finance":                  "Financial Services",
+    "health care":              "Healthcare",
+    "information technology":   "Technology",
+    "it":                       "Technology",
+}
+
+def _normalise_sector(raw: str) -> str:
+    """Normalise a raw sector string to the canonical yfinance sector name."""
+    if not raw:
+        return "Unknown"
+    return _SECTOR_ALIASES.get(raw.strip().lower(), raw.strip())
+
+EXCHANGES = {
+    "S&P 500":  "sp500",
+    "NYSE":     "nyse",
+    "NASDAQ":   "nasdaq",
+}
+
+# Keywords used to detect and exclude non-company securities (ETFs, funds, trusts, etc.)
+# These are matched against the security's longName / shortName from yfinance.
+# ETF/fund keyword list — matched against longName/shortName (lowercase substring).
+# IMPORTANT: only include terms that CANNOT appear in legitimate company names.
+# Removed: "income", "trust", "preferred", "notes", "bond", "treasury", "index",
+#          "fund", "portfolio", "commodity" — these match real operating companies.
+ETF_KEYWORDS = [
+    "etf", "ishares", "invesco", "vanguard", "spdr", "proshares",
+    "direxion", "wisdomtree", "vaneck", "schwab select",
+    "fidelity select", "global x", "ark ", "pimco",
+    "debenture", "warrant",
+]
+
+def check_yfinance_health() -> dict:
+    """
+    Make a lightweight test request to yfinance to classify the current
+    connection status. Returns a dict:
+        status  : "fast" | "slow" | "rate_limited" | "timeout" | "blocked" | "unknown"
+        latency : float (seconds) or None
+        message : human-readable description
+        fix     : short action string
+    """
+    import time as _time
+    result = {"status": "unknown", "latency": None, "message": "", "fix": ""}
+    try:
+        t0   = _time.time()
+        info = yf.Ticker("AAPL").fast_info   # lightest possible yfinance call
+        # fast_info is a property — access one field to force the request
+        _ = info.last_price
+        latency = round(_time.time() - t0, 2)
+        result["latency"] = latency
+
+        if _ is None:
+            result.update({
+                "status":  "rate_limited",
+                "message": "yfinance returned empty data — likely rate limited.",
+                "fix":     "wait",
+            })
+        elif latency < 1.5:
+            result.update({
+                "status":  "fast",
+                "message": f"Connection healthy ({latency}s response time).",
+                "fix":     "none",
+            })
+        elif latency < 5.0:
+            result.update({
+                "status":  "slow",
+                "message": f"Connection slow ({latency}s response time). "
+                           "Reduce parallel workers to avoid overloading yfinance.",
+                "fix":     "reduce_workers",
+            })
+        else:
+            result.update({
+                "status":  "slow",
+                "message": f"Very slow response ({latency}s). High server load or network issue.",
+                "fix":     "reduce_workers",
+            })
+
+    except Exception as e:
+        err = str(e).lower()
+        latency = round(_time.time() - t0, 2) if 't0' in dir() else None
+        result["latency"] = latency
+        if "timeout" in err or "timed out" in err or "read timed out" in err:
+            result.update({
+                "status":  "timeout",
+                "message": "Connection timed out — yfinance server not responding.",
+                "fix":     "retry",
+            })
+        elif "429" in err or "rate" in err or "too many" in err:
+            result.update({
+                "status":  "rate_limited",
+                "message": "Rate limit hit (HTTP 429) — too many requests sent too fast.",
+                "fix":     "wait",
+            })
+        elif "connection" in err or "network" in err or "resolve" in err or "refused" in err:
+            result.update({
+                "status":  "blocked",
+                "message": "Network connection failed — Streamlit Cloud may be blocking yfinance.",
+                "fix":     "sp500",
+            })
+        else:
+            result.update({
+                "status":  "unknown",
+                "message": f"Unexpected error: {str(e)[:80]}",
+                "fix":     "retry",
+            })
+    return result
+
+
+
+# ───────────────────────────────────────────────────────────────
+# CACHE HELPERS — must be defined before sidebar renders
+# ───────────────────────────────────────────────────────────────
+import pickle as _pickle
+
+def _cache_size_str() -> str:
+    total = 0
+    for key in ("screener_cache", "analyze_fin_cache"):
+        obj = st.session_state.get(key)
+        if obj is None:
+            continue
+        try:
+            total += len(_pickle.dumps(obj, protocol=2))
+        except Exception:
+            total += sys.getsizeof(obj)
+    if total == 0:        return "0 KB"
+    if total < 1024:      return f"{total} B"
+    if total < 1024**2:   return f"{total/1024:.1f} KB"
+    return f"{total/1024**2:.2f} MB"
+
+def _clear_all_cache():
+    for key in ("screener_cache", "analyze_fin_cache"):
+        st.session_state.pop(key, None)
+
+# ───────────────────────────────────────────────────────────────
+# SESSION STATE DEFAULTS — set once on first load
+# ───────────────────────────────────────────────────────────────
+_defaults = {
+    "slider_max_price":   250,
+    "slider_min_score":   2.0,
+    "tog_ma50":           "below",  # "off" | "below" | "above"
+    "tog_range":          False,
+    "slider_range_days":  30,
+    "slider_range_pct":   10.0,
+    "slider_mfi_period":  14,
+    "analyze_history":    [],   # list of {ticker, name} dicts — most recent first
+    "max_workers_val":    12,  # starting value; auto-adjusts during scan
+    "tog_pe_filter":      False,
+    "slider_pe_range":    (0, 50),   # tuple: (min_pe, max_pe)
+    "tog_rev_filter":     False,
+    "slider_rev_min":     0,
+}
+# Metric toggle/weight defaults
+for _k, _cfg in METRICS.items():
+    _defaults[f"tog_{_k}"] = True
+    _defaults[f"wt_{_k}"]  = float(_cfg["weight"])
+# RangePosScore off by default — only meaningful when range filter is on
+_defaults["tog_RangePosScore"] = False
+# New technical metrics — off by default so existing users aren't disrupted
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore"]:
+    _defaults[f"tog_{_k}"] = False
+    _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
+
+for _key, _val in _defaults.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _val
+
+# ───────────────────────────────────────────────────────────────
+# SIDEBAR — FILTERS  (Screener tab only)
+# ───────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Screener Filters")
+
+    # ── Magic Stock preset button ────────────────────────────────
+    if st.button("✨ Magic Stock", use_container_width=True, key="preset_magic_stock",
+                 help="Perfect entry timing: price just crossed the MA50 on heavy volume, "
+                      "OBV rising (institutional accumulation), MACD accelerating, "
+                      "RSI 55-70 sweet spot, no bearish divergence, golden cross confirmed, "
+                      "and strong earnings growth backing the technical setup."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"  # Must be above MA50 — entry checklist
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_range_days"]  = 20
+        st.session_state["slider_range_pct"]   = 15.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # OBV ×5 — institutional accumulation before the obvious move (volume precedes price)
+        # Research: OBV rising with flat/rising price = smart money loading quietly
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # PCV ×4 — volume surge on up-days confirms real breakout, not a fakeout
+        # Research (Deepvue/Minervini): volume must expand on breakout day to validate institutional buying
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 4.0
+
+        # MA50Proximity ×4 — price just above MA50 = lowest-risk entry with tight stop
+        # Research: stocks entering breakouts from near the 50MA have best risk/reward
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 4.0
+
+        # MACD ×3 — histogram positive and rising = momentum accelerating
+        # Research (Schwab/Minervini): MACD line crossing signal line with rising histogram = acceleration
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
+
+        # NoBearDiv ×3 — price and MFI confirming each other = no hidden distribution
+        # Research: bearish divergence is the primary false-breakout warning sign
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 3.0
+
+        # RSI ×3 — 55-70 range: uptrend confirmed, not yet overbought
+        # Research (Schwab): RSI 50-70 on a breakout = trend with room to run
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 3.0
+
+        # GoldenCross ×2 — 50MA above 200MA = long-term institutional uptrend backdrop
+        # Research: 90%+ of successful breakouts occur with MA stack aligned (Minervini)
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 2.0
+
+        # MFISweetSpot ×2 — money flowing in, not overbought (MFI 55-75 range)
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 2.0
+
+        # EarningsGrowth ×2 — fundamental validation: institutions buy earnings acceleration
+        # Research (Deepvue): 20%+ EPS growth is primary institutional accumulation trigger
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # ROIC ×1 — quality filter: high ROIC companies have durable competitive advantages
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 1.0
+
+        st.rerun()
+
+    # ── Short Squeeze preset button ──────────────────────────────
+    if st.button("🎯 Short Squeeze", use_container_width=True, key="preset_short_squeeze",
+                 help="Finds stocks with high short interest starting to move up. "
+                      "Short float >15% = fuel. Rising OBV + volume surge = the trigger. "
+                      "DTC above 5 = shorts trapped. Price crossing MA50 forces covering."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 OFF — squeezes happen both above and below MA50;
+        # forcing above-MA50 filter misses early-stage squeezes where price is just recovering
+        st.session_state["tog_ma50"]           = "off"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # ShortSqueeze ×5 — composite short interest score: float %, DTC, covering direction
+        # Research (Fintel/LuxAlgo): DTC >8-10 = high squeeze probability; float >20% = maximum fuel
+        st.session_state["tog_ShortSqueeze"] = True
+        st.session_state["wt_ShortSqueeze"]  = 5.0
+
+        # OBV ×4 — volume is the squeeze trigger detector
+        # Research: OBV spike while shorted stock rises = shorts panic-covering + new buyers entering
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 4.0
+
+        # PCV ×3 — dominant up-day volume = covering in progress
+        # Research (Scanz): volume surge on up-days is the primary squeeze confirmation signal
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 3.0
+
+        # RSI ×2 — momentum building from oversold toward 50-60 = early squeeze phase
+        # Research: RSI moving from oversold toward overbought in heavily shorted stock = demand building
+        st.session_state["tog_RSI"]  = True
+        st.session_state["wt_RSI"]   = 2.0
+
+        # MACD ×2 — bullish crossover = momentum shift confirmed
+        # Research: MACD line crossing signal line in heavily shorted stock = buying momentum gaining strength
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 2.0
+
+        # NoBearDiv ×1 — price and MFI rising together = squeeze is real, not a dead-cat bounce
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 1.0
+
+        st.rerun()
+
+    # ── High Dividend preset button ──────────────────────────────
+    if st.button("💰 High Dividend", use_container_width=True, key="preset_high_dividend",
+                 help="Finds stocks with the highest sustainable dividend yield. "
+                      "Scores on yield, payout safety, and payment frequency. "
+                      "Filters for earnings growth to ensure the dividend can keep growing."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"   # yield hunters care about income, not price position
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # DividendScore ×5 — composite: yield % + payout sustainability + payment frequency
+        # Research (Dividend.com/ChartMill): sustainable yield + payout <60% + frequency = quality dividend
+        st.session_state["tog_DividendScore"] = True
+        st.session_state["wt_DividendScore"]  = 5.0
+
+        # Piotroski ×3 — financial health: 9-point system flags companies that will cut dividends
+        # Research (Quant-Investing): Piotroski F-Score ≥8 combined with yield outperforms by 200%+
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 3.0
+
+        # EarningsGrowth ×2 — growing earnings = growing dividend; the best dividends grow over time
+        # Research (Dividend.com): earnings growth is primary indicator of dividend sustainability
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # ROIC ×2 — high ROIC companies generate the durable excess cash that funds reliable dividends
+        # Research: ROIC above WACC = company creates value and can sustain/grow the dividend
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 2.0
+
+        # RevenueGrowth ×1 — revenue growth sustains earnings which sustains the dividend
+        st.session_state["tog_RevenueGrowth"] = True
+        st.session_state["wt_RevenueGrowth"]  = 1.0
+
+        # OBV ×1 — rising OBV on dividend stocks = institutions adding to income positions
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 1.0
+
+        st.rerun()
+
+    # ── Low Price Position preset button ──────────────────────────
+    if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
+                 help="Finds stocks in the bottom 10-15% of their recent range with rising OBV. "
+                      "Price near the range low = maximum upside before resistance. "
+                      "Rising OBV at the low = accumulation, not distribution. "
+                      "Quality fundamentals confirm it's cheap temporarily, not for a reason."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"   # near-low stocks may be below MA50 — still valid
+        st.session_state["tog_range"]          = True    # tight range = coiling, not crashing
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 15.0   # max 15% width — consolidation, not freefall
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # RangePosScore ×5 — CORE: 1.0 = price at range low, 0.0 = at range high
+        # Primary sort: stocks at the bottom of a tight 30-day range score highest
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+
+        # OBV ×4 — THE critical filter: rising OBV at range low = accumulation not distribution
+        # Research (Granville/Heygotrade): OBV rising while price flat/low = institutional buying quietly
+        # A stock low for a bad reason has FALLING OBV — this separates the two
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 4.0
+
+        # NoBearDiv ×2 — price and MFI not diverging = the low is a buying opportunity, not a warning
+        # Research: bullish divergence (price low, OBV higher low) = classic bottom formation signal
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # ROIC ×2 — quality check: high ROIC companies bounce; low ROIC companies stay down
+        # Research: cheap temporarily vs cheap for good reason — ROIC separates the two
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 2.0
+
+        # EarningsGrowth ×2 — growing earnings at the range low = coiling before re-rating
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+
+        # MFISweetSpot ×1 — money flowing in quietly even at the range low
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
+
+        # GoldenCross ×1 — long-term uptrend intact: pullback to range low is a dip, not a downtrend
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
+
+        st.rerun()
+
+    # ── Magic Volume preset button ────────────────────────────────
+    if st.button("⚡ Magic Volume", use_container_width=True, key="preset_magic_volume",
+                 help="Finds stocks with an unusual surge in buying volume before the price move is obvious. "
+                      "OBV rising sharply + PCV dominant + MFI sweet spot = volume signature of a stock "
+                      "about to break out. Catches the move BEFORE it shows up in price."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 above — volume surges on stocks already in uptrends are more reliable
+        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # OBV ×5 — the primary volume signal: cumulative buying vs selling pressure
+        # A sudden OBV surge while price is flat = smart money loading before the move
+        # Volume precedes price — OBV is the earliest leading indicator available
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # PCV ×5 — price-confirmed volume: measures whether volume happens on up-days vs down-days
+        # Score of 1.0 = ALL volume is on up-days = pure buying with zero distribution
+        # The single best measure of whether a volume spike is bullish or just noise
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 5.0
+
+        # MFISweetSpot ×4 — Money Flow Index in 55-75 range: buying pressure without being overbought
+        # MFI is a volume-weighted RSI — it shows BOTH price movement AND volume strength together
+        # Sweet spot means money is flowing in aggressively but the move hasn't exhausted itself
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 4.0
+
+        # NoBearDiv ×3 — price and MFI making higher highs together = volume surge is confirmed real
+        # Bearish divergence on a volume surge = distribution (selling into the spike), not accumulation
+        # This filter eliminates the false volume spikes caused by selling into strength
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 3.0
+
+        # MFI ×3 — raw MFI score: measures total money flow strength over the period
+        # Complements MFISweetSpot — ensures the money flow is both strong AND in the right range
+        st.session_state["tog_MFI"] = True
+        st.session_state["wt_MFI"]  = 3.0
+
+        # MACD ×2 — momentum catching up to the volume surge = price starting to follow the money
+        # Volume leads, price follows — MACD turning positive confirms price is beginning to respond
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 2.0
+
+        # RSI ×1 — light momentum confirmation: not overbought, trend is up
+        # Low weight — volume is the story here, RSI is a minor tiebreaker only
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 1.0
+
+        # GoldenCross ×1 — structural backdrop: volume surges in aligned uptrends follow through more
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
+
+        st.rerun()
+
+    # ── Breakout Setup preset button ─────────────────────────────
+    if st.button("🚀 Breakout Setup", use_container_width=True, key="preset_breakout_setup",
+                 help="Finds stocks coiling tight at the range low, ready to explode through resistance. "
+                      "The exact pattern seen in RAIL (+183%), SEZL (+115%), PM (+30%). "
+                      "Tight 30-day range + price at low + OBV rising + volume building = "
+                      "maximum compression before breakout."):
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        # MA50 OFF — breakouts start from BELOW the MA50
+        # The breakout IS the MA50 crossing event — you want in before it happens
+        # Forcing above-MA50 would have missed RAIL entirely
+        st.session_state["tog_ma50"]           = "off"
+        # Range filter ON — tight coil required, NOT a freefall
+        # 30-day window + 12% max width = maximum compression = maximum explosive energy
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 12.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # RangePosScore ×5 — CORE: price must be at the range LOW
+        # All three chart examples (PM, RAIL, SEZL) were at range low before exploding
+        # Score = 1 - RangePos, so 1.0 = price at absolute range low = maximum upside to resistance
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+
+        # OBV ×5 — the invisible signal that the breakout is loading
+        # Rising OBV while price is flat/low = smart money quietly accumulating before the move
+        # RAIL's OBV was diverging upward while price sat at lows — that was the tell
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # PCV ×4 — volume surge on up-days = breakout is real, not a fakeout
+        # Every breakout in the three charts was confirmed by extreme up-day volume dominance
+        # Without PCV confirmation, range-low breakouts fail 60%+ of the time
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 4.0
+
+        # MA50Proximity ×3 — price near MA50 = lowest-risk entry, tight stop below it
+        # PM and SEZL both broke from just under/at the MA50 — maximum risk/reward entry
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 3.0
+
+        # GoldenCross ×3 — 50MA curling up toward 200MA = structural support forming below
+        # All three charts had the MA stack aligning below price as the breakout happened
+        # The aligned MA stack is what makes breakouts hold and not immediately reverse
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 3.0
+
+        # MACD ×3 — histogram turning positive = coil energy releasing, momentum starting
+        # MACD catching fire before the obvious price breakout = early warning signal
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
+
+        # NoBearDiv ×2 — price and MFI confirming each other at the low
+        # Bullish divergence (price low, OBV higher low) = classic accumulation bottom signal
+        # Bearish divergence at the low = trap, not a breakout setup
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # RSI ×2 — RSI building from 40-55 range = momentum recovering without being overbought
+        # A breakout from range low with RSI already at 70+ is extended — lower probability
+        # RSI in recovery zone (40-60) at the range low = fuel still available for the move
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 2.0
+
+        # MFISweetSpot ×1 — money quietly flowing in at the range low
+        # Light weight — supporting signal, not a primary driver for this setup
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
+
+        # EarningsGrowth ×1 — light fundamental filter only
+        # RAIL was a cyclical industrial — strict fundamental filters would have excluded it
+        # These breakouts are primarily technical; fundamentals are a light tiebreaker only
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+
+        st.rerun()
+
+    # ── Insider Buying preset button ──────────────────────────────
+    if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
+                 help="Finds stocks showing institutional/smart-money accumulation signals. "
+                      "Rising OBV while price consolidates = institutions loading quietly. "
+                      "Strong earnings growth (20%+) is the #1 institutional buy trigger. "
+                      "60-day window captures slow multi-week institutional accumulation."):
+        st.session_state["slider_max_price"]   = 200
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"  # institutions buy into established uptrends
+        st.session_state["tog_range"]          = True     # institutions accumulate in quiet ranges
+        st.session_state["slider_range_days"]  = 60       # 60-day window captures multi-week accumulation
+        st.session_state["slider_range_pct"]   = 18.0    # slightly wider for 60-day natural range
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # OBV ×5 — THE signature of institutional accumulation
+        # Research (Granville/Deepvue/Kavout): rising OBV during price consolidation = institutions loading
+        # "Institutions cannot hide their volume footprints" — OBV reveals the invisible buying
+        st.session_state["tog_OBV"]  = True
+        st.session_state["wt_OBV"]   = 5.0
+
+        # EarningsGrowth ×4 — PRIMARY institutional buy trigger (20%+ EPS growth)
+        # Research (Deepvue/Minervini): 20%+ earnings growth is the single biggest predictor
+        # of institutional accumulation — funds buy companies beating and raising estimates
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 4.0
+
+        # PCV ×3 — dominant up-day volume = institutions buying aggressively on specific days
+        # Research: volume expansion on up-days vs contraction on down-days = institutional accumulation pattern
+        st.session_state["tog_PCV"]  = True
+        st.session_state["wt_PCV"]   = 3.0
+
+        # ROIC ×3 — institutions target high-ROIC companies with durable competitive advantages
+        # Research (Minervini): institutional portfolios concentrate in companies with 15%+ ROIC
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 3.0
+
+        # MFISweetSpot ×2 — sustained money inflow without overbought readings = quiet accumulation
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 2.0
+
+        # NoBearDiv ×2 — price and MFI aligned: no hidden distribution behind the accumulation
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+
+        # GoldenCross ×2 — institutions buy Stage 2 uptrends (50MA above 200MA)
+        # Research (Minervini): 90%+ of institutional buying occurs in confirmed Stage 2 uptrends
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 2.0
+
+        # RevenueGrowth ×1 — revenue growth validates that earnings growth is real, not one-time
+        st.session_state["tog_RevenueGrowth"] = True
+        st.session_state["wt_RevenueGrowth"]  = 1.0
+
+        # RangePosScore ×1 — institutions buy near the range low, not after a 30% run
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 1.0
+
+        st.rerun()
+
+    st.divider()
+
+    exchange = st.selectbox(
+        "Exchange / Universe",
+        options=list(EXCHANGES.keys()),
+        index=0,
+        key="sel_exchange",
+        help="S&P 500 = ~500 stocks (fast). NYSE/NASDAQ = 2,000–3,500 stocks (slow, 30–60+ min)."
+    )
+
+    sector = st.selectbox(
+        "Market Sector",
+        options=ALL_SECTORS,
+        index=0,
+        key="sel_sector",
+        help="Filter to a specific GICS sector. Applied after scan using yfinance data."
+    )
+
+    max_price = st.slider(
+        "Max Share Price ($)",
+        min_value=10, max_value=1000, step=10,
+        help="Exclude stocks above this price.",
+        key="slider_max_price",
+    )
+
+    min_score = st.slider(
+        "Min Hybrid Score",
+        min_value=0.0, max_value=20.0, step=0.5,
+        help="Only show stocks with a score above this threshold.",
+        key="slider_min_score",
+    )
+
+    top_n = st.slider(
+        "Max Results",
+        min_value=5, max_value=100, value=30, step=5,
+        key="slider_top_n",
+        help="Maximum number of stocks to display."
+    )
+
+    st.markdown("**50-Day Moving Average Filter**")
+    ma50_mode = st.radio(
+        "50-Day MA Filter",
+        options=["off", "below", "above"],
+        format_func=lambda x: {
+            "off":   "⬜ No MA50 filter",
+            "below": "🟢 Below 50-day MA  (pullbacks)",
+            "above": "🔵 Above 50-day MA  (uptrends)",
+        }[x],
+        key="tog_ma50",
+        label_visibility="collapsed",
+        help="Filter stocks by their position relative to the 50-day moving average. "
+             "'Below' finds stocks in pullbacks/consolidation. "
+             "'Above' finds stocks already in an uptrend.",
+    )
+    use_ma50_filter = ma50_mode
+
+    st.divider()
+    st.header("📦 Price Range Filter")
+    st.caption("Find stocks locked in a tight trading range — coiling before a breakout.")
+
+    use_range_filter = st.toggle(
+        "Enable Price Range Filter",
+        help="When on, only shows stocks trading within a tight range over the selected period.",
+        key="tog_range",
+    )
+
+    range_days = st.slider(
+        "Range Lookback (days)",
+        min_value=5, max_value=180, step=5,
+        help="Number of trading days to measure the high/low range over.",
+        key="slider_range_days",
+    )
+
+    range_max_pct = st.slider(
+        "Max Range Width (%)",
+        min_value=1.0, max_value=30.0, step=0.5,
+        help="Maximum allowed spread between high and low as % of price. "
+             "Lower = tighter range. 5–10% finds stocks in consolidation.",
+        disabled=not use_range_filter,
+        key="slider_range_pct",
+    )
+
+    st.divider()
+    st.header("📐 Valuation & Growth Filters")
+
+    use_pe_filter = st.toggle(
+        "Enable P/E Ratio Filter",
+        help="Only show stocks whose trailing P/E falls within the selected range. "
+             "Stocks with no P/E (negative earnings) are excluded when this is on.",
+        key="tog_pe_filter",
+    )
+    pe_min, pe_max = st.slider(
+        "P/E Ratio Range",
+        min_value=0, max_value=200, step=1,
+        disabled=not use_pe_filter,
+        help="Filter to stocks with a trailing P/E between these two values. "
+             "0–15 = value territory · 15–25 = fair value · 25–50 = growth premium · 50+ = high growth/speculative.",
+        key="slider_pe_range",
+    )
+
+    st.divider()
+    # TTM revenue growth filter in 15% increments
+    REV_GROWTH_STEPS = [0, 15, 30, 45, 60, 75, 90]
+    use_rev_filter = st.toggle(
+        "Enable TTM Revenue Growth Filter",
+        help="Only show stocks whose trailing-12-month revenue growth meets the minimum threshold.",
+        key="tog_rev_filter",
+    )
+    rev_min_idx = st.select_slider(
+        "Min TTM Revenue Growth",
+        options=REV_GROWTH_STEPS,
+        format_func=lambda x: f"{x}%+",
+        disabled=not use_rev_filter,
+        help="Minimum trailing-12-month revenue growth rate. Steps are in 15% increments.",
+        key="slider_rev_min",
+    )
+
+    st.divider()
+    st.header("📊 Metrics")
+    st.caption("Toggle on/off and adjust weight in the final score.")
+
+    metric_enabled = {}
+    metric_weight  = {}
+
+    # ── Fundamental metrics ──────────────────────────────────────
+    st.markdown("**Fundamental**")
+    for key in ["OE_Yield", "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth", "Piotroski"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Volume / buying pressure metrics ────────────────────────
+    st.markdown("**Volume & Buying Pressure**")
+    for key in ["OBV", "MFI", "PCV"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Technical / momentum metrics ─────────────────────────
+    st.markdown("**Technical & Momentum**")
+    for key in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Short interest metrics ────────────────────────────────
+    st.markdown("**Short Interest**")
+    for key in ["ShortSqueeze"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Dividend metric ───────────────────────────────────────
+    st.markdown("**Dividend Income**")
+    for key in ["DividendScore"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Range position metric ─────────────────────────────────
+    st.markdown("**Range & Breakout Setup**")
+    for key in ["RangePosScore"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    st.divider()
+    st.header("🔧 Performance")
+    # Workers are auto-managed during scanning — starts at 12 and adjusts
+    # up/down based on live pass rate. Displayed here for visibility only.
+    max_workers = st.session_state.get("max_workers_val", 12)
+    st.caption(f"⚙️ Workers: **{max_workers}** (auto-adjusts during scan · starts at 12)")
+
+    mfi_period = st.slider(
+        "MFI Period (days)",
+        min_value=7, max_value=30, step=1,
+        help="Money Flow Index lookback window.",
+        key="slider_mfi_period",
+    )
+
+    st.divider()
+    st.markdown("**📡 yfinance Connection**")
+
+    # ── Live health check ─────────────────────────────────────────
+    _do_check = st.button("🔍 Check Connection", use_container_width=True, key="check_conn_btn",
+                          help="Test the yfinance data connection before scanning.")
+    if _do_check or st.session_state.get("_yf_health"):
+        if _do_check:
+            with st.spinner("Testing connection..."):
+                _health = check_yfinance_health()
+            st.session_state["_yf_health"] = _health
+        else:
+            _health = st.session_state["_yf_health"]
+
+        _st  = _health["status"]
+        _lat = _health["latency"]
+        _msg = _health["message"]
+        _fix = _health["fix"]
+
+        # ── Status indicator ──────────────────────────────────────
+        _STATUS_UI = {
+            "fast":         ("🟢", "Healthy",      "success"),
+            "slow":         ("🟡", "Slow",          "warning"),
+            "rate_limited": ("🔴", "Rate Limited",  "error"),
+            "timeout":      ("🔴", "Timed Out",     "error"),
+            "blocked":      ("⛔", "Blocked",       "error"),
+            "unknown":      ("⚪", "Unknown",       "warning"),
+        }
+        _icon, _label, _sev = _STATUS_UI.get(_st, ("⚪", _st, "warning"))
+        _lat_str = f" · {_lat}s" if _lat is not None else ""
+
+        if _sev == "success":
+            st.success(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+        elif _sev == "warning":
+            st.warning(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+        else:
+            st.error(f"{_icon} **{_label}**{_lat_str} — {_msg}")
+
+        # ── Fix buttons ───────────────────────────────────────────
+        if _fix == "wait":
+            st.caption("⏳ **Fix:** Wait 30–60 seconds for the rate limit to reset, then scan again.")
+            if st.button("⏱️ Wait 30s then Re-check", use_container_width=True,
+                         key="fix_wait_btn"):
+                import time as _t; _t.sleep(30)
+                _health = check_yfinance_health()
+                st.session_state["_yf_health"] = _health
+                st.rerun()
+            if st.button("⬇️ Reduce Workers to 3", use_container_width=True,
+                         key="fix_reduce_btn"):
+                st.session_state["max_workers_val"] = 3
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        elif _fix == "reduce_workers":
+            st.caption("⚡ **Fix:** Reduce parallel workers to lower request pressure.")
+            st.caption("The scanner will auto-reduce workers if slowness is detected.")
+
+        elif _fix == "timeout":
+            st.caption("🔄 **Fix:** Retry — transient timeout, server may be temporarily overloaded.")
+            if st.button("🔄 Re-check Connection", use_container_width=True,
+                         key="fix_timeout_btn"):
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        elif _fix == "sp500":
+            st.caption("🔄 **Fix:** Switch to S&P 500 (smaller universe), or wait for network to recover.")
+            if st.button("📊 Switch to S&P 500", use_container_width=True,
+                         key="fix_sp500_btn"):
+                st.session_state.pop("_yf_health", None)
+                st.rerun()
+
+        if st.button("✕ Clear Status", use_container_width=True, key="clear_health_btn"):
+            st.session_state.pop("_yf_health", None)
+            st.rerun()
+
+    st.divider()
+    run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary", key="run_screener_btn")
+
+    # ── Cache status panel ────────────────────────────────────────
+    st.divider()
+    _sc  = st.session_state.get("screener_cache", {})
+    _fca = st.session_state.get("analyze_fin_cache", {})
+    _sz  = _cache_size_str()
+
+    if _sc.get("results") or _fca:
+        _exch_name    = next((k for k, v in EXCHANGES.items() if v == _sc.get("exchange_key")), "?")
+        _scan_tickers = len(_sc.get("results", []))
+        _fin_tickers  = len(_fca)
+        # Count how many rows have raw history stored
+        _with_hist    = sum(1 for r in _sc.get("results", []) if r.get("_hist"))
+
+        st.markdown("**💾 Cache Status**")
+        ci1, ci2 = st.columns(2)
+        ci1.metric("Screener Tickers", _scan_tickers if _scan_tickers else "—")
+        ci2.metric("Analyzed Stocks",  _fin_tickers  if _fin_tickers  else "—")
+        ci3, ci4 = st.columns(2)
+        ci3.metric("Cache Size",   _sz)
+        ci4.metric("Exchange",     _exch_name if _scan_tickers else "—")
+        if _with_hist:
+            st.caption(f"✅ {_with_hist}/{_scan_tickers} tickers have raw history — "
+                       f"MFI period & range window recompute instantly with no re-download.")
+
+        if _sc.get("scanned_at"):
+            st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
+                       f"Cache clears automatically when you close the browser tab.")
+
+        if st.button("🗑️ Clear All Cache", use_container_width=True, key="clear_all_cache_btn"):
+            _clear_all_cache()
+            st.success("All cache cleared.")
+            st.rerun()
+    else:
+        st.markdown("**💾 Cache Status**")
+        st.caption("No cache yet — run a scan or analyze a stock to populate it.  "
+                   "Cache is stored in your browser session and clears automatically when the tab is closed.")
+
+# ───────────────────────────────────────────────────────────────
+# PRE-COMPUTED DATA LOADER
+# ───────────────────────────────────────────────────────────────
+
+import gzip, json as _json, pathlib as _pathlib, io as _io
+import os as _os
+
+_DATA_FILE = _pathlib.Path(__file__).parent / "data" / "stock_data.json.gz"
+_META_FILE = _pathlib.Path(__file__).parent / "data" / "scan_meta.json"
+
+def _get_github_repo() -> str:
+    try:
+        return st.secrets.get("GITHUB_REPO", "")
+    except Exception:
+        return _os.environ.get("GITHUB_REPO", "")
+
+
+def _get_av_key() -> str:
+    """Read AV_API_KEY from Streamlit secrets or environment variable."""
+    try:
+        return st.secrets.get("AV_API_KEY", "")
+    except Exception:
+        return _os.environ.get("AV_API_KEY", "")
+
+@st.cache_data(ttl=1800)   # check GitHub for new data at most every 30 minutes
+def _fetch_github_meta() -> dict:
+    """
+    Fetch scan_meta.json from GitHub to detect when new nightly data exists.
+    Cached for 30 minutes — no need to hit GitHub on every page render.
+    """
+    repo = _get_github_repo()
+    if not repo:
+        return {}
+    try:
+        url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
+        resp = requests.get(url, timeout=10)   # allow CDN cache — no Cache-Control header
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return {}
+
+def _get_cache_key() -> str:
+    """
+    Return scanned_at timestamp from GitHub meta.
+    Cached via _fetch_github_meta — safe to call multiple times per render.
+    """
+    meta = _fetch_github_meta()
+    if not meta:
+        try:
+            return str(_DATA_FILE.stat().st_mtime)
+        except Exception:
+            return "0"
+    return meta.get("scanned_at_utc", "0")
+
+def _strip_hist(results: list) -> list:
+    """
+    Remove raw OHLCV history (_hist) from nightly results.
+    The nightly cache uses pre-computed scores — _hist is only needed for
+    the live screener's recompute_indicators(). Stripping it saves ~13KB
+    per ticker, reducing the nightly cache from ~65MB to ~5MB for 5000 stocks.
+    The _hist key is kept in live screener_cache (session_state) where it IS needed.
+    """
+    return [{k: v for k, v in row.items() if k != "_hist"} for row in results]
+
+
+@st.cache_data(ttl=300)   # re-check every 5 minutes
+def load_precomputed_data(cache_key: str = "") -> tuple:
+    """
+    Load nightly stock data. Tries GitHub raw URL first (always latest),
+    falls back to local file for dev environments.
+    cache_key changes when new data is committed → busts Streamlit cache.
+    _hist stripped to save memory — nightly data uses pre-computed scores.
+    """
+    repo = _get_github_repo()
+
+    # ── GitHub raw URL (production path) ─────────────────────────
+    if repo:
+        try:
+            url  = f"https://raw.githubusercontent.com/{repo}/main/data/stock_data.json.gz"
+            resp = requests.get(url, timeout=60)   # allow CDN cache
+            if resp.status_code == 200:
+                results = _strip_hist(
+                    _json.loads(gzip.decompress(resp.content).decode("utf-8"))
+                )
+                meta_url  = f"https://raw.githubusercontent.com/{repo}/main/data/scan_meta.json"
+                meta_resp = requests.get(meta_url, timeout=10)
+                meta = meta_resp.json() if meta_resp.status_code == 200 else {}
+                return results, meta
+        except Exception:
+            pass
+
+    # ── Local file (dev fallback) ─────────────────────────────────
+    if not _DATA_FILE.exists():
+        return None, None
+    try:
+        with gzip.open(_DATA_FILE, "rt", encoding="utf-8") as f:
+            results = _strip_hist(_json.load(f))
+        meta = {}
+        if _META_FILE.exists():
+            with open(_META_FILE) as f:
+                meta = _json.load(f)
+        return results, meta
+    except Exception:
+        return None, None
+
+def get_precomputed_for_exchange(exchange_key: str) -> list:
+    """Filter pre-computed results to a specific exchange.
+    Uses already-cached load_precomputed_data — no extra network calls."""
+    results, _ = load_precomputed_data(cache_key=_get_cache_key())
+    if not results:
+        return []
+    if exchange_key == "sp500":
+        return [r for r in results if "sp500" in r.get("_exchanges", [])]
+    return [r for r in results if exchange_key in r.get("_exchanges", [])]
+
+# ───────────────────────────────────────────────────────────────
+
+def get_volume_signals(hist_df, mfi_period):
+    """
+    Compute OBV / MFI / PCV from a pre-fetched OHLCV DataFrame.
+
+    OBV  — On-Balance Volume trend over last 20 days (1.0 = rising, 0.0 = falling)
+    MFI  — Money Flow Index scaled above 50 neutral (0.0–1.0)
+    PCV  — Price-Confirmed Volume fraction on up-days, scaled above 50% baseline (0.0–1.0)
+
+    Accepts either a stock object (legacy) or a DataFrame directly.
+    """
+    default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
+    try:
+        # Accept either a raw DataFrame or a yfinance Ticker object (fallback)
+        if isinstance(hist_df, pd.DataFrame):
+            hist = hist_df.copy()
+        else:
+            # Legacy path — stock object passed directly
+            hist = hist_df.history(period="1y")
+            if hist.empty or len(hist) < mfi_period + 5:
+                hist = hist_df.history(period="3mo")
+            if hist.empty or len(hist) < mfi_period + 5:
+                hist = hist_df.history(period="1mo")
+
+        if hist.empty or len(hist) < 10:
+            return default
+
+        close, high, low, vol = hist["Close"], hist["High"], hist["Low"], hist["Volume"]
+
+        # Drop any rows where volume is 0 (halted/illiquid bars corrupt MFI)
+        mask = vol > 0
+        close, high, low, vol = close[mask], high[mask], low[mask], vol[mask]
+        if len(close) < 10:
+            return default
+
+        # ── OBV ──────────────────────────────────────────────────
+        direction = np.sign(close.diff().fillna(0))
+        obv       = (direction * vol).cumsum()
+        obv_window = min(20, len(obv))
+        obv_slope = np.polyfit(range(obv_window), obv.iloc[-obv_window:].values, 1)[0]
+        obv_score = 1.0 if obv_slope > 0 else 0.0
+
+        # ── MFI ──────────────────────────────────────────────────
+        # Use the smaller of mfi_period or half the available bars to handle short histories
+        effective_period = min(mfi_period, max(5, len(close) // 2))
+        typical_price = (high + low + close) / 3
+        raw_mf  = typical_price * vol
+        tp_diff = typical_price.diff()
+
+        pos_mf  = raw_mf.where(tp_diff > 0, 0).rolling(effective_period).sum()
+        neg_mf  = raw_mf.where(tp_diff < 0, 0).rolling(effective_period).sum()
+
+        # Replace 0 neg_mf with NaN to avoid divide-by-zero
+        # When neg_mf is 0, all money flow is positive → MFI = 100 → score = 1.0
+        all_positive = neg_mf == 0
+        mfr = pos_mf / neg_mf.replace(0, np.nan)
+        mfi_series = 100 - (100 / (1 + mfr))
+        # Where neg_mf was 0 and pos_mf > 0, MFI should be 100
+        mfi_series = mfi_series.where(~(all_positive & (pos_mf > 0)), 100.0)
+
+        # Take last valid value — walk back up to 5 bars if last is NaN
+        mfi_val = None
+        for _i in range(1, 6):
+            candidate = mfi_series.iloc[-_i]
+            if pd.notnull(candidate):
+                mfi_val = float(candidate)
+                break
+
+        mfi_score = round(mfi_val / 100.0, 4) if mfi_val is not None else 0.0
+
+        # ── PCV ──────────────────────────────────────────────────
+        pcv_window = min(20, len(close))
+        recent     = pd.DataFrame({"Close": close, "Volume": vol}).iloc[-pcv_window:]
+        recent_up  = recent["Close"] > recent["Close"].shift(1)
+        up_vol     = recent.loc[recent_up, "Volume"].sum()
+        total_vol  = recent["Volume"].sum()
+        pcv_ratio  = up_vol / total_vol if total_vol > 0 else 0.5
+        pcv_score  = max(0.0, (pcv_ratio - 0.5) / 0.5)
+
+        return {
+            "OBV": round(obv_score, 4),
+            "MFI": round(mfi_score, 4),
+            "PCV": round(pcv_score, 4),
+        }
+    except:
+        return default
+
+
+def calculate_technical_signals(hist: pd.DataFrame) -> dict:
+    """
+    Compute RSI, MACD, Golden Cross, MFI Sweet Spot, No-Bearish-Divergence,
+    and MA50 Proximity from a pre-fetched OHLCV DataFrame.
+    All scores are 0.0–1.0. Returns zeros on insufficient data.
+    """
+    default = {
+        "RSI":           0.0,
+        "MACD":          0.0,
+        "GoldenCross":   0.0,
+        "MFISweetSpot":  0.0,
+        "NoBearDiv":     0.5,
+        "MA50Proximity": 0.0,
+    }
+    try:
+        if hist.empty or len(hist) < 26:
+            return default
+
+        close = hist["Close"].dropna()
+        if len(close) < 26:
+            return default
+
+        # ── RSI (14-period) ──────────────────────────────────────
+        rsi_score = 0.0
+        try:
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / loss.replace(0, np.nan)
+            rsi_s = 100 - (100 / (1 + rs))
+            rsi_val = rsi_s.dropna().iloc[-1] if not rsi_s.dropna().empty else None
+            if rsi_val is not None:
+                if   55 <= rsi_val <= 70: rsi_score = 1.0   # sweet spot
+                elif 50 <= rsi_val <  55: rsi_score = 0.6   # building
+                elif 70 <  rsi_val <= 80: rsi_score = 0.2   # extended
+                else:                     rsi_score = 0.0   # overbought or no trend
+        except Exception:
+            pass
+
+        # ── MACD (12/26/9) ───────────────────────────────────────
+        macd_score = 0.0
+        try:
+            ema12   = close.ewm(span=12, adjust=False).mean()
+            ema26   = close.ewm(span=26, adjust=False).mean()
+            macd_ln = ema12 - ema26
+            signal  = macd_ln.ewm(span=9, adjust=False).mean()
+            hist_m  = macd_ln - signal
+            if len(hist_m.dropna()) >= 2:
+                h_now  = hist_m.dropna().iloc[-1]
+                h_prev = hist_m.dropna().iloc[-2]
+                if h_now > 0 and h_now > h_prev:   macd_score = 1.0  # positive & accelerating
+                elif h_now > 0:                     macd_score = 0.6  # positive but decelerating
+                elif h_now > h_prev:                macd_score = 0.2  # negative but improving
+                else:                               macd_score = 0.0
+        except Exception:
+            pass
+
+        # ── Golden Cross (50MA vs 200MA) ─────────────────────────
+        golden_score = 0.0
+        try:
+            if len(close) >= 200:
+                ma50  = close.rolling(50).mean().iloc[-1]
+                ma200 = close.rolling(200).mean().iloc[-1]
+                if pd.notnull(ma50) and pd.notnull(ma200) and ma200 > 0:
+                    diff_pct = (ma50 - ma200) / ma200
+                    if   diff_pct >  0.02: golden_score = 1.0   # golden cross confirmed
+                    elif diff_pct >= -0.02: golden_score = 0.5  # within 2% — imminent
+                    else:                  golden_score = 0.0   # death cross
+        except Exception:
+            pass
+
+        # ── MFI Sweet Spot ───────────────────────────────────────
+        mfi_sweet = 0.0
+        try:
+            high_s = hist["High"].dropna()
+            low_s  = hist["Low"].dropna()
+            vol_s  = hist["Volume"].dropna()
+            # Align all series
+            idx = close.index.intersection(high_s.index).intersection(low_s.index).intersection(vol_s.index)
+            c2, h2, l2, v2 = close[idx], high_s[idx], low_s[idx], vol_s[idx]
+            v2 = v2.where(v2 > 0)
+            tp  = (h2 + l2 + c2) / 3
+            rmf = tp * v2
+            tp_diff = tp.diff()
+            period = 14
+            pos_mf = rmf.where(tp_diff > 0, 0).rolling(period).sum()
+            neg_mf = rmf.where(tp_diff < 0, 0).rolling(period).sum()
+            mfr2   = pos_mf / neg_mf.replace(0, np.nan)
+            mfi2   = 100 - (100 / (1 + mfr2))
+            mfi_v  = mfi2.dropna().iloc[-1] if not mfi2.dropna().empty else None
+            if mfi_v is not None:
+                if   55 <= mfi_v <= 75: mfi_sweet = 1.0
+                elif 75 <  mfi_v <= 80: mfi_sweet = 0.7
+                elif 80 <  mfi_v <= 90: mfi_sweet = 0.3
+                else:                   mfi_sweet = 0.0
+        except Exception:
+            pass
+
+        # ── No Bearish Divergence (20-day window) ────────────────
+        no_bear_div = 0.5  # neutral default
+        try:
+            window = 20
+            if len(close) >= window * 2:
+                # Split recent history into two halves
+                mid   = len(close) - window
+                c_old = close.iloc[mid - window : mid]
+                c_new = close.iloc[mid:]
+                price_higher = c_new.max() > c_old.max()
+
+                # Recompute MFI for divergence check
+                high_s = hist["High"]
+                low_s  = hist["Low"]
+                vol_s  = hist["Volume"]
+                tp_d   = (high_s + low_s + close) / 3
+                rmf_d  = (tp_d * vol_s).where(vol_s > 0)
+                tpd_d  = tp_d.diff()
+                pos_d  = rmf_d.where(tpd_d > 0, 0).rolling(14).sum()
+                neg_d  = rmf_d.where(tpd_d < 0, 0).rolling(14).sum()
+                mfr_d  = pos_d / neg_d.replace(0, np.nan)
+                mfi_d  = (100 - (100 / (1 + mfr_d))).dropna()
+                if len(mfi_d) >= window * 2:
+                    mfi_old = mfi_d.iloc[-(window * 2):-window]
+                    mfi_new = mfi_d.iloc[-window:]
+                    mfi_higher = mfi_new.max() > mfi_old.max()
+                    if price_higher and mfi_higher:     no_bear_div = 1.0  # both higher — confirmed
+                    elif price_higher and not mfi_higher: no_bear_div = 0.0  # bearish divergence
+                    else:                               no_bear_div = 0.5
+        except Exception:
+            pass
+
+        # ── MA50 Proximity ────────────────────────────────────────
+        ma50_prox = 0.0
+        try:
+            if len(close) >= 50:
+                ma50_v  = close.rolling(50).mean().iloc[-1]
+                price_v = close.iloc[-1]
+                if pd.notnull(ma50_v) and ma50_v > 0:
+                    pct_above = (price_v - ma50_v) / ma50_v
+                    if   0.0  <= pct_above <= 0.05: ma50_prox = 1.0
+                    elif 0.05 <  pct_above <= 0.10: ma50_prox = 0.7
+                    elif 0.10 <  pct_above <= 0.20: ma50_prox = 0.3
+                    else:                            ma50_prox = 0.0  # extended or below
+        except Exception:
+            pass
+
+        return {
+            "RSI":           round(rsi_score,    4),
+            "MACD":          round(macd_score,   4),
+            "GoldenCross":   round(golden_score, 4),
+            "MFISweetSpot":  round(mfi_sweet,    4),
+            "NoBearDiv":     round(no_bear_div,  4),
+            "MA50Proximity": round(ma50_prox,    4),
+        }
+    except Exception:
+        return default
+
+
+def calculate_price_range(hist_df, range_days: int) -> dict:
+    """
+    Calculates the price range over the last `range_days` trading days.
+    Accepts either a pre-fetched OHLCV DataFrame or a yfinance Ticker (legacy).
+
+    Returns:
+        RangeHigh  — highest closing price in the period
+        RangeLow   — lowest closing price in the period
+        RangePct   — range width as % of midpoint price  (High-Low) / Mid × 100
+                     Lower = tighter range = stock is consolidating
+        RangePos   — where today's price sits in the range  0.0 = at low, 1.0 = at high
+                     0.5 = midpoint; useful for spotting stocks near support (low end)
+    """
+    default = {"RangeHigh": None, "RangeLow": None, "RangePct": None, "RangePos": None}
+    try:
+        if isinstance(hist_df, pd.DataFrame):
+            hist = hist_df
+        else:
+            hist = hist_df.history(period="1y")
+        if hist.empty or len(hist) < range_days:
+            return default
+        window   = hist["Close"].iloc[-range_days:]
+        high     = round(window.max(), 2)
+        low      = round(window.min(), 2)
+        mid      = (high + low) / 2
+        if mid == 0:
+            return default
+        rng_pct  = round((high - low) / mid * 100, 2)
+        current  = window.iloc[-1]
+        rng_pos  = round((current - low) / (high - low), 4) if (high - low) > 0 else 0.5
+        return {
+            "RangeHigh": high,
+            "RangeLow":  low,
+            "RangePct":  rng_pct,
+            "RangePos":  rng_pos,
+        }
+    except:
+        return default
+
+
+def calculate_piotroski(fin, bal, cf):
+    """Accepts pre-fetched financials/balance/cashflow DataFrames — no extra API calls."""
+    try:
+        score = 0
+        roa = fin.loc["Net Income"] / bal.loc["Total Assets"]
+        if roa.iloc[0] > 0: score += 1
+        if cf.loc["Operating Cash Flow"].iloc[0] > 0: score += 1
+        if roa.iloc[0] > roa.iloc[1]: score += 1
+        if cf.loc["Operating Cash Flow"].iloc[0] > fin.loc["Net Income"].iloc[0]: score += 1
+        if bal.loc["Long Term Debt"].iloc[0] < bal.loc["Long Term Debt"].iloc[1]: score += 1
+        if (bal.loc["Current Assets"].iloc[0] / bal.loc["Current Liabilities"].iloc[0]) > \
+           (bal.loc["Current Assets"].iloc[1] / bal.loc["Current Liabilities"].iloc[1]): score += 1
+        return score
+    except:
+        return None
+
+
+def get_owner_earnings(cf, fin, info):
+    """Accepts pre-fetched cashflow/financials DataFrames — no extra API calls."""
+    try:
+        oe = fin.loc["Net Income"].iloc[0] + cf.loc["Depreciation"].iloc[0] - abs(cf.loc["Capital Expenditure"].iloc[0])
+        mc = info.get("marketCap")
+        return oe, (oe / mc if mc else None)
+    except:
+        return None, None
+
+
+def _get_fin_value(fin, *labels):
+    for label in labels:
+        if label in fin.index:
+            return fin.loc[label]
+    return None
+
+def _get_bal_value(bal, *labels):
+    for label in labels:
+        if label in bal.index:
+            return bal.loc[label]
+    return None
+
+def calculate_roic(fin, bal):
+    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
+    try:
+        ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
+        if ebit_s is None: return None
+        ebit = ebit_s.iloc[0]
+        assets_s = _get_bal_value(bal, "Total Assets", "TotalAssets")
+        if assets_s is None: return None
+        liab_s = _get_bal_value(bal, "Total Current Liabilities", "TotalCurrentLiabilities", "Current Liabilities", "CurrentLiabilities")
+        if liab_s is None: return None
+        cash_s = _get_bal_value(bal, "Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "CashAndCashEquivalents", "Cash")
+        cash = cash_s.iloc[0] if cash_s is not None else 0
+        ic = assets_s.iloc[0] - liab_s.iloc[0] - cash
+        if pd.isna(ic) or ic == 0: return None
+        roic = ebit * 0.79 / ic
+        return None if pd.isna(roic) else roic
+    except:
+        return None
+
+
+def calculate_roic_trend(fin, bal):
+    """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
+    try:
+        ebit_s = _get_fin_value(fin, "EBIT", "Ebit", "Operating Income", "OperatingIncome", "EBITDA", "Ebitda")
+        if ebit_s is None or len(ebit_s) < 2: return None
+        assets_s = _get_bal_value(bal, "Total Assets", "TotalAssets")
+        liab_s   = _get_bal_value(bal, "Total Current Liabilities", "TotalCurrentLiabilities", "Current Liabilities", "CurrentLiabilities")
+        if assets_s is None or liab_s is None: return None
+        if len(assets_s) < 2 or len(liab_s) < 2: return None
+        def roic_at(i):
+            ic = assets_s.iloc[i] - liab_s.iloc[i]
+            if pd.isna(ic) or ic == 0: return None
+            v = ebit_s.iloc[i] / ic
+            return None if pd.isna(v) else v
+        r0, r1 = roic_at(0), roic_at(1)
+        return (r0 - r1) if (r0 is not None and r1 is not None) else None
+    except:
+        return None
+
+
+def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
+    """
+    Compute a composite dividend quality score from yfinance info + optional history.
+
+    Components:
+        Yield score   — rewards higher trailing yield (capped at 1.0 for extreme yields)
+        Payout safety — penalises unsustainable payout ratios (>100% = paying more than earned)
+        Frequency     — rewards more frequent payments (monthly > quarterly > annual)
+
+    Returns dict with:
+        DividendYieldPct  : trailing annual yield as % (e.g. 4.5 means 4.5%)
+        DividendRate      : annual $ per share
+        PayoutRatio       : % of earnings paid as dividend (None if not available)
+        DividendFrequency : "Monthly" | "Quarterly" | "Semi-Annual" | "Annual" | "None"
+        DividendScore     : composite score 0.0–1.0
+    """
+    default = {
+        "DividendYieldPct":  None,
+        "DividendRate":      None,
+        "PayoutRatio":       None,
+        "DividendFrequency": "None",
+        "DividendScore":     0.0,
+    }
+    try:
+        # ── Raw fields from yfinance info ────────────────────────
+        # Prefer trailing 12-month yield over forward estimate
+        yield_raw = (info.get("trailingAnnualDividendYield")
+                     or info.get("dividendYield"))          # 0.0–1.0 decimal
+        div_rate  = (info.get("trailingAnnualDividendRate")
+                     or info.get("dividendRate"))           # $ per share per year
+        payout    = info.get("payoutRatio")                 # 0.0–1.0 decimal
+
+        if not yield_raw and not div_rate:
+            return default                                  # no dividend at all
+
+        yield_pct = round(yield_raw * 100, 2) if yield_raw else None
+
+        # ── Yield score (0.0–0.6) ────────────────────────────────
+        # Scale: <2% = 0.1, 2–4% = 0.3, 4–6% = 0.5, ≥6% = 0.6
+        # Cap contribution to 0.6 so payout safety and frequency still matter
+        y = yield_pct or 0.0
+        if y >= 8:    yield_score = 0.60
+        elif y >= 6:  yield_score = 0.55
+        elif y >= 4:  yield_score = 0.45
+        elif y >= 3:  yield_score = 0.35
+        elif y >= 2:  yield_score = 0.20
+        elif y >= 1:  yield_score = 0.10
+        else:         yield_score = 0.0
+
+        # ── Payout safety (0.0–0.2) ──────────────────────────────
+        # Sustainable payout = bonus. Unsustainable (>100%) = penalty.
+        # None (e.g. REIT, no earnings) = neutral 0.1
+        if payout is None:
+            payout_score = 0.10
+        else:
+            p = payout * 100           # convert to percentage
+            if p <= 0:      payout_score = 0.0    # paying nothing
+            elif p <= 40:   payout_score = 0.20   # very safe
+            elif p <= 60:   payout_score = 0.18   # healthy
+            elif p <= 80:   payout_score = 0.12   # elevated but ok
+            elif p <= 100:  payout_score = 0.05   # borderline
+            else:           payout_score = 0.0    # unsustainable — penalty
+
+        # ── Payment frequency (0.0–0.2) ──────────────────────────
+        # Infer from dividend history: count unique payment months in last 12m
+        freq_label = "None"
+        freq_score = 0.0
+        if dividends_history is not None and not dividends_history.empty:
+            try:
+                import pandas as _pd
+                one_yr_ago = _pd.Timestamp.now(tz="UTC") - _pd.DateOffset(years=1)
+                recent = dividends_history[dividends_history.index >= one_yr_ago]
+                n = len(recent)
+                if n >= 10:
+                    freq_label = "Monthly";     freq_score = 0.20
+                elif n >= 3:
+                    freq_label = "Quarterly";   freq_score = 0.15
+                elif n == 2:
+                    freq_label = "Semi-Annual"; freq_score = 0.10
+                elif n == 1:
+                    freq_label = "Annual";      freq_score = 0.05
+                else:
+                    freq_label = "Irregular";   freq_score = 0.03
+            except Exception:
+                freq_label = "Unknown"
+                freq_score = 0.05
+        elif info.get("dividendRate") and yield_raw:
+            # No history — guess quarterly (most common for US equities)
+            freq_label = "Quarterly (est)"
+            freq_score = 0.12
+
+        composite = round(min(yield_score + payout_score + freq_score, 1.0), 4)
+
+        return {
+            "DividendYieldPct":  yield_pct,
+            "DividendRate":      round(div_rate, 4) if div_rate else None,
+            "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
+            "DividendFrequency": freq_label,
+            "DividendScore":     composite,
+        }
+    except Exception:
+        return default
+
+
+def calculate_short_squeeze(info: dict) -> dict:
+    """
+    Compute short interest metrics and a composite squeeze score from yfinance info.
+    All data comes from stock.info — no extra API calls needed.
+
+    Returns dict with:
+        ShortPctFloat   : % of float sold short (0.0–1.0)
+        DaysToCover     : short ratio (days of avg volume to cover all shorts)
+        ShortChange     : change vs prior month (positive = more shorts, negative = covering)
+        ShortSqueeze    : composite score 0.0–1.0
+        ShortPctFloatRaw: raw % as a displayable float (e.g. 0.23 = 23%)
+    """
+    default = {
+        "ShortPctFloat":    None,
+        "DaysToCover":      None,
+        "ShortChange":      None,
+        "ShortSqueeze":     0.0,
+        "ShortPctFloatRaw": None,
+    }
+    try:
+        spf   = info.get("shortPercentOfFloat")   # 0.0–1.0 (e.g. 0.23 = 23%)
+        dtc   = info.get("shortRatio")             # days to cover
+        ss    = info.get("sharesShort")            # current shares short
+        ss_pm = info.get("sharesShortPriorMonth")  # prior month shares short
+
+        # Short change: positive = shorts increasing, negative = covering
+        short_change = None
+        if ss and ss_pm and ss_pm > 0:
+            short_change = round((ss - ss_pm) / ss_pm, 4)
+
+        # Composite squeeze score
+        squeeze = 0.0
+        if spf is not None:
+            spf_pct = spf * 100   # convert to percentage
+            if spf_pct >= 20:
+                squeeze += 0.5    # heavy short interest — lots of fuel
+            elif spf_pct >= 10:
+                squeeze += 0.3
+            elif spf_pct >= 5:
+                squeeze += 0.15
+
+        if dtc is not None:
+            if dtc >= 10:
+                squeeze += 0.3    # shorts very trapped — can't exit quickly
+            elif dtc >= 5:
+                squeeze += 0.2
+            elif dtc >= 3:
+                squeeze += 0.1
+
+        if short_change is not None and short_change < -0.05:
+            squeeze += 0.2        # shorts actively covering = squeeze in progress
+
+        squeeze = min(round(squeeze, 4), 1.0)
+
+        return {
+            "ShortPctFloat":    round(spf, 4) if spf is not None else None,
+            "DaysToCover":      round(dtc, 1) if dtc is not None else None,
+            "ShortChange":      short_change,
+            "ShortSqueeze":     squeeze,
+            "ShortPctFloatRaw": round(spf * 100, 1) if spf is not None else None,
+        }
+    except Exception:
+        return default
+
+
+
+def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
+                           raw, sticker, selected, fetched_at,
+                           range_days=30, mfi_period=14, key_prefix="analyze"):
+    """
+    Full stock analysis render — identical to the Analyze a Stock tab.
+    Called from both the analyze tab and the inline screener panel.
+    """
+    try:
+
+        name    = info.get("longName") or info.get("shortName") or sticker
+        price   = info.get("currentPrice") or info.get("regularMarketPrice")
+        mktcap  = info.get("marketCap")
+        sector  = info.get("sector", "")
+        industry= info.get("industry", "")
+        pe      = info.get("trailingPE")
+        change  = info.get("regularMarketChangePercent", 0) or 0
+        chg_col = "#26c485" if change >= 0 else "#ef5350"
+        chg_sym = "▲" if change >= 0 else "▼"
+
+        # ── Stock header card ─────────────────────────────────────────
+        st.markdown(
+            f"""<div style='background:linear-gradient(135deg,#0d1b2a 0%,#1a2d45 100%);
+            border:1px solid #1e3a5f;border-radius:14px;padding:20px 24px;margin-bottom:16px;'>
+            <div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;'>
+              <div>
+                <div style='font-size:1.6em;font-weight:700;color:#e8f4fd;letter-spacing:-0.5px;'>
+                  {name}
+                  <span style='font-size:0.6em;font-weight:500;color:#5b9bd5;
+                  background:#0d2137;padding:3px 10px;border-radius:6px;margin-left:10px;
+                  vertical-align:middle;'>{sticker}</span>
+                </div>
+                <div style='font-size:0.88em;color:#7fb3d3;margin-top:4px;'>
+                  {sector}{" · " + industry if industry else ""}
+                </div>
+                {f"<div style='font-size:0.78em;color:#4a7fa0;margin-top:2px;'>📅 {fetched_at}</div>" if fetched_at else ""}
+              </div>
+              <div style='text-align:right;'>
+                <div style='font-size:2.2em;font-weight:700;color:#e8f4fd;line-height:1;'>
+                  {"$" + f"{price:,.2f}" if price else "N/A"}
+                </div>
+                <div style='font-size:1em;color:{chg_col};font-weight:600;margin-top:2px;'>
+                  {chg_sym} {abs(change):.2f}% today
+                </div>
+              </div>
+            </div>
+            <div style='display:flex;gap:24px;margin-top:16px;flex-wrap:wrap;'>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Market Cap</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{mktcap/1e9:.1f}B" if mktcap and mktcap >= 1e9 else ("$" + f"{mktcap/1e6:.0f}M" if mktcap else "N/A")}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>P/E Ratio</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{pe:.1f}x" if pe else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>52W High</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{info.get('fiftyTwoWeekHigh',0):,.2f}" if info.get("fiftyTwoWeekHigh") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>52W Low</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {"$" + f"{info.get('fiftyTwoWeekLow',0):,.2f}" if info.get("fiftyTwoWeekLow") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Volume</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{info.get('volume',0)/1e6:.2f}M" if info.get("volume") else "N/A"}
+                </div>
+              </div>
+              <div style='text-align:center;background:#0a1929;border-radius:8px;padding:8px 16px;min-width:100px;'>
+                <div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;letter-spacing:.06em;'>Avg Volume</div>
+                <div style='font-size:1em;font-weight:600;color:#c5dff0;margin-top:2px;'>
+                  {f"{info.get('averageVolume',0)/1e6:.2f}M" if info.get("averageVolume") else "N/A"}
+                </div>
+              </div>
+            </div></div>""",
+            unsafe_allow_html=True
+        )
+
+        if not selected:
+            st.warning("No metrics were selected when Analyze was run.")
+            st.stop()
+
+        THRESHOLDS = {
+            "OE_Yield":       (0.05,  0.02, True),
+            "ROIC":           (0.15,  0.08, True),
+            "ROIC_Trend":     (0.02,  0.0,  True),
+            "RevenueGrowth":  (0.10,  0.05, True),
+            "EarningsGrowth": (0.10,  0.05, True),
+            "Piotroski":      (7,     4,    True),
+            "OBV":            (0.8,   0.4,  True),
+            "MFI":            (0.6,   0.4,  True),
+            "PCV":            (0.5,   0.2,  True),
+            "RSI":            (0.9,   0.5,  True),
+            "MACD":           (0.9,   0.5,  True),
+            "GoldenCross":    (0.9,   0.4,  True),
+            "MFISweetSpot":   (0.9,   0.5,  True),
+            "NoBearDiv":      (0.9,   0.4,  True),
+            "MA50Proximity":  (0.9,   0.5,  True),
+            "RangePosScore":  (0.75,  0.4,  True),
+        }
+
+        def _sig(key, val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "⚪"
+            g, n, hi = THRESHOLDS.get(key, (None, None, True))
+            if g is None: return "⚪"
+            if hi:  return "🟢" if val >= g else ("🟡" if val >= n else "🔴")
+            else:   return "🟢" if val <= g else ("🟡" if val <= n else "🔴")
+
+        def _fv(key, val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+            if key in ("OE_Yield","RevenueGrowth","EarningsGrowth","ROIC","ROIC_Trend"): return f"{val:.2%}"
+            if key in ("OBV","MFI","PCV"): return f"{val:.4f}"
+            if key == "Piotroski": return f"{int(val)} / 9"
+            return str(round(val, 4))
+
+        def _fb(val):
+            if val is None or (isinstance(val, float) and np.isnan(val)): return "N/A"
+            try:
+                v = float(val)
+                if abs(v)>=1e12: return f"${v/1e12:.2f}T"
+                if abs(v)>=1e9:  return f"${v/1e9:.2f}B"
+                if abs(v)>=1e6:  return f"${v/1e6:.2f}M"
+                if abs(v)>=1e3:  return f"${v/1e3:.2f}K"
+                return f"${v:,.2f}"
+            except: return "N/A"
+
+        def _fp(val):
+            try:    return f"{float(val):.2%}" if val is not None else "N/A"
+            except: return "N/A"
+
+        def _fn(val, d=2):
+            try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
+            except: return "N/A"
+
+        def irow(label, value, tip=None):
+            # tip renders as a small ℹ tooltip after the label
+            tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
+                        f"font-size:0.85em;'>ℹ️</span>") if tip else ""
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;"
+                f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
+                f"<span style='color:#aaa;'>{label}{tip_html}</span>"
+                f"<span style='font-weight:600;'>{value}</span></div>",
+                unsafe_allow_html=True)
+
+        # ── Metric cards — ignition scanner style ────────────────────
+        import html as _html
+
+        def _score_color(val):
+            """Return color for a 0-1 score value."""
+            if val is None: return "#555"
+            if val >= 0.8:  return "#26c485"
+            if val >= 0.5:  return "#f5a623"
+            return "#ef5350"
+
+        def _arc_svg(score, size=64):
+            """SVG semicircle arc gauge matching ignition scanner style."""
+            if score is None: score = 0
+            score = max(0.0, min(1.0, float(score)))
+            col   = _score_color(score)
+            # Arc parameters
+            cx, cy, r = size/2, size/2, size/2 - 6
+            circ      = 2 * 3.14159 * r
+            dash      = circ * score
+            pct_txt   = f"{int(score*100)}"
+            return (
+                f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='none' stroke='#1e3a5f' stroke-width='6'/>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='none' stroke='{col}' stroke-width='6'"
+                f" stroke-dasharray='{dash:.1f} {circ:.1f}'"
+                f" stroke-dashoffset='{circ/4:.1f}' stroke-linecap='round'"
+                f" style='transition:stroke-dasharray .4s ease;'/>"
+                f"<text x='{cx}' y='{cy+5}' text-anchor='middle'"
+                f" fill='{col}' font-size='13' font-weight='700' font-family='monospace'>"
+                f"{pct_txt}</text>"
+                f"</svg>"
+            )
+
+        def _bar_html(score, col):
+            """Gradient progress bar."""
+            if score is None: score = 0
+            pct = int(max(0, min(100, float(score) * 100)))
+            return (
+                f"<div style='height:4px;background:#1e3a5f;border-radius:2px;margin-top:8px;'>"
+                f"<div style='height:4px;width:{pct}%;border-radius:2px;"
+                f"background:linear-gradient(90deg,{col}88,{col});transition:width .4s;'></div>"
+                f"</div>"
+            )
+
+        def _signal_pill(key, val):
+            """Colored signal pill label."""
+            if val is None: return "<span style='background:#1e3a5f;color:#4a7fa0;padding:2px 8px;border-radius:10px;font-size:0.75em;'>N/A</span>"
+            col = _score_color(val)
+            g, n, hi = THRESHOLDS.get(key, (None, None, True))
+            if g is None:
+                label = "N/A"
+            elif hi:
+                label = "Strong" if val >= g else ("Moderate" if val >= n else "Weak")
+            else:
+                label = "Strong" if val <= g else ("Moderate" if val <= n else "Weak")
+            return f"<span style='background:{col}22;color:{col};padding:2px 10px;border-radius:10px;font-size:0.75em;font-weight:600;border:1px solid {col}44;'>{label}</span>"
+
+        # ── Compute overall composite score for arc gauge ──────────
+        _total_score = 0.0
+        _total_weight = 0.0
+        for _sk in selected:
+            _sv = raw.get(_sk)
+            if _sv is not None and not (isinstance(_sv, float) and np.isnan(_sv)):
+                _total_score  += float(_sv)
+                _total_weight += 1.0
+        _composite = (_total_score / _total_weight) if _total_weight > 0 else 0.0
+        _comp_col  = _score_color(_composite)
+
+        # ── MFI signal ─────────────────────────────────────────────
+        _mfi_raw = raw.get("MFI")
+        def _mfi_label(v):
+            if v is None or (isinstance(v, float) and np.isnan(v)): return None, None
+            mfi = v * 100
+            if mfi >= 80: return "🔥 Overbought",  "#ef5350"
+            if mfi >= 60: return "📈 Buying",       "#26a69a"
+            if mfi >= 40: return "➡️ Neutral",      "#888888"
+            if mfi >= 20: return "📉 Selling",      "#f59e0b"
+            return         "🧊 Oversold",           "#60a5fa"
+        _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
+
+        # ── Composite score banner ──────────────────────────────────
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,#0d1b2a,#1a2d45);"
+            f"border:1px solid #1e3a5f;border-radius:14px;padding:18px 24px;"
+            f"display:flex;align-items:center;gap:24px;margin-bottom:16px;'>"
+            f"<div style='flex-shrink:0;'>{_arc_svg(_composite, 80)}</div>"
+            f"<div style='flex:1;'>"
+            f"<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
+            f"letter-spacing:.08em;margin-bottom:4px;'>Composite Score</div>"
+            f"<div style='font-size:1.8em;font-weight:700;color:{_comp_col};line-height:1;'>"
+            f"{_composite:.3f}"
+            f"</div>"
+            f"<div style='font-size:0.8em;color:#4a7fa0;margin-top:4px;'>"
+            f"{len(selected)} metrics active · "
+            f"{'Strong setup' if _composite >= 0.7 else ('Moderate' if _composite >= 0.4 else 'Weak setup')}"
+            f"</div>"
+            f"</div>"
+            f"<div style='display:flex;flex-wrap:wrap;gap:8px;'>"
+            + "".join([
+                f"<div style='background:#0a1929;border-radius:8px;padding:6px 12px;"
+                f"border:1px solid #1e3a5f;text-align:center;min-width:90px;'>"
+                f"<div style='font-size:0.7em;color:#4a7fa0;'>{METRICS[k]["label"]}</div>"
+                f"<div style='font-size:0.95em;font-weight:600;color:{_score_color(raw.get(k))};'>"
+                f"{_fv(k,raw.get(k))}</div></div>"
+                for k in selected[:8]
+            ])
+            + f"</div></div>",
+            unsafe_allow_html=True
+        )
+
+        # ── Metric cards grid ───────────────────────────────────────
+        st.markdown(
+            "<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
+            "letter-spacing:.08em;margin:16px 0 12px;'>Signal Breakdown</div>",
+            unsafe_allow_html=True
+        )
+        cols = st.columns(3)
+        for i, key in enumerate(selected):
+            cfg = METRICS[key]
+            val = raw.get(key)
+            col_hex = _score_color(val)
+            safe_desc = _html.escape(cfg['desc'][:110])
+            extra_badge = ""
+            if key == "MFI" and _mfi_lbl:
+                extra_badge = (
+                    f"<div style='margin-top:6px;padding:2px 8px;border-radius:4px;"
+                    f"background:{_mfi_col}22;color:{_mfi_col};"
+                    f"font-size:0.78em;font-weight:600;display:inline-block;"
+                    f"border:1px solid {_mfi_col}44;'>{_mfi_lbl}</div>"
+                )
+            with cols[i % 3]:
+                st.markdown(
+                    f"<div style='background:linear-gradient(135deg,#0d1b2a,#142236);"
+                    f"border:1px solid #1e3a5f;border-radius:12px;"
+                    f"padding:14px 16px;margin-bottom:10px;height:100%;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<div style='font-size:0.8em;font-weight:600;color:#7fb3d3;text-transform:uppercase;"
+                    f"letter-spacing:.06em;'>{cfg['label']}</div>"
+                    f"{_signal_pill(key, val)}"
+                    f"</div>"
+                    f"<div style='display:flex;align-items:center;gap:14px;margin:10px 0 2px;'>"
+                    f"<div style='flex-shrink:0;'>{_arc_svg(val, 52)}</div>"
+                    f"<div>"
+                    f"<div style='font-size:1.5em;font-weight:700;color:{col_hex};line-height:1;'>{_fv(key,val)}</div>"
+                    f"{extra_badge}"
+                    f"</div>"
+                    f"</div>"
+                    f"{_bar_html(val, col_hex)}"
+                    f"<div style='font-size:0.72em;color:#4a7fa0;margin-top:8px;line-height:1.4;'>{safe_desc}…</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+        # ── MA50 ─────────────────────────────────────────
+        st.divider()
+        if not hist_1y.empty and len(hist_1y) >= 50:
+            ma50_val = round(hist_1y["Close"].rolling(50).mean().iloc[-1], 2)
+            diff_pct = ((price - ma50_val) / ma50_val * 100) if price else 0
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Current Price", f"${price:,.2f}" if price else "N/A",
+                      help="The latest traded price of the stock")
+            m2.metric("50-Day MA",     f"${ma50_val:,.2f}",
+                      help="50-Day Moving Average — the average closing price over the last 50 trading days. "
+                           "Price below this line = stock is in a short-term downtrend or pullback")
+            m3.metric("vs MA50",       f"{diff_pct:+.1f}%", delta_color="inverse",
+                      help="How far the current price is above or below the 50-day MA. "
+                           "Negative = trading below the MA (potential value zone). "
+                           "Positive = trading above the MA (momentum zone)")
+            st.caption("🔴 Above" if price > ma50_val else "🟢 Below" + " its 50-day moving average")
+
+        # ── Short Interest ────────────────────────────────
+        st.divider()
+        st.markdown("### 🎯 Short Interest")
+        _sd = st.session_state.get("analyze_data", {}).get("short", {})
+        _spf  = _sd.get("ShortPctFloatRaw")
+        _dtc  = _sd.get("DaysToCover")
+        _schg = _sd.get("ShortChange")
+        _ssq  = _sd.get("ShortSqueeze", 0)
+        if _spf is not None or _dtc is not None:
+            si1, si2, si3, si4 = st.columns(4)
+            si1.metric(
+                "Short % of Float",
+                f"{_spf:.1f}%" if _spf is not None else "N/A",
+                help="Percentage of the float currently sold short. "
+                     "Above 10% = elevated. Above 20% = heavily shorted. Above 30% = extreme. "
+                     "Higher = more potential fuel for a short squeeze."
+            )
+            si2.metric(
+                "Days to Cover",
+                f"{_dtc:.1f}" if _dtc is not None else "N/A",
+                help="How many days of average trading volume it would take all short sellers to exit. "
+                     "Also called Short Ratio. Above 5 = shorts are trapped. "
+                     "Above 10 = very difficult to exit quickly — high squeeze risk."
+            )
+            _schg_str = (f"▲ {_schg:.1%}" if _schg and _schg > 0
+                         else f"▼ {abs(_schg):.1%}" if _schg and _schg < 0
+                         else "N/A")
+            si3.metric(
+                "Short Change MoM",
+                _schg_str,
+                help="Month-over-month change in shares short. "
+                     "▲ = shorts increasing (more bearish bets being placed). "
+                     "▼ = shorts covering (potential squeeze in progress)."
+            )
+            _squeeze_pct = f"{_ssq*100:.0f}%" if _ssq else "0%"
+            si4.metric(
+                "Squeeze Score",
+                _squeeze_pct,
+                help="Composite short squeeze setup score (0–100%). "
+                     "Combines short float %, days-to-cover, and short covering momentum. "
+                     "Above 60% = strong squeeze setup. Above 80% = extreme."
+            )
+            # Visual squeeze meter
+            _bar_filled = int((_ssq or 0) * 20)
+            _bar = "█" * _bar_filled + "░" * (20 - _bar_filled)
+            if _ssq and _ssq >= 0.7:
+                st.error(f"🔥 **High Squeeze Risk** [{_bar}] {_squeeze_pct} — heavy short interest with squeeze conditions present")
+            elif _ssq and _ssq >= 0.4:
+                st.warning(f"⚡ **Elevated Short Interest** [{_bar}] {_squeeze_pct} — watch for squeeze trigger")
+            elif _spf and _spf >= 5:
+                st.info(f"📊 **Moderate Short Interest** [{_bar}] {_squeeze_pct} — some short interest present")
+            else:
+                st.success(f"✅ **Low Short Interest** [{_bar}] {_squeeze_pct} — minimal squeeze risk")
+            st.caption("Short interest data from Yahoo Finance / FINRA. Updated twice monthly.")
+        else:
+            st.info("Short interest data not available for this ticker.")
+
+        # ── Dividend Income ───────────────────────────────────
+        st.divider()
+        st.markdown("### 💰 Dividend Income")
+        _div_yield  = info.get("trailingAnnualDividendYield") or info.get("dividendYield")
+        _div_rate   = info.get("trailingAnnualDividendRate") or info.get("dividendRate")
+        _div_payout = info.get("payoutRatio")
+        _div_score  = raw.get("DividendScore", 0.0) or 0.0
+        _div_freq   = raw.get("DividendFrequency", "")
+        _div_5yr    = info.get("fiveYearAvgDividendYield")
+
+        if _div_yield or _div_rate:
+            dv1, dv2, dv3, dv4, dv5 = st.columns(5)
+            dv1.metric(
+                "Annual Yield",
+                f"{_div_yield*100:.2f}%" if _div_yield else "N/A",
+                help="Trailing 12-month dividend yield — annual dividend ÷ current share price"
+            )
+            dv2.metric(
+                "Annual Rate",
+                f"${_div_rate:.2f}/shr" if _div_rate else "N/A",
+                help="Total annual dividend paid per share (trailing 12 months)"
+            )
+            dv3.metric(
+                "Payout Ratio",
+                f"{_div_payout*100:.0f}%" if _div_payout else "N/A",
+                delta="Sustainable" if _div_payout and _div_payout < 0.6
+                      else ("Elevated" if _div_payout and _div_payout < 1.0 else None),
+                delta_color="normal" if _div_payout and _div_payout < 0.6 else "inverse",
+                help="% of net earnings paid as dividends. Under 60% = healthy. Over 100% = unsustainable."
+            )
+            dv4.metric(
+                "Pay Frequency",
+                _div_freq or "Unknown",
+                help="How often dividends are paid. Monthly > Quarterly > Semi-Annual > Annual."
+            )
+            dv5.metric(
+                "5yr Avg Yield",
+                f"{_div_5yr:.2f}%" if _div_5yr else "N/A",
+                help="5-year average dividend yield — shows whether current yield is high relative to history"
+            )
+            # Dividend quality bar
+            _dbar_filled = int(_div_score * 20)
+            _dbar = "█" * _dbar_filled + "░" * (20 - _dbar_filled)
+            _dbar_pct = f"{_div_score*100:.0f}%"
+            if _div_score >= 0.7:
+                st.success(f"💰 **High Quality Dividend** [{_dbar}] {_dbar_pct} — high yield, sustainable payout, frequent payments")
+            elif _div_score >= 0.4:
+                st.info(f"📈 **Moderate Dividend** [{_dbar}] {_dbar_pct} — decent yield with acceptable payout ratio")
+            elif _div_score >= 0.15:
+                st.warning(f"📊 **Low Dividend** [{_dbar}] {_dbar_pct} — token yield or infrequent payments")
+            else:
+                st.caption(f"Dividend Score: [{_dbar}] {_dbar_pct}")
+            # Ex-dividend date
+            _ex_div = info.get("exDividendDate")
+            if _ex_div:
+                try:
+                    import datetime as _dt
+                    _ex_str = _dt.datetime.fromtimestamp(_ex_div).strftime("%b %d, %Y")
+                    st.caption(f"Ex-dividend date: {_ex_str}")
+                except Exception:
+                    pass
+        else:
+            st.info("This stock does not pay a dividend.")
+
+        # ── Price Range ───────────────────────────────────
+        st.divider()
+        st.markdown("### 📦 Price Range Analysis")
+        st.caption(f"Last **{range_days} trading days** — adjust via sidebar")
+        if not hist_1y.empty and len(hist_1y) >= range_days:
+            win  = hist_1y["Close"].iloc[-range_days:]
+            rh   = round(win.max(), 2); rl = round(win.min(), 2)
+            mid  = (rh + rl) / 2
+            rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
+            rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            rc1.metric("Range High", f"${rh:,.2f}",
+                       help=f"The highest closing price over the last {range_days} trading days. "
+                            "This acts as the top of the price range — a resistance level. "
+                            "Price approaching this level may face selling pressure.")
+            rc2.metric("Range Low",  f"${rl:,.2f}",
+                       help=f"The lowest closing price over the last {range_days} trading days. "
+                            "This acts as the bottom of the price range — a support level. "
+                            "Price near this level may attract buyers.")
+            rc3.metric("Range Width", f"{rp:.1f}%" if rp else "N/A",
+                       help="Range Width = (High − Low) ÷ Midpoint × 100. "
+                            "Measures how wide the trading channel is as a % of price. "
+                            "Under 5% = very tight consolidation (coiling). "
+                            "5–10% = normal consolidation. "
+                            "Above 20% = high volatility / wide swings.")
+            rc4.metric("Position",    f"{rpos:.0%}",
+                       help="Where the current price sits within the range. "
+                            "0% = at the range low (at support — potential buy zone). "
+                            "50% = exactly at the midpoint. "
+                            "100% = at the range high (at resistance — potential sell zone). "
+                            "Stocks near the low end of a tight range can signal accumulation before a breakout.")
+            bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
+            pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
+            st.markdown(
+                f"<div style='font-family:monospace;font-size:1.1em;margin:10px 0;'>"
+                f"${rl:,.2f} |{bar}| ${rh:,.2f}</div>"
+                f"<div style='color:#aaa;font-size:0.9em;'>Current ${price:,.2f} — {pos_lbl}</div>",
+                unsafe_allow_html=True)
+            if rp is not None:
+                if rp <= 5:    st.success(f"🔒 Very Tight Range ({rp:.1f}%) — consolidation/breakout setup")
+                elif rp <= 10: st.info(f"📦 Tight Range ({rp:.1f}%) — consolidating")
+                elif rp <= 20: st.warning(f"📊 Moderate Range ({rp:.1f}%)")
+                else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
+            cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
+            cdf["High"] = rh; cdf["Low"] = rl
+            st.line_chart(cdf, use_container_width=True)
+        else:
+            st.warning("Not enough price history to calculate range.")
+
+        # ── Weighted score ────────────────────────────────
+        st.divider()
+        ts = sum(
+            float(raw.get(k) or 0) * metric_weight.get(k, METRICS[k]["weight"])
+            for k in selected
+            if raw.get(k) is not None and not (isinstance(raw.get(k), float) and np.isnan(raw.get(k)))
+        )
+        st.metric("Weighted Score", f"{ts:.2f}")
+
+        # ── Financial tabs ────────────────────────────────
+        st.divider()
+        st.markdown("## 📋 Full Financial Breakdown")
+        ft = st.tabs(["🏢 Overview","💰 Valuation","📈 Income","🏦 Balance Sheet","💵 Cash Flow","📊 Price History"])
+
+        with ft[0]:
+            st.markdown("### 🏢 Company Overview")
+            c1, c2 = st.columns(2)
+            with c1:
+                irow("Full Name",    info.get("longName","N/A"))
+                irow("Exchange",     info.get("exchange","N/A"),   "The stock exchange where shares are listed and traded")
+                irow("Sector",       info.get("sector","N/A"),     "GICS sector classification — broad industry group the company belongs to")
+                irow("Industry",     info.get("industry","N/A"),   "Specific industry within the sector")
+                irow("Country",      info.get("country","N/A"),    "Country where the company is headquartered")
+                irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A",
+                     "Total number of full-time employees")
+                irow("Website",      info.get("website","N/A"))
+            with c2:
+                officers = info.get("companyOfficers",[])
+                irow("CEO",          officers[0].get("name","N/A") if officers else "N/A",
+                     "Chief Executive Officer — the top executive responsible for running the company")
+                irow("Fiscal YE",    str(info.get("fiscalYearEnd","N/A")),
+                     "Fiscal Year End — the month the company closes its annual accounting period")
+                irow("Audit Risk",   str(info.get("auditRisk","N/A")),
+                     "Score 1–10 rating audit-related governance risk. Lower = less risk")
+                irow("Board Risk",   str(info.get("boardRisk","N/A")),
+                     "Score 1–10 rating board structure and independence risk. Lower = less risk")
+                irow("Comp Risk",    str(info.get("compensationRisk","N/A")),
+                     "Compensation Risk — score 1–10 rating executive pay structure risk. Lower = less risk")
+                irow("SH Rights",    str(info.get("shareHolderRightsRisk","N/A")),
+                     "Shareholder Rights Risk — score 1–10. High = management has too much power vs shareholders")
+                irow("Overall Risk", str(info.get("overallRisk","N/A")),
+                     "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
+            st.markdown("#### Business Summary")
+            st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
+
+        with ft[1]:
+            st.markdown("### 💰 Valuation")
+            v1, v2 = st.columns(2)
+            with v1:
+                irow("Market Cap",       _fb(info.get("marketCap")),
+                     "Market Capitalization — total market value of all outstanding shares (Share Price × Shares Outstanding)")
+                irow("Enterprise Value", _fb(info.get("enterpriseValue")),
+                     "Enterprise Value (EV) — Market Cap + Total Debt − Cash. Represents the true takeover cost of a company")
+                irow("Trailing P/E",     _fn(info.get("trailingPE")),
+                     "Trailing Price-to-Earnings — share price divided by actual earnings per share over the last 12 months. Lower = cheaper relative to earnings")
+                irow("Forward P/E",      _fn(info.get("forwardPE")),
+                     "Forward Price-to-Earnings — share price divided by analyst-estimated future earnings. Reflects growth expectations")
+                irow("PEG Ratio",        _fn(info.get("pegRatio")),
+                     "Price/Earnings-to-Growth — P/E divided by earnings growth rate. Below 1.0 may indicate undervaluation relative to growth")
+                irow("Price/Sales",      _fn(info.get("priceToSalesTrailing12Months")),
+                     "Price-to-Sales (P/S) — Market Cap divided by annual revenue. Useful for unprofitable companies. Lower = cheaper")
+                irow("Price/Book",       _fn(info.get("priceToBook")),
+                     "Price-to-Book (P/B) — share price divided by book value per share (assets minus liabilities). Below 1.0 = trading below asset value")
+                irow("EV/Revenue",       _fn(info.get("enterpriseToRevenue")),
+                     "Enterprise Value divided by annual revenue. Similar to P/S but accounts for debt. Lower = cheaper")
+                irow("EV/EBITDA",        _fn(info.get("enterpriseToEbitda")),
+                     "Enterprise Value divided by EBITDA. Popular acquisition valuation multiple. Below 10 is generally considered reasonable")
+            with v2:
+                irow("Trailing EPS",     _fn(info.get("trailingEps")),
+                     "Trailing Earnings Per Share — actual net income per share over the last 12 months")
+                irow("Forward EPS",      _fn(info.get("forwardEps")),
+                     "Forward Earnings Per Share — analyst-estimated earnings per share for the next 12 months")
+                irow("Book Value/Share", _fn(info.get("bookValue")),
+                     "Net assets per share — total assets minus total liabilities, divided by shares outstanding")
+                irow("52-Wk High",       _fn(info.get("fiftyTwoWeekHigh")),
+                     "Highest closing price over the last 52 weeks (one year)")
+                irow("52-Wk Low",        _fn(info.get("fiftyTwoWeekLow")),
+                     "Lowest closing price over the last 52 weeks (one year)")
+                irow("50-Day MA",        _fn(info.get("fiftyDayAverage")),
+                     "50-Day Moving Average — average closing price over the last 50 trading days. Used as a short-term trend indicator")
+                irow("200-Day MA",       _fn(info.get("twoHundredDayAverage")),
+                     "200-Day Moving Average — average closing price over the last 200 trading days. Used as a long-term trend indicator")
+                irow("Beta",             _fn(info.get("beta")),
+                     "Beta — measures stock volatility vs the S&P 500. Beta > 1 = more volatile than market; Beta < 1 = less volatile")
+                irow("Short % Float",    _fp(info.get("shortPercentOfFloat")),
+                     "Short Interest as % of Float — percentage of tradeable shares currently sold short. High % can signal bearish sentiment or potential short squeeze")
+            d1,d2,d3 = st.columns(3)
+            d1.metric("Div Rate",  _fn(info.get("dividendRate")) if info.get("dividendRate") else "None",
+                      help="Dividend Rate — annual cash dividend paid per share")
+            d2.metric("Div Yield", _fp(info.get("dividendYield")) if info.get("dividendYield") else "None",
+                      help="Dividend Yield — annual dividend as a % of share price. Higher = more income per dollar invested")
+            d3.metric("Payout",    _fp(info.get("payoutRatio")) if info.get("payoutRatio") else "N/A",
+                      help="Payout Ratio — percentage of net income paid out as dividends. Above 100% means paying more than it earns")
+
+        with ft[2]:
+            st.markdown("### 📈 Income Statement (Annual)")
+            if fin_stmt is not None and not fin_stmt.empty:
+                fd = fin_stmt.T.copy()
+                fd.index = [str(i)[:10] for i in fd.index]
+                for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(fd, use_container_width=True)
+            else:
+                st.info("Income statement not available.")
+            i1,i2,i3,i4 = st.columns(4)
+            i1.metric("Revenue",    _fb(info.get("totalRevenue")),
+                      help="Total Revenue — all money earned from selling products/services before any expenses are deducted")
+            i2.metric("Gross",      _fb(info.get("grossProfits")),
+                      help="Gross Profit — Revenue minus Cost of Goods Sold (COGS). Shows profit before operating expenses")
+            i3.metric("EBITDA",     _fb(info.get("ebitda")),
+                      help="Earnings Before Interest, Taxes, Depreciation & Amortization — a proxy for operating cash flow and profitability")
+            i4.metric("Net Inc",    _fb(info.get("netIncomeToCommon")),
+                      help="Net Income — the bottom line profit after all expenses, interest, and taxes have been deducted")
+            i5,i6,i7,i8 = st.columns(4)
+            i5.metric("Gross Mgn",  _fp(info.get("grossMargins")),
+                      help="Gross Margin — Gross Profit ÷ Revenue. Higher % = more money left after production costs")
+            i6.metric("Op Mgn",     _fp(info.get("operatingMargins")),
+                      help="Operating Margin — Operating Income ÷ Revenue. Shows profit from core business operations")
+            i7.metric("Net Mgn",    _fp(info.get("profitMargins")),
+                      help="Net Profit Margin — Net Income ÷ Revenue. The % of every dollar of revenue that becomes profit")
+            i8.metric("Rev Growth", _fp(info.get("revenueGrowth")),
+                      help="Revenue Growth — year-over-year percentage increase in total revenue")
+
+        with ft[3]:
+            st.markdown("### 🏦 Balance Sheet (Annual)")
+            if bal_stmt is not None and not bal_stmt.empty:
+                bd = bal_stmt.T.copy()
+                bd.index = [str(i)[:10] for i in bd.index]
+                for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(bd, use_container_width=True)
+            else:
+                st.info("Balance sheet not available.")
+            b1,b2,b3,b4 = st.columns(4)
+            b1.metric("Cash",      _fb(info.get("totalCash")),
+                      help="Total Cash & Short-Term Investments — liquid assets the company can access immediately")
+            b2.metric("Debt",      _fb(info.get("totalDebt")),
+                      help="Total Debt — all short-term and long-term borrowings combined")
+            b3.metric("Net Cash",  _fb((info.get("totalCash") or 0)-(info.get("totalDebt") or 0)),
+                      help="Net Cash Position — Total Cash minus Total Debt. Positive = more cash than debt (strong balance sheet)")
+            b4.metric("Assets",    _fb(info.get("totalAssets")),
+                      help="Total Assets — everything the company owns: cash, property, equipment, intangibles, etc.")
+            b5,b6,b7,b8 = st.columns(4)
+            b5.metric("Cash/Shr",  _fn(info.get("totalCashPerShare")),
+                      help="Cash Per Share — total cash divided by shares outstanding. Higher = more cash backing each share")
+            b6.metric("D/E",       _fn(info.get("debtToEquity")),
+                      help="Debt-to-Equity Ratio — total debt divided by shareholders equity. Lower = less financial leverage/risk. Above 2.0 can be concerning")
+            b7.metric("Cur Ratio", _fn(info.get("currentRatio")),
+                      help="Current Ratio — Current Assets ÷ Current Liabilities. Above 1.0 means the company can cover its short-term debts. Above 2.0 is considered healthy")
+            b8.metric("Qck Ratio", _fn(info.get("quickRatio")),
+                      help="Quick Ratio (Acid Test) — like Current Ratio but excludes inventory. Above 1.0 means the company can pay short-term debts without selling inventory")
+
+        with ft[4]:
+            st.markdown("### 💵 Cash Flow (Annual)")
+            if cf_stmt is not None and not cf_stmt.empty:
+                cd = cf_stmt.T.copy()
+                cd.index = [str(i)[:10] for i in cd.index]
+                for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
+                st.dataframe(cd, use_container_width=True)
+            else:
+                st.info("Cash flow not available.")
+            cf1,cf2,cf3,cf4 = st.columns(4)
+            cf1.metric("Op CF",   _fb(info.get("operatingCashflow")),
+                       help="Operating Cash Flow — actual cash generated from core business operations. More reliable than net income as a profitability measure")
+            cf2.metric("FCF",     _fb(info.get("freeCashflow")),
+                       help="Free Cash Flow — Operating Cash Flow minus Capital Expenditures. Cash left over that can be used for dividends, buybacks, or debt repayment")
+            cf3.metric("CapEx",   _fb(info.get("capitalExpenditures")),
+                       help="Capital Expenditures — money spent on buying, maintaining or upgrading physical assets like buildings and equipment")
+            sh = info.get("sharesOutstanding"); fcf = info.get("freeCashflow")
+            cf4.metric("FCF/Shr", _fn(fcf/sh if fcf and sh else None),
+                       help="Free Cash Flow Per Share — FCF divided by shares outstanding. How much free cash is generated per share owned")
+            cf5,cf6 = st.columns(2)
+            cf5.metric("ROA", _fp(info.get("returnOnAssets")),
+                       help="Return on Assets — Net Income ÷ Total Assets. Measures how efficiently a company uses its assets to generate profit. Above 5% is generally good")
+            cf6.metric("ROE", _fp(info.get("returnOnEquity")),
+                       help="Return on Equity — Net Income ÷ Shareholders Equity. Measures how much profit is generated per dollar of shareholder investment. Above 15% is considered strong")
+
+        with ft[5]:
+            st.markdown("### 📊 Interactive Chart")
+
+            # ── Chart controls row 1 ──────────────────────
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            with cc1:
+                chart_type = st.selectbox(
+                    "Chart Type",
+                    ["Candlestick", "Heikin Ashi", "Line"],
+                    index=0, key=f"{key_prefix}_chart_type",
+                    help="Heikin Ashi smooths noise by averaging price data — easier to spot trends"
+                )
+            with cc2:
+                interval = st.selectbox(
+                    "Candle Interval",
+                    ["1m","5m","15m","30m","1h","4h","1d","1wk","1mo"],
+                    index=6, key=f"{key_prefix}_chart_interval",
+                    help=(
+                        "1m/5m: last 7 days max  |  "
+                        "15m/30m/1h: last 60 days max  |  "
+                        "4h: last 60 days max (resampled)  |  "
+                        "1d/1wk/1mo: years of data available"
+                    )
+                )
+            with cc3:
+                # Restrict time period options based on interval
+                intraday_short = interval in ("1m", "5m")
+                intraday_mid   = interval in ("15m", "30m", "1h", "4h")
+
+                if intraday_short:
+                    period_opts = ["1d", "5d", "7d"]
+                    period_def  = 1
+                elif intraday_mid:
+                    period_opts = ["1d", "5d", "1mo", "2mo"]
+                    period_def  = 2
+                else:
+                    period_opts = ["5d","1mo","3mo","6mo","1y","2y","5y","10y","Custom"]
+                    period_def  = 4
+
+                pc = st.selectbox(
+                    "Time Period", period_opts,
+                    index=period_def, key=f"{key_prefix}_price_history_period"
+                )
+            with cc4:
+                chart_theme = st.selectbox(
+                    "Theme", ["Dark","Light"], index=0, key=f"{key_prefix}_chart_theme"
+                )
+
+            # ── Custom date range (daily+ only) ───────────
+            if pc == "Custom":
+                dr1, dr2 = st.columns(2)
+                with dr1:
+                    custom_start = st.date_input(
+                        "Start Date",
+                        value=pd.Timestamp.today() - pd.Timedelta(days=365),
+                        max_value=pd.Timestamp.today(),
+                        key=f"{key_prefix}_chart_custom_start",
+                    )
+                with dr2:
+                    custom_end = st.date_input(
+                        "End Date",
+                        value=pd.Timestamp.today(),
+                        max_value=pd.Timestamp.today(),
+                        key=f"{key_prefix}_chart_custom_end",
+                    )
+
+            st.markdown("**Overlays**")
+            ov1,ov2,ov3,ov4 = st.columns(4)
+            show_ema20  = ov1.checkbox("EMA 20",  value=True,  key=f"{key_prefix}_show_ema20")
+            show_ema50  = ov2.checkbox("EMA 50",  value=True,  key=f"{key_prefix}_show_ema50")
+            show_ema200 = ov3.checkbox("EMA 200", value=False, key=f"{key_prefix}_show_ema200")
+            show_bb     = ov4.checkbox("Bollinger Bands", value=False, key=f"{key_prefix}_show_bb")
+
+            st.markdown("**Sub-Charts**")
+            sc1,sc2,sc3 = st.columns(3)
+            show_vol  = sc1.checkbox("Volume",  value=True,  key=f"{key_prefix}_show_vol")
+            show_rsi  = sc2.checkbox("RSI",     value=True,  key=f"{key_prefix}_show_rsi")
+            show_macd = sc3.checkbox("MACD",    value=False, key=f"{key_prefix}_show_macd")
+
+            # ── Fetch history with correct interval ───────
+            # yfinance interval/period compatibility:
+            #   1m        → max period "7d"
+            #   5m/15m/30m/1h → max period "60d"
+            #   4h        → not native; fetch 1h and resample
+            #   1d/1wk/1mo → any period
+            fetch_interval = "1h" if interval == "4h" else interval
+
+            # Map display period → yfinance period string for fetch
+            period_fetch_map = {
+                "1d":"1d","5d":"5d","7d":"7d","1mo":"1mo","2mo":"2mo",
+                "3mo":"3mo","6mo":"6mo","1y":"2y","2y":"5y",
+                "5y":"10y","10y":"max","Custom":"max",
+            }
+            fetch_period = period_fetch_map.get(pc, "2y")
+
+            try:
+                _s = yf.Ticker(sticker)
+                if pc == "Custom":
+                    hist_full = _s.history(
+                        start=str(custom_start),
+                        end=str(custom_end),
+                        interval=fetch_interval
+                    )
+                else:
+                    hist_full = _s.history(period=fetch_period, interval=fetch_interval)
+            except Exception as _fe:
+                st.warning(f"Could not fetch {interval} data: {_fe}. Falling back to daily.")
+                hist_full = hist_1y
+
+            # Resample 1h → 4h if needed
+            if interval == "4h" and not hist_full.empty:
+                hist_full = hist_full.resample("4h").agg({
+                    "Open":  "first",
+                    "High":  "max",
+                    "Low":   "min",
+                    "Close": "last",
+                    "Volume":"sum",
+                }).dropna()
+
+            # Slice to display window for daily+ periods
+            period_days_map = {
+                "5d":5,"1mo":21,"3mo":63,"6mo":126,
+                "1y":252,"2y":504,"5y":1260,"10y":2520,
+            }
+            if pc not in ("Custom","1d","5d","7d","1mo","2mo"):
+                dn = period_days_map.get(pc, 252)
+                hd = hist_full.iloc[-dn:].copy() if len(hist_full) >= dn else hist_full.copy()
+            else:
+                hd = hist_full.copy()
+
+            if not hd.empty:
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
+
+                bg   = "#0e1117" if chart_theme == "Dark" else "#ffffff"
+                fg   = "#ffffff" if chart_theme == "Dark" else "#000000"
+                grid = "#1f2937" if chart_theme == "Dark" else "#e5e7eb"
+
+                # ── Compute indicators ────────────────────
+                hd["EMA20"]  = hd["Close"].ewm(span=20,  adjust=False).mean()
+                hd["EMA50"]  = hd["Close"].ewm(span=50,  adjust=False).mean()
+                hd["EMA200"] = hd["Close"].ewm(span=200, adjust=False).mean()
+
+                # Bollinger Bands (20-day, 2σ)
+                bb_mid        = hd["Close"].rolling(20).mean()
+                bb_std        = hd["Close"].rolling(20).std()
+                hd["BB_mid"]  = bb_mid
+                hd["BB_up"]   = bb_mid + 2 * bb_std
+                hd["BB_low"]  = bb_mid - 2 * bb_std
+
+                # RSI (14-period)
+                delta  = hd["Close"].diff()
+                gain   = delta.clip(lower=0).rolling(14).mean()
+                loss   = (-delta.clip(upper=0)).rolling(14).mean()
+                rs     = gain / loss.replace(0, np.nan)
+                hd["RSI"] = 100 - (100 / (1 + rs))
+
+                # MACD (12/26/9)
+                ema12       = hd["Close"].ewm(span=12, adjust=False).mean()
+                ema26       = hd["Close"].ewm(span=26, adjust=False).mean()
+                hd["MACD"]  = ema12 - ema26
+                hd["Signal"]= hd["MACD"].ewm(span=9, adjust=False).mean()
+                hd["Hist"]  = hd["MACD"] - hd["Signal"]
+
+                # Heikin Ashi OHLC
+                ha = hd.copy()
+                ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
+                ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
+                ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
+                ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
+
+                # ── Build subplot layout ──────────────────
+                sub_charts = [s for s, show in [
+                    ("Volume", show_vol), ("RSI", show_rsi), ("MACD", show_macd)
+                ] if show]
+
+                n_rows   = 1 + len(sub_charts)
+                row_h    = [0.55] + [0.45 / max(len(sub_charts), 1)] * len(sub_charts) if sub_charts else [1.0]
+                sub_specs= [[{"secondary_y": False}]] * n_rows
+
+                fig = make_subplots(
+                    rows=n_rows, cols=1,
+                    shared_xaxes=True,
+                    row_heights=row_h,
+                    vertical_spacing=0.03,
+                    specs=sub_specs,
+                )
+
+                # ── Main price chart ──────────────────────
+                if chart_type == "Candlestick":
+                    fig.add_trace(go.Candlestick(
+                        x=hd.index, open=hd["Open"], high=hd["High"],
+                        low=hd["Low"],  close=hd["Close"],
+                        name="Price",
+                        increasing_line_color="#26a69a",
+                        decreasing_line_color="#ef5350",
+                        increasing_fillcolor="#26a69a",
+                        decreasing_fillcolor="#ef5350",
+                    ), row=1, col=1)
+
+                elif chart_type == "Heikin Ashi":
+                    fig.add_trace(go.Candlestick(
+                        x=ha.index, open=ha["HA_Open"], high=ha["HA_High"],
+                        low=ha["HA_Low"],  close=ha["HA_Close"],
+                        name="Heikin Ashi",
+                        increasing_line_color="#26a69a",
+                        decreasing_line_color="#ef5350",
+                        increasing_fillcolor="#26a69a",
+                        decreasing_fillcolor="#ef5350",
+                    ), row=1, col=1)
+
+                else:  # Line
+                    fig.add_trace(go.Scatter(
+                        x=hd.index, y=hd["Close"],
+                        name="Close", line=dict(color="#2196f3", width=1.5)
+                    ), row=1, col=1)
+
+                # ── Overlays ──────────────────────────────
+                if show_ema20:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA20"],
+                        name="EMA 20", line=dict(color="#f59e0b", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_ema50:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA50"],
+                        name="EMA 50", line=dict(color="#a78bfa", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_ema200:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["EMA200"],
+                        name="EMA 200", line=dict(color="#f87171", width=1),
+                        opacity=0.85), row=1, col=1)
+                if show_bb:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_up"],
+                        name="BB Upper", line=dict(color="#94a3b8", width=1, dash="dot"),
+                        opacity=0.6), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_low"],
+                        name="BB Lower", line=dict(color="#94a3b8", width=1, dash="dot"),
+                        fill="tonexty", fillcolor="rgba(148,163,184,0.08)",
+                        opacity=0.6), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["BB_mid"],
+                        name="BB Mid", line=dict(color="#94a3b8", width=1, dash="dash"),
+                        opacity=0.4), row=1, col=1)
+
+                # ── Sub-charts ────────────────────────────
+                sub_row = 2
+                if show_vol:
+                    colors = ["#26a69a" if hd["Close"].iloc[i] >= hd["Open"].iloc[i]
+                              else "#ef5350" for i in range(len(hd))]
+                    fig.add_trace(go.Bar(
+                        x=hd.index, y=hd["Volume"],
+                        name="Volume", marker_color=colors, opacity=0.7,
+                    ), row=sub_row, col=1)
+                    fig.update_yaxes(title_text="Volume", row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+                    sub_row += 1
+
+                if show_rsi:
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["RSI"],
+                        name="RSI", line=dict(color="#60a5fa", width=1.5)),
+                        row=sub_row, col=1)
+                    fig.add_hline(y=70, line_dash="dot", line_color="#ef5350",
+                                  line_width=1, row=sub_row, col=1)
+                    fig.add_hline(y=30, line_dash="dot", line_color="#26a69a",
+                                  line_width=1, row=sub_row, col=1)
+                    fig.update_yaxes(title_text="RSI", range=[0,100],
+                                     row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+                    sub_row += 1
+
+                if show_macd:
+                    hist_colors = ["#26a69a" if v >= 0 else "#ef5350"
+                                   for v in hd["Hist"].fillna(0)]
+                    fig.add_trace(go.Bar(x=hd.index, y=hd["Hist"],
+                        name="MACD Hist", marker_color=hist_colors, opacity=0.6),
+                        row=sub_row, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["MACD"],
+                        name="MACD", line=dict(color="#60a5fa", width=1.2)),
+                        row=sub_row, col=1)
+                    fig.add_trace(go.Scatter(x=hd.index, y=hd["Signal"],
+                        name="Signal", line=dict(color="#f59e0b", width=1.2)),
+                        row=sub_row, col=1)
+                    fig.update_yaxes(title_text="MACD", row=sub_row, col=1,
+                                     title_font=dict(size=10), tickfont=dict(size=9))
+
+                # ── Layout ────────────────────────────────
+                fig.update_layout(
+                    height=600 + 120 * len(sub_charts),
+                    paper_bgcolor=bg, plot_bgcolor=bg,
+                    font=dict(color=fg, size=11),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.01,
+                        xanchor="left", x=0,
+                        bgcolor="rgba(0,0,0,0)", font=dict(size=10)
+                    ),
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_rangeslider_visible=False,
+                    hovermode="x unified",
+                )
+                fig.update_xaxes(
+                    gridcolor=grid, showgrid=True,
+                    zeroline=False, showspikes=True,
+                    spikecolor="#666", spikethickness=1,
+                )
+                fig.update_yaxes(
+                    gridcolor=grid, showgrid=True,
+                    zeroline=False,
+                )
+                fig.update_yaxes(title_text="Price ($)", row=1, col=1,
+                                 title_font=dict(size=10), tickfont=dict(size=9))
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # ── Period stats ──────────────────────────
+                s1, s2, s3, s4 = st.columns(4)
+                pr = (hd["Close"].iloc[-1] - hd["Close"].iloc[0]) / hd["Close"].iloc[0]
+                s1.metric("Period Return", _fp(pr),     delta=f"{pr:+.2%}")
+                s2.metric("Period High",   f"${hd['High'].max():,.2f}")
+                s3.metric("Period Low",    f"${hd['Low'].min():,.2f}")
+                s4.metric("Avg Volume",    _fb(hd["Volume"].mean()).replace("$",""))
+            else:
+                st.info("No price history available.")
+
+    except Exception as _render_err:
+        st.error(f"Error rendering analysis: {_render_err}")
+
+
+def process_ticker(args):
+    """
+    Fetch all data for one ticker — yfinance primary, Alpha Vantage fallback.
+
+    Speed notes
+    -----------
+    • yfinance is tried first for everything (fast, no key needed).
+    • Alpha Vantage is called only when yfinance returns sparse/empty data.
+    • AV calls: OVERVIEW (1), TIME_SERIES_DAILY (1), INCOME+BAL+CF (3).
+    • Hard timeout — future.result(timeout=12) in the scan loop kills
+      any ticker that takes >12s wall-clock time.
+    NOTE: Do NOT inject a custom requests Session into yfinance — it breaks
+    the internal cookie/crumb authentication and causes all requests to fail.
+    """
+    t, mfi_period, range_days = args
+    try:
+        stock  = yf.Ticker(t)
+        _av_key = _get_av_key() if _AV_AVAILABLE else ""
+
+        # ── 1. Info — price, ETF check, sector, fundamentals ──────────
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}
+
+        # Alpha Vantage fallback for sparse/missing info
+        if _AV_AVAILABLE and _av_key and av_needs_fallback(info):
+            try:
+                info = av_fill_info(t, info, _av_key)
+            except Exception:
+                pass
+
+        if not info or len(info) < 5:
+            return None
+        if is_etf_or_fund(info):
+            return None
+
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not price:
+            return None
+
+        # ── 3. OHLCV history — 1y is enough for all indicators ─────────
+        try:
+            hist = stock.history(period="1y")
+            if hist.empty or len(hist) < 30:
+                hist = stock.history(period="6mo")
+        except Exception:
+            hist = pd.DataFrame()
+
+        # Alpha Vantage fallback for missing history
+        if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
+            try:
+                av_hist = av_fill_history(t, _av_key)
+                if not av_hist.empty:
+                    hist = av_hist
+            except Exception:
+                pass
+
+        # ── 4. Financial statements ─────────────────────────────────────
+        try:
+            fin = stock.financials
+        except Exception:
+            fin = pd.DataFrame()
+
+        # ── 4b. Dividend history — needed for payment frequency ─────
+        try:
+            div_hist = stock.dividends
+        except Exception:
+            div_hist = pd.Series(dtype=float)
+        try:
+            bal = stock.balance_sheet
+        except Exception:
+            bal = pd.DataFrame()
+        try:
+            cf = stock.cashflow
+        except Exception:
+            cf = pd.DataFrame()
+
+        # Alpha Vantage fallback for missing financials
+        if _AV_AVAILABLE and _av_key and av_needs_financials_fallback(fin, bal, cf):
+            try:
+                av_fin, av_bal, av_cf = av_fill_financials(t, _av_key)
+                if fin.empty and not av_fin.empty:   fin = av_fin
+                if bal.empty and not av_bal.empty:   bal = av_bal
+                if cf.empty  and not av_cf.empty:    cf  = av_cf
+            except Exception:
+                pass
+
+        # ── 5. Compute all indicators — pure CPU, no network ───────────
+        vol_signals    = get_volume_signals(hist, mfi_period)
+        tech_signals   = calculate_technical_signals(hist)
+        range_data     = calculate_price_range(hist, range_days)
+        short_data     = calculate_short_squeeze(info)
+        div_data       = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
+        ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
+                          if len(hist) >= 50 else None)
+        owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+        roic           = calculate_roic(fin, bal)
+        roic_trend     = calculate_roic_trend(fin, bal)
+        piotroski      = calculate_piotroski(fin, bal, cf)
+
+        # ── 6. Compact OHLCV cache — keep last 200 bars only ──────────
+        # Golden cross needs 200 bars; MFI/OBV/range need far less.
+        # Trimming from 252 to 200 bars saves ~4KB per ticker with no indicator loss.
+        if not hist.empty:
+            _h = hist.iloc[-200:] if len(hist) > 200 else hist
+            hist_cache = {
+                "dates":  _h.index.strftime("%Y-%m-%d").tolist(),
+                "open":   _h["Open"].tolist(),
+                "high":   _h["High"].tolist(),
+                "low":    _h["Low"].tolist(),
+                "close":  _h["Close"].tolist(),
+                "volume": _h["Volume"].tolist(),
+            }
+        else:
+            hist_cache = {}
+
+        return {
+            "Ticker":         t,
+            "Sector":         info.get("sector", "Unknown"),
+            "Price":          price,
+            "MarketCap":      info.get("marketCap"),
+            "P/E":            info.get("trailingPE"),
+            "OwnerEarnings":  owner_earnings,
+            "OE_Yield":       oe_yield,
+            "ROIC":           roic,
+            "ROIC_Trend":     roic_trend,
+            "RevenueGrowth":  info.get("revenueGrowth"),
+            "EarningsGrowth": info.get("earningsGrowth"),
+            "Piotroski":      piotroski,
+            "MA50":           ma50,
+            "OBV":            vol_signals["OBV"],
+            "MFI":            vol_signals["MFI"],
+            "PCV":            vol_signals["PCV"],
+            "RSI":            tech_signals["RSI"],
+            "MACD":           tech_signals["MACD"],
+            "GoldenCross":    tech_signals["GoldenCross"],
+            "MFISweetSpot":   tech_signals["MFISweetSpot"],
+            "NoBearDiv":      tech_signals["NoBearDiv"],
+            "MA50Proximity":  tech_signals["MA50Proximity"],
+            "RangeHigh":      range_data["RangeHigh"],
+            "RangeLow":       range_data["RangeLow"],
+            "RangePct":       range_data["RangePct"],
+            "RangePos":       range_data["RangePos"],
+            "ShortPctFloat":  short_data["ShortPctFloat"],
+            "ShortPctFloatRaw": short_data["ShortPctFloatRaw"],
+            "DaysToCover":    short_data["DaysToCover"],
+            "ShortChange":    short_data["ShortChange"],
+            "ShortSqueeze":   short_data["ShortSqueeze"],
+            "DividendYieldPct":  div_data["DividendYieldPct"],
+            "DividendRate":      div_data["DividendRate"],
+            "DividendPayoutRatio": div_data["PayoutRatio"],
+            "DividendFrequency": div_data["DividendFrequency"],
+            "DividendScore":     div_data["DividendScore"],
+            "_hist":          hist_cache,
+        }
+
+    except Exception:
+        return None
+
+
+def _hist_from_cache(row: dict) -> pd.DataFrame:
+    """Reconstruct a history DataFrame from the compact cache dict stored in a result row."""
+    hc = row.get("_hist")
+    if not hc:
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame({
+            "Open":   hc["open"],
+            "High":   hc["high"],
+            "Low":    hc["low"],
+            "Close":  hc["close"],
+            "Volume": hc["volume"],
+        }, index=pd.to_datetime(hc["dates"]))
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def recompute_indicators(results: list, mfi_period: int, range_days: int) -> list:
+    """
+    Re-derive MFI, OBV, PCV, MA50, and range metrics from cached raw history
+    using the current sidebar settings — zero network requests.
+    Returns a new list of result dicts with updated indicator values.
+    """
+    updated = []
+    for row in results:
+        hist = _hist_from_cache(row)
+        if hist.empty:
+            updated.append(row)
+            continue
+        new_row = dict(row)
+        vol  = get_volume_signals(hist, mfi_period)
+        rng  = calculate_price_range(hist, range_days)
+        ma50 = round(hist["Close"].rolling(50).mean().iloc[-1], 2) if len(hist) >= 50 else None
+        tech = calculate_technical_signals(hist)
+        new_row.update({
+            "MA50":          ma50,
+            "OBV":           vol["OBV"],
+            "MFI":           vol["MFI"],
+            "PCV":           vol["PCV"],
+            "RSI":           tech["RSI"],
+            "MACD":          tech["MACD"],
+            "GoldenCross":   tech["GoldenCross"],
+            "MFISweetSpot":  tech["MFISweetSpot"],
+            "NoBearDiv":     tech["NoBearDiv"],
+            "MA50Proximity": tech["MA50Proximity"],
+            "RangeHigh":     rng["RangeHigh"],
+            "RangeLow":      rng["RangeLow"],
+            "RangePct":      rng["RangePct"],
+            "RangePos":      rng["RangePos"],
+        })
+        updated.append(new_row)
+    return updated
+
+# ───────────────────────────────────────────────────────────────
+# TICKER LOADERS
+# ───────────────────────────────────────────────────────────────
+
+def _fetch_exchange_tickers(exchange: str) -> list:
+    """
+    Fetch ALL tickers for NYSE or NASDAQ.
+
+    Source 1 — NASDAQ Trader symbol directory (official, pipe-delimited, no pagination)
+      nasdaqlisted.txt  ~3 300 NASDAQ tickers in one request
+      otherlisted.txt   ~3 000 NYSE/AMEX/Arca tickers in one request
+    Source 2 — NASDAQ screener API, paginated with explicit offset loop
+    Source 3 — SEC EDGAR company_tickers_exchange.json
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; stockscreener/2.0)",
+        "Accept":     "text/plain,application/json,*/*",
+    }
+
+    # ── Source 1: NASDAQ Trader symbol directory (correct domain) ──
+    # www.nasdaqtrader.com/dynamic/SymDir/ — official NASDAQ data feeds
+    # Single GET, no pagination, pipe-delimited, ETF + test-issue flags built in.
+    try:
+        if exchange == "nasdaq":
+            url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+        else:
+            url = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        lines = [l for l in resp.text.strip().splitlines() if l.strip()]
+
+        if len(lines) > 2:
+            header = [h.strip() for h in lines[0].split("|")]
+            sym_i  = header.index("Symbol")     if "Symbol"     in header else 0
+            etf_i  = header.index("ETF")        if "ETF"        in header else None
+            test_i = header.index("Test Issue") if "Test Issue" in header else None
+            exch_i = header.index("Exchange")   if "Exchange"   in header else None
+
+            tickers = []
+            for line in lines[1:]:
+                # Last line is a file-creation date stamp — skip it
+                if line.startswith("File Creation Time"):
+                    continue
+                parts = line.split("|")
+                if len(parts) <= sym_i:
+                    continue
+                sym = parts[sym_i].strip()
+                if not sym or sym == "Symbol":
+                    continue
+                if etf_i  is not None and len(parts) > etf_i  and parts[etf_i].strip()  == "Y":
+                    continue
+                if test_i is not None and len(parts) > test_i and parts[test_i].strip() == "Y":
+                    continue
+                # otherlisted: filter by exchange code
+                # N = NYSE, A = NYSE American (AMEX), P = NYSE Arca, Z = BATS, V = Investors Exchange
+                if exch_i is not None and exchange == "nyse":
+                    exch_val = parts[exch_i].strip() if len(parts) > exch_i else ""
+                    if exch_val not in ("N", "A", "P", "Z", "V"):
+                        continue
+                tickers.append(sym.replace(".", "-"))
+
+            if len(tickers) >= 500:
+                return tickers
+    except Exception:
+        pass
+
+    # ── Source 2: NASDAQ screener API, fully paginated ────────────
+    # Read totalrecords, then loop through all offset pages explicitly.
+    # Do NOT break on empty page_rows — always loop to total.
+    try:
+        base = (f"https://api.nasdaq.com/api/screener/stocks"
+                f"?tableonly=true&limit=1000&exchange={exchange}&offset=")
+        all_rows = []
+
+        resp  = requests.get(base + "0", headers=headers, timeout=30)
+        resp.raise_for_status()
+        table = resp.json().get("data", {}).get("table", {}) or {}
+
+        # totalrecords arrives as a string, sometimes with commas
+        raw_total = str(table.get("totalrecords") or "0")
+        total     = int(raw_total.replace(",", "").strip() or "0")
+        first_rows = table.get("rows") or []
+        all_rows.extend(first_rows)
+
+        # Fetch every remaining page — do NOT break early on empty response
+        for offset in range(1000, total, 1000):
+            try:
+                pr = requests.get(base + str(offset), headers=headers, timeout=30)
+                pr.raise_for_status()
+                page_rows = (pr.json().get("data", {}).get("table", {}) or {}).get("rows") or []
+                all_rows.extend(page_rows)
+            except Exception:
+                continue   # skip one bad page, keep going
+
+        tickers = [row["symbol"].strip() for row in all_rows
+                   if isinstance(row, dict) and row.get("symbol")]
+        if len(tickers) >= 500:
+            return tickers
+    except Exception:
+        pass
+
+    # ── Source 3: SEC EDGAR company_tickers_exchange.json ─────────
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers_exchange.json",
+            headers={"User-Agent": "stockscreener/2.0 contact@example.com"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data   = resp.json()
+        fields = data.get("fields", [])
+        rows   = data.get("data", [])
+        exch_i = fields.index("exchange") if "exchange" in fields else 3
+        tick_i = fields.index("ticker")   if "ticker"   in fields else 2
+        target = "NYSE" if exchange == "nyse" else "Nasdaq"
+        tickers = [
+            row[tick_i].strip().replace(".", "-")
+            for row in rows
+            if len(row) > max(exch_i, tick_i)
+            and str(row[exch_i]).strip().lower() == target.lower()
+            and row[tick_i]
+        ]
+        return tickers
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400)   # cache for 24 hours so repeated runs are instant
+def load_tickers(exchange_key: str) -> list:
+    """
+    Return a deduplicated list of tickers for the chosen exchange.
+    Results cached for 24 hours — clear cache if count looks wrong.
+    """
+    if exchange_key == "sp500":
+        url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        df = pd.read_html(resp.text)[0]
+        return df["Symbol"].str.replace(".", "-", regex=False).tolist()
+
+    elif exchange_key in ("nyse", "nasdaq"):
+        tickers = _fetch_exchange_tickers(exchange_key)
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        return unique
+
+    return []
+
+
+def is_etf_or_fund(info: dict) -> bool:
+    """
+    Return True if the security is an ETF, index fund, trust, or other
+    non-single-company product that should be excluded from the screener.
+
+    Priority order:
+    1. yfinance quoteType (most reliable — "etf", "mutualfund" etc.)
+    2. Name keyword matching (conservative list — no false positives on real companies)
+    """
+    # quoteType is the most reliable signal — yfinance classifies it directly
+    quote_type = (info.get("quoteType") or "").lower()
+    if quote_type in ("etf", "mutualfund", "index", "future", "option",
+                      "currency", "cryptocurrency"):
+        return True
+
+    # EQUITY = definitely a company stock — never exclude based on name alone
+    if quote_type == "equity":
+        return False
+
+    # For anything else (or missing quoteType), check name keywords
+    # Use only unambiguous ETF brand names — NOT generic English words
+    name = (info.get("longName") or info.get("shortName") or "").lower()
+    return any(kw in name for kw in ETF_KEYWORDS)
+
+def build_excel(display: pd.DataFrame) -> bytes:
+    """Write the display DataFrame (already filtered to visible columns) to Excel.
+    Strips any remaining internal columns just in case."""
+    # Belt-and-suspenders: drop internal/hidden columns that should never appear
+    INTERNAL_COLS = {"_hist", "RangeHigh", "RangeLow", "RangePos",
+                     "ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross",
+                     "MFI", "MFISweetSpot", "NoBearDiv"}
+    df_out = display.drop(columns=[c for c in INTERNAL_COLS if c in display.columns],
+                          errors="ignore")
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_out.to_excel(writer, index=False, sheet_name="Stock_Picks")
+        sheet = writer.book["Stock_Picks"]
+        col_map = {cell.value: get_column_letter(cell.column) for cell in sheet[1]}
+        for col_name in ["RevenueGrowth", "EarningsGrowth"]:
+            if col_name in col_map:
+                for cell in sheet[col_map[col_name]][1:]:
+                    if cell.value is not None:
+                        cell.number_format = "0.00%"
+        if "OwnerEarnings" in col_map:
+            for cell in sheet[col_map["OwnerEarnings"]][1:]:
+                if cell.value is not None:
+                    cell.number_format = "$#,##0"
+        for idx, col in enumerate(df_out.columns, 1):
+            col_letter = get_column_letter(idx)
+            max_len = max([len(str(c.value)) for c in sheet[col_letter] if c.value] + [len(col)])
+            sheet.column_dimensions[col_letter].width = max_len + 2
+    return output.getvalue()
+
+# ───────────────────────────────────────────────────────────────
+# SCORE COLOR MAP
+# ───────────────────────────────────────────────────────────────
+
+def color_score(val):
+    try:
+        v = float(val)
+        if v >= 8:   return "background-color: #1a7a1a; color: white"
+        elif v >= 5: return "background-color: #4caf50; color: white"
+        elif v >= 3: return "background-color: #ff9800; color: white"
+        else:        return "background-color: #f44336; color: white"
+    except:
+        return ""
+
+# ───────────────────────────────────────────────────────────────
+# MAIN RUN LOGIC
+# ───────────────────────────────────────────────────────────────
+
+with tab_screener:
+
+ # ── Nightly data status banner (always visible) ───────────────
+ _ck = _get_cache_key()
+ _pc_results, _pc_meta = load_precomputed_data(cache_key=_ck)
+ if _pc_results:
+    _pc_time  = _pc_meta.get("scanned_at_utc", "unknown")
+    _pc_count = len(_pc_results)
+    st.info(
+        f"📦 **Nightly data available** · {_pc_count:,} stocks · "
+        f"Last updated: {_pc_time} · "
+        f"Run Screener to apply filters instantly — no live download needed."
+    )
+ else:
+    _repo = _get_github_repo()
+    if not _repo:
+        st.error(
+            "⚙️ **Setup needed:** Add your GitHub repo to Streamlit secrets. "
+            "Go to: **Streamlit Cloud → your app → Settings → Secrets** and add:\n\n"
+            "```\nGITHUB_REPO = \"your-username/your-repo-name\"\n```\n\n"
+            "Then trigger the first scan: GitHub → Actions → Nightly Stock Scan → Run workflow."
+        )
+    else:
+        st.warning(
+            f"⏳ **No pre-computed data yet** · repo: `{_repo}` · "
+            "Trigger a manual run: GitHub → Actions → Nightly Stock Scan → Run workflow. "
+            "Until then the screener will do a live scan."
+        )
+
+ if run_btn:
+    active_metrics = [k for k, v in metric_enabled.items() if v]
+
+    exchange_key  = EXCHANGES[exchange]
+    sector_label  = sector if sector != "All Sectors" else "All Sectors"
+
+    # ── Priority 1: Pre-computed nightly data file ───────────────────
+    # Check if data/stock_data.json.gz exists (written by nightly GitHub Action).
+    # This is the fastest path — no live scanning needed at all.
+    _precomp_results, _precomp_meta = load_precomputed_data(cache_key=_ck)
+    _precomp_for_exchange = get_precomputed_for_exchange(exchange_key) if _precomp_results else []
+    _using_precomp = bool(_precomp_for_exchange)
+
+    # ── Priority 2: Live session cache ───────────────────────────────
+    # Falls back to this if nightly file doesn't exist yet.
+    cache       = st.session_state.get("screener_cache", {})
+    cache_valid = (
+        not _using_precomp and
+        cache.get("exchange_key") == exchange_key and
+        bool(cache.get("results"))
+    )
+
+    if _using_precomp:
+        raw_results = _precomp_for_exchange
+        results     = recompute_indicators(raw_results, mfi_period, range_days)
+        _scan_time  = _precomp_meta.get("scanned_at_utc", "unknown")
+        _n_stocks   = len(results)
+        _elapsed    = _precomp_meta.get("elapsed_minutes", "?")
+        st.success(
+            f"⚡ **Pre-computed data loaded** — {_n_stocks} stocks · "
+            f"Last updated: {_scan_time} · "
+            f"Scan took {_elapsed} min overnight · "
+            f"Indicators recomputed instantly from stored history."
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("🔄 Force Live Rescan", key="force_rescan_btn",
+                     help="Bypass the nightly data and run a live scan right now. Takes 5–30 min."):
+            st.session_state["_force_live_scan"] = True
+            st.rerun()
+        if c2.button("🗑️ Clear Session Cache", key="clear_cache_btn"):
+            st.session_state.pop("screener_cache", None)
+            st.rerun()
+
+    elif cache_valid:
+        raw_results = cache["results"]
+        results     = recompute_indicators(raw_results, mfi_period, range_days)
+        st.success(
+            f"⚡ Using live session cache "
+            f"({len(results)} tickers · {cache.get('scanned_at','')}) — "
+            f"indicators recomputed instantly. "
+            f"Click **Clear Cache & Rescan** to fetch fresh data."
+        )
+        if st.button("🔄 Clear Cache & Rescan", key="clear_live_cache_btn"):
+            st.session_state.pop("screener_cache", None)
+            st.rerun()
+
+    # Force live scan flag overrides pre-computed data
+    if st.session_state.pop("_force_live_scan", False):
+        _using_precomp = False
+        cache_valid    = False
+
+    if not _using_precomp and not cache_valid:
+        pass   # falls through to live scan block below
+
+    if _using_precomp or cache_valid:
+        pass   # skip live scan — jump to DataFrame build
+    else:
+        # Load tickers for selected exchange (cached for 24hrs)
+        with st.spinner(f"Loading {exchange} tickers..."):
+            try:
+                tickers = load_tickers(exchange_key)
+            except Exception as e:
+                st.error(f"Failed to load tickers: {e}")
+                st.stop()
+
+        if not tickers:
+            st.error(f"No tickers returned for {exchange}. Try again later.")
+            st.stop()
+
+        # Warn if count looks suspiciously low (pagination may have failed)
+        expected_min = {"sp500": 400, "nyse": 1500, "nasdaq": 2000}
+        if len(tickers) < expected_min.get(exchange_key, 400):
+            st.warning(
+                f"⚠️ Only **{len(tickers)}** tickers loaded for {exchange} "
+                f"(expected {expected_min.get(exchange_key, '?')}+). "
+                f"The ticker source may be rate-limited — results will be incomplete. "
+                f"Try clearing the 24hr cache and reloading."
+            )
+
+        st.info(
+            f"Scanning **{len(tickers)}** tickers on **{exchange}** · "
+            f"Sector: **{sector_label}** · ETFs/funds excluded · Est. time: ~5 min"
+        )
+
+        # ── Dynamic-worker scan ───────────────────────────────────────
+        # ThreadPoolExecutor cannot resize mid-run, so we scan in batches.
+        # After each batch we measure the pass rate and adjust worker count:
+        #   pass rate ≥ 40% → healthy → ramp up (max 12)
+        #   pass rate 20–40% → OK → hold
+        #   pass rate 10–20% → slow → step down
+        #   pass rate < 10%  → throttled → halve workers + pause
+        #
+        # Batch size scales with worker count so each batch takes ~10–15 s.
+        # Status line updates after every batch with live worker count.
+
+        progress_bar  = st.progress(0, text="Starting scan...")
+        _conn_status  = st.empty()
+        results       = []
+        total         = len(tickers)
+        done          = 0
+        last_pct      = 0
+        workers_now   = max_workers   # start from sidebar value
+        remaining     = list(tickers)
+
+        # Sliding window: track pass rate over last N tickers processed
+        _window_done  = 0
+        _window_pass  = 0
+        _WINDOW       = 50            # evaluate every 50 tickers
+
+        while remaining:
+            # Batch size = workers × 8 so workers stay busy for several seconds
+            batch_size  = max(workers_now * 8, 20)
+            batch       = remaining[:batch_size]
+            remaining   = remaining[batch_size:]
+
+            with ThreadPoolExecutor(max_workers=workers_now) as executor:
+                futures = {
+                    executor.submit(process_ticker, (t, mfi_period, range_days)): t
+                    for t in batch
+                }
+                for future in as_completed(futures):
+                    try:
+                        result = future.result(timeout=12)  # hard cap: skip any ticker >12s
+                    except Exception:
+                        result = None
+                    passed = result is not None
+                    if passed:
+                        results.append(result)
+                    done          += 1
+                    _window_done  += 1
+                    _window_pass  += int(passed)
+
+                    pct  = done / total
+                    found = len(results)
+
+                    if int(pct * 100) >= last_pct + 2 or done == total:
+                        last_pct = int(pct * 100)
+                        progress_bar.progress(
+                            min(pct, 1.0),
+                            text=(f"Scanning... {done}/{total} tickers  ·  "
+                                  f"{found} returned data  ·  "
+                                  f"{workers_now} workers  ({last_pct}%)")
+                        )
+
+            # ── Evaluate pass rate over last window and adjust workers ──
+            if _window_done >= _WINDOW:
+                pass_rate    = _window_pass / _window_done
+                _window_done = 0
+                _window_pass = 0
+
+                if pass_rate >= 0.40:
+                    # Healthy — ramp up (cap at 12 to stay safe on cloud)
+                    new_workers = min(workers_now + 2, 12)
+                    _icon = "🟢"
+                    _msg  = f"healthy ({pass_rate:.0%}) → ramping up"
+                elif pass_rate >= 0.20:
+                    # Good enough — hold steady
+                    new_workers = workers_now
+                    _icon = "🟢"
+                    _msg  = f"good ({pass_rate:.0%}) → holding at {workers_now}"
+                elif pass_rate >= 0.10:
+                    # Slowing — step down one
+                    new_workers = max(workers_now - 1, 2)
+                    _icon = "🟡"
+                    _msg  = f"slowing ({pass_rate:.0%}) → stepping down"
+                else:
+                    # Throttled — halve and pause to let rate limit reset
+                    new_workers = max(workers_now // 2, 1)
+                    _icon = "🔴"
+                    _msg  = f"throttled ({pass_rate:.0%}) → halving + pausing 15s"
+                    time.sleep(15)
+
+                workers_now = new_workers
+                # Persist adjusted value so sidebar shows current count
+                st.session_state["max_workers_val"] = workers_now
+                _conn_status.caption(
+                    f"{_icon} Workers: **{workers_now}** · {_msg} · "
+                    f"Total found: {len(results)}"
+                )
+
+        progress_bar.empty()
+        _conn_status.empty()
+
+        if not results:
+            # Run a quick health check to give specific advice
+            with st.spinner("Diagnosing connection issue..."):
+                _diag = check_yfinance_health()
+            _diag_st = _diag["status"]
+
+            if _diag_st in ("rate_limited", "slow"):
+                st.error(
+                    "🔴 **Rate Limited** — yfinance blocked the scan requests. "
+                    "Too many parallel workers sent too many requests too fast.\n\n"
+                    "**Fixes (try in order):**\n"
+                    "1. Use the **Check Connection** button in the sidebar → click **Reduce Workers to 3**\n"
+                    "2. Wait 60 seconds and run again\n"
+                    "3. Switch to **S&P 500** (fewer tickers = fewer requests)"
+                )
+            elif _diag_st == "timeout":
+                st.error(
+                    "⏱️ **Connection Timed Out** — yfinance servers are not responding.\n\n"
+                    "**Fixes:**\n"
+                    "1. Wait 30–60 seconds and try again\n"
+                    "2. Check your internet connection"
+                )
+            elif _diag_st == "blocked":
+                st.error(
+                    "⛔ **Connection Blocked** — the network cannot reach yfinance.\n\n"
+                    "**Fixes:**\n"
+                    "1. Switch to **S&P 500** only (smaller, more reliable)\n"
+                    "2. If on Streamlit Cloud, the outbound network may have restrictions — "
+                    "try running locally instead"
+                )
+            else:
+                st.error(
+                    "⚠️ **No data returned** — all tickers failed.\n\n"
+                    "**Fixes:**\n"
+                    "1. Wait 60 seconds for the rate limit to reset, then rescan\n"
+                    "2. Wait 60 seconds for yfinance rate limits to reset\n"
+                    "3. Try **S&P 500** instead of NYSE/NASDAQ"
+                )
+            st.session_state["_yf_health"] = _diag
+            st.stop()
+
+        # ── Store results in session_state cache ──────────────────
+        # Only cache live scan results — nightly data stays in st.cache_data
+        # (shared across all users) and doesn't need a per-session copy.
+        # Strip results without _hist before caching to save memory — tickers
+        # without history can't benefit from recompute_indicators anyway.
+        _results_with_hist = [r for r in results if r.get("_hist")]
+        if _results_with_hist:
+            st.session_state["screener_cache"] = {
+                "exchange_key": exchange_key,
+                "results":      _results_with_hist,
+                "scanned_at":   datetime.now().strftime("%H:%M:%S"),
+            }
+        # Recompute immediately with current sidebar values
+        results = recompute_indicators(results, mfi_period, range_days)
+
+    # Build DataFrame
+    df = pd.DataFrame(results)
+    df.replace(["N/A", "None", "-", ""], pd.NA, inplace=True)
+
+    # Normalise sector names — yfinance uses its own names (e.g. "Financial Services",
+    # "Consumer Cyclical") which differ from GICS standard names. Normalise here
+    # so the sector filter dropdown always matches the data correctly.
+    if "Sector" in df.columns:
+        df["Sector"] = df["Sector"].fillna("Unknown").apply(_normalise_sector)
+
+    # ── Ensure ALL expected columns exist — fills missing ones with 0/NaN ──
+    # This prevents KeyError crashes when cached data predates new metrics
+    # or when recompute_indicators couldn't rebuild them (missing _hist).
+    _zero_cols = ["OBV", "MFI", "PCV", "RSI", "MACD", "GoldenCross",
+                  "MFISweetSpot", "NoBearDiv", "MA50Proximity",
+                  "OE_Yield", "ROIC", "ROIC_Trend", "Piotroski",
+                  "RevenueGrowth", "EarningsGrowth", "RangePct",
+                  "RangePos", "RangeHigh", "RangeLow", "MA50",
+                  "ShortSqueeze", "ShortPctFloat", "ShortPctFloatRaw",
+                  "DaysToCover", "ShortChange",
+                  "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
+    for _c in _zero_cols:
+        if _c not in df.columns:
+            df[_c] = 0.0
+    for _c in ["Price", "MarketCap", "P/E", "OwnerEarnings"]:
+        if _c not in df.columns:
+            df[_c] = np.nan
+    for _c in ["Ticker", "Sector"]:
+        if _c not in df.columns:
+            df[_c] = ""
+
+    numeric_cols = ["Price", "MA50", "RangeHigh", "RangeLow", "RangePct", "RangePos",
+                    "MarketCap", "P/E", "OwnerEarnings", "OE_Yield",
+                    "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth",
+                    "Piotroski", "OBV", "MFI", "PCV",
+                    "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity",
+                    "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
+                    "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["ROIC_Trend"] = df["ROIC_Trend"].fillna(np.nan)
+    for vol_col in ["OBV", "MFI", "PCV", "RSI", "MACD", "GoldenCross",
+                    "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        if vol_col in df.columns:
+            df[vol_col] = df[vol_col].fillna(0)
+
+    # ── Sector filter ──────────────────────────────────────────────
+    if sector != "All Sectors":
+        # Normalise both sides so yfinance names, GICS names, and mixed-case
+        # all resolve to the same canonical value before comparing
+        df = df[df["Sector"].apply(_normalise_sector).str.lower() == sector.strip().lower()]
+        if df.empty:
+            st.error(f"No results found for sector: **{sector}**. The sector name may differ from yfinance labels.")
+            st.stop()
+
+    # Safe round helper — only rounds if column exists and is numeric
+    def _safe_round(col, decimals=2):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(decimals)
+
+    _safe_round("P/E");  _safe_round("OE_Yield"); _safe_round("ROIC")
+    _safe_round("ROIC_Trend"); _safe_round("OBV"); _safe_round("MFI")
+    _safe_round("PCV"); _safe_round("MA50"); _safe_round("RangeHigh")
+    _safe_round("RangeLow"); _safe_round("RangePct"); _safe_round("RangePos", 4)
+
+    # MFI signal label
+    def _mfi_signal(v):
+        if pd.isna(v):   return "—"
+        mfi = v * 100
+        if mfi >= 80:    return "🔥 Overbought"
+        if mfi >= 60:    return "📈 Buying"
+        if mfi >= 40:    return "➡️ Neutral"
+        if mfi >= 20:    return "📉 Selling"
+        return "🧊 Oversold"
+    df["MFI_Signal"] = df["MFI"].apply(_mfi_signal)
+
+    # RangePosScore = 1 − RangePos
+    df["RangePosScore"] = (1 - df["RangePos"].fillna(0.5)).round(4)
+
+    # ── Dynamic score — safe column access, never KeyErrors ───────
+    score = pd.Series(0.0, index=df.index)
+    for key in METRICS:
+        if metric_enabled.get(key, False):
+            w = metric_weight.get(key, METRICS[key]["weight"])
+            if key in df.columns:
+                score += pd.to_numeric(df[key], errors="coerce").fillna(0) * w
+            # If column is missing, contributes 0 — doesn't crash
+    df["Score"] = score.round(2)
+
+    # ── Apply filters — all use safe NaN-aware boolean masks ──────
+    under_price = df["Price"].isna() | (df["Price"] <= max_price)
+
+    if active_metrics:
+        above_score = df["Score"] >= min_score
+    else:
+        above_score = pd.Series(True, index=df.index)
+
+    ma50_col = pd.to_numeric(df.get("MA50", pd.Series(np.nan, index=df.index)), errors="coerce")
+    if use_ma50_filter == "below":
+        below_ma50 = df["Price"].isna() | ma50_col.isna() | (df["Price"] <= ma50_col)
+    elif use_ma50_filter == "above":
+        below_ma50 = df["Price"].isna() | ma50_col.isna() | (df["Price"] >= ma50_col)
+    else:
+        below_ma50 = pd.Series(True, index=df.index)
+
+    if use_range_filter:
+        rng_col = pd.to_numeric(df.get("RangePct", pd.Series(np.nan, index=df.index)), errors="coerce")
+        in_range = rng_col.isna() | (rng_col <= range_max_pct)
+    else:
+        in_range = pd.Series(True, index=df.index)
+
+    if use_pe_filter:
+        pe_series = pd.to_numeric(df.get("P/E", pd.Series(np.nan, index=df.index)), errors="coerce")
+        in_pe = pe_series.notna() & (pe_series >= pe_min) & (pe_series <= pe_max)
+    else:
+        in_pe = pd.Series(True, index=df.index)
+
+    if use_rev_filter:
+        rev_series = pd.to_numeric(df.get("RevenueGrowth", pd.Series(np.nan, index=df.index)), errors="coerce")
+        in_rev = rev_series.notna() & (rev_series >= rev_min_idx / 100.0)
+    else:
+        in_rev = pd.Series(True, index=df.index)
+
+    # Sort by Score when metrics are active, otherwise by RangePct (tightest range first)
+    sort_col = "Score" if active_metrics else "RangePct"
+    sort_asc  = not active_metrics   # ascending for RangePct (tighter = better), descending for Score
+
+    screened = (
+        df[under_price & below_ma50 & above_score & in_range & in_pe & in_rev]
+        .sort_values(sort_col, ascending=sort_asc, na_position="last")
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+
+    # ── Active metrics summary banner ────────────────────────────
+    if active_metrics:
+        active_labels = [METRICS[k]["label"] for k in active_metrics]
+        st.success(f"**Active metrics:** {' · '.join(active_labels)}")
+    else:
+        st.info("**No metrics active** — results sorted by tightest price range. Score column will show 0.")
+
+    # ── Results summary cards ────────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Tickers Scanned", len(df))
+    col2.metric("Passed Filters",  len(screened))
+    col3.metric("Avg Score",       f"{screened['Score'].mean():.2f}" if not screened.empty else "—")
+    col4.metric("Top Score",       f"{screened['Score'].max():.2f}"  if not screened.empty else "—")
+
+    # ── Filter diagnostic panel — shows exactly why stocks are blocked ──
+    if screened.empty and not df.empty:
+        with st.expander("🔬 Filter Diagnostics — why are 0 stocks passing?", expanded=True):
+            st.markdown("**Live filter counts** — how many stocks survive each gate:")
+            diag_cols = st.columns(3)
+
+            _up  = under_price.sum()
+            _bm  = below_ma50.sum()
+            _as  = above_score.sum()
+            _ir  = in_range.sum()
+            _ip  = in_pe.sum()
+            _iv  = in_rev.sum()
+            _tot = len(df)
+
+            diag_cols[0].metric("Price filter",     f"{_up}/{_tot}",
+                help=f"max_price={max_price}")
+            diag_cols[1].metric("MA50 filter",      f"{_bm}/{_tot}",
+                help=f"mode={use_ma50_filter}")
+            diag_cols[2].metric("Score filter",     f"{_as}/{_tot}",
+                help=f"min_score={min_score:.1f}")
+
+            diag_cols2 = st.columns(3)
+            diag_cols2[0].metric("Range filter",    f"{_ir}/{_tot}",
+                help=f"enabled={use_range_filter}")
+            diag_cols2[1].metric("P/E filter",      f"{_ip}/{_tot}",
+                help=f"enabled={use_pe_filter}")
+            diag_cols2[2].metric("Rev Growth filter", f"{_iv}/{_tot}",
+                help=f"enabled={use_rev_filter}")
+
+            st.markdown("**Combined pass rates** (each gate applied cumulatively):")
+            cum1 = (under_price).sum()
+            cum2 = (under_price & below_ma50).sum()
+            cum3 = (under_price & below_ma50 & above_score).sum()
+            cum4 = (under_price & below_ma50 & above_score & in_range).sum()
+            cum5 = (under_price & below_ma50 & above_score & in_range & in_pe).sum()
+            cum6 = (under_price & below_ma50 & above_score & in_range & in_pe & in_rev).sum()
+            st.markdown(
+                f"After price: **{cum1}** → "
+                f"After MA50: **{cum2}** → "
+                f"After score: **{cum3}** → "
+                f"After range: **{cum4}** → "
+                f"After P/E: **{cum5}** → "
+                f"After rev growth: **{cum6}**"
+            )
+
+            st.markdown("**Sample of top 5 stocks and their scores:**")
+            _sample = df.nlargest(5, "Score")[
+                ["Ticker", "Price", "MA50", "Score"] +
+                [k for k in active_metrics if k in df.columns][:4]
+            ].copy()
+            st.dataframe(_sample, use_container_width=True)
+
+            st.markdown("**Current filter settings:**")
+            st.json({
+                "max_price":         max_price,
+                "min_score":         min_score,
+                "use_ma50_filter":   use_ma50_filter,
+                "use_range_filter":  use_range_filter,
+                "range_max_pct":     range_max_pct if use_range_filter else "off",
+                "use_pe_filter":     use_pe_filter,
+                "pe_range":          f"{pe_min}–{pe_max}" if use_pe_filter else "off",
+                "use_rev_filter":    use_rev_filter,
+                "active_metrics":    active_metrics,
+                "scores_min":        float(df["Score"].min()),
+                "scores_max":        float(df["Score"].max()),
+                "scores_mean":       float(df["Score"].mean()),
+                "price_min":         float(df["Price"].dropna().min()) if not df["Price"].dropna().empty else "N/A",
+                "price_max":         float(df["Price"].dropna().max()) if not df["Price"].dropna().empty else "N/A",
+                "ma50_above_count":  int((df["Price"] >= df["MA50"]).sum()),
+                "ma50_below_count":  int((df["Price"] < df["MA50"]).sum()),
+            })
+
+    st.divider()
+
+    if screened.empty:
+        st.warning("No stocks passed the current filters. Try loosening the Score threshold, disabling the MA50 filter, or selecting a different sector.")
+    else:
+        # Format display columns
+        display = screened.copy()
+        display["MarketCap"]      = display["MarketCap"].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "")
+        # Short interest display formatting
+        if "ShortPctFloatRaw" in display.columns:
+            display["Short % Float"] = display["ShortPctFloatRaw"].apply(
+                lambda x: f"{x:.1f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DaysToCover" in display.columns:
+            display["Days to Cover"] = display["DaysToCover"].apply(
+                lambda x: f"{x:.1f}" if pd.notnull(x) and x else "—"
+            )
+        if "ShortChange" in display.columns:
+            display["Short Chg"] = display["ShortChange"].apply(
+                lambda x: (f"▲ {x:.1%}" if x > 0 else f"▼ {abs(x):.1%}") if pd.notnull(x) and x is not None else "—"
+            )
+        # Dividend display columns
+        if "DividendYieldPct" in display.columns:
+            display["Div Yield"] = display["DividendYieldPct"].apply(
+                lambda x: f"{x:.2f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DividendRate" in display.columns:
+            display["Div Rate"] = display["DividendRate"].apply(
+                lambda x: f"${x:.2f}" if pd.notnull(x) and x else "—"
+            )
+        if "DividendPayoutRatio" in display.columns:
+            display["Payout %"] = display["DividendPayoutRatio"].apply(
+                lambda x: f"{x:.0f}%" if pd.notnull(x) and x else "—"
+            )
+        if "DividendFrequency" in display.columns:
+            display["Freq"] = display["DividendFrequency"]
+        display["OwnerEarnings"]  = display["OwnerEarnings"].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "")
+        display["RevenueGrowth"]  = display["RevenueGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
+        display["EarningsGrowth"] = display["EarningsGrowth"].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
+        display["RangePct"]       = display["RangePct"].apply(lambda x: f"{x:.1f}%" if pd.notnull(x) else "")
+        display["RangePos"]       = display["RangePos"].apply(
+            lambda x: f"{'▁▂▃▄▅▆▇█'[min(int(x*8),7)] if pd.notnull(x) else '—'} {x:.0%}" if pd.notnull(x) else "—"
+        )
+
+        # Round all remaining numeric columns to 2 decimal places
+        # Exclude: dollar columns, percentage columns, and range cols already formatted as strings
+        skip_cols = {"Ticker", "Sector", "MarketCap", "OwnerEarnings",
+                     "RevenueGrowth", "EarningsGrowth", "RangePct", "RangePos",
+                     "MFI_Signal", "OE_Yield", "ROIC", "ROIC_Trend",
+                     "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"}
+        for col in display.columns:
+            if col not in skip_cols:
+                if pd.api.types.is_numeric_dtype(display[col]):
+                    display[col] = display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
+
+        # Columns always hidden from display (still used in score calculations)
+        # ROIC, OBV, PCV, RSI, MACD, GoldenCross: used in scoring, hidden from table
+        # MFI: replaced by MFI_Signal label — hide numeric score
+        ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv",
+                         "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
+                         "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendFrequency", "DividendScore"}
+
+        # Hide columns for metrics that are toggled off
+        all_metric_keys = list(METRICS.keys())
+        hidden_cols = [k for k in all_metric_keys if not metric_enabled.get(k, True) and k in display.columns]
+        # Add always-hidden cols
+        hidden_cols += [c for c in ALWAYS_HIDDEN if c in display.columns and c not in hidden_cols]
+        # MFI_Signal: show when MFI metric is toggled ON; hide when toggled off
+        if not metric_enabled.get("MFI", True):
+            if "MFI_Signal" in display.columns:
+                hidden_cols.append("MFI_Signal")
+        # Short interest columns: show when ShortSqueeze is enabled
+        if not metric_enabled.get("ShortSqueeze", False):
+            for _sc in ["Short % Float", "Days to Cover", "Short Chg"]:
+                if _sc in display.columns:
+                    hidden_cols.append(_sc)
+        # Dividend columns: show when DividendScore is enabled
+        if not metric_enabled.get("DividendScore", False):
+            for _dc in ["Div Yield", "Div Rate", "Payout %", "Freq"]:
+                if _dc in display.columns:
+                    hidden_cols.append(_dc)
+        display = display.drop(columns=hidden_cols + ["_hist"], errors="ignore")
+
+        # Save to session state — the always-visible panel below renders from here
+        st.session_state["_screener_display"]    = display
+        st.session_state["_screener_sector_lbl"] = sector_label
+        st.session_state["_screener_count"]      = len(screened)
+        # Clear selected ticker and all inline caches when a new scan runs
+        st.session_state.pop("_inline_ticker", None)
+        for _k in [k for k in st.session_state if k.startswith("_il_cache_")]:
+            del st.session_state[_k]
+
+
+ else:
+    if "_screener_display" not in st.session_state:
+        st.info("👈 Configure your filters in the sidebar, then click **Run Screener** to start.")
+
+ # ── Always-visible results + inline analysis ─────────────────────────────────
+ # Renders the saved screener table and inline analysis panel on EVERY render,
+ # including when ticker buttons are clicked (run_btn=False on those renders).
+ _saved_display = st.session_state.get("_screener_display")
+ if _saved_display is not None and not _saved_display.empty:
+    # Re-render the table from saved state
+    _saved_label = st.session_state.get("_screener_sector_lbl", "")
+    _saved_count = st.session_state.get("_screener_count", len(_saved_display))
+    st.subheader(f"Top {_saved_count} Stocks — {_saved_label}")
+
+    # Ticker button grid
+    st.caption("Click any ticker to analyze it below:")
+    _tk_list = list(_saved_display["Ticker"]) if "Ticker" in _saved_display.columns else []
+    _btn_cols = st.columns(min(10, len(_tk_list))) if _tk_list else []
+    for _bi, _tk in enumerate(_tk_list):
+        with _btn_cols[_bi % len(_btn_cols)]:
+            _is_sel = st.session_state.get("_inline_ticker") == _tk
+            if st.button(_tk, key=f"tk2_{_tk}_{_bi}",
+                         use_container_width=True,
+                         type="primary" if _is_sel else "secondary"):
+                st.session_state["_inline_ticker"] = _tk
+
+    # Table — show a curated default column set; all columns still in Excel export
+    # Columns not in this list are hidden in the UI but kept in the DataFrame.
+    _DEFAULT_COLS = [
+        "Ticker", "Sector", "Price", "MarketCap", "P/E",
+        "OwnerEarnings", "MA50", "RangeHigh", "RangeLow", "RangePos",
+        "MFI_Signal", "Score",
+    ]
+    # Only include columns that actually exist in the saved display
+    _col_order = [c for c in _DEFAULT_COLS if c in _saved_display.columns]
+    # Append any metric-specific display columns that are enabled
+    # (Short interest, dividend cols etc) — add them after the defaults
+    _extra_cols = [
+        "Short % Float", "Days to Cover", "Short Chg",
+        "Div Yield", "Div Rate", "Payout %", "Freq",
+    ]
+    for _ec in _extra_cols:
+        if _ec in _saved_display.columns and _ec not in _col_order:
+            _col_order.append(_ec)
+
+    try:
+        _styled2 = _saved_display.style.map(color_score, subset=["Score"])
+        st.dataframe(
+            _styled2,
+            use_container_width=True,
+            height=600,
+            column_order=_col_order,
+        )
+    except Exception:
+        st.dataframe(
+            _saved_display,
+            use_container_width=True,
+            height=600,
+            column_order=_col_order,
+        )
+
+    # Download button
+    st.divider()
+    _excel2 = build_excel(_saved_display)
+    st.download_button(
+        label="⬇️ Download Excel",
+        data=_excel2,
+        file_name=f"stock_screener_{datetime.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_btn2",
+    )
+
+ # ── Inline stock analysis panel ──────────────────────────────────────────────
+ _inline_tk = st.session_state.get("_inline_ticker")
+ if _inline_tk:
+    st.divider()
+
+    # ── Per-ticker cache — avoids re-fetching on every Streamlit rerender ────
+    import math as _math
+    _cache_bucket  = _math.floor(time.time() / 900)   # new bucket every 15 min
+    _il_cache_key  = f"_il_cache_{_inline_tk}_{_cache_bucket}"
+    _il_cached     = st.session_state.get(_il_cache_key)
+
+    if _il_cached:
+        # Serve from cache — no network calls
+        _il_info       = _il_cached["info"]
+        _il_hist       = _il_cached["hist"]
+        _il_fin        = _il_cached["fin"]
+        _il_bal        = _il_cached["bal"]
+        _il_cf         = _il_cached["cf"]
+        _il_fetched_at = _il_cached["fetched_at"]
+    else:
+        # Fresh fetch — isolate each request so one failure doesn't kill the rest
+        with st.spinner(f"Fetching live data for **{_inline_tk}**..."):
+            _il_stock = yf.Ticker(_inline_tk)
+            _il_info  = {}
+            _il_hist  = pd.DataFrame()
+            _il_fin   = pd.DataFrame()
+            _il_bal   = pd.DataFrame()
+            _il_cf    = pd.DataFrame()
+
+            # ── 1. info — with retry + exponential backoff ────────────
+            for _att in range(3):
+                try:
+                    _fetched = _il_stock.info or {}
+                    # Valid response has quoteType or symbol key
+                    # Rate-limited stubs have 1-2 keys with None values
+                    if _fetched.get("quoteType") or _fetched.get("symbol") or len(_fetched) >= 10:
+                        _il_info = _fetched
+                        break
+                    if _att < 2:
+                        time.sleep(2 ** _att + 0.5)   # 0.5s, 1.5s, 3.5s
+                except Exception:
+                    if _att < 2:
+                        time.sleep(2 ** _att)
+
+            # ── 2. history — independent, doesn't need info ───────────
+            try:
+                _il_hist = _il_stock.history(period="1y")
+                if _il_hist.empty or len(_il_hist) < 30:
+                    _il_hist = _il_stock.history(period="6mo")
+            except Exception:
+                pass
+
+            # ── 3. financials — each isolated, failures don't cascade ──
+            try:
+                _il_fin = _il_stock.financials
+            except Exception:
+                pass
+            try:
+                _il_bal = _il_stock.balance_sheet
+            except Exception:
+                pass
+            try:
+                _il_cf = _il_stock.cashflow
+            except Exception:
+                pass
+
+        # If info failed but history loaded, synthesise minimal info from history
+        if not _il_info and not _il_hist.empty:
+            _il_info = {
+                "symbol":       _inline_tk,
+                "currentPrice": round(float(_il_hist["Close"].iloc[-1]), 2),
+            }
+
+        _il_fetched_at = datetime.now().strftime("%b %d, %Y %I:%M %p")
+
+        if _il_info or not _il_hist.empty:
+            # Evict old cache entries for this ticker (different time buckets)
+            for _k in list(st.session_state.keys()):
+                if _k.startswith(f"_il_cache_{_inline_tk}_") and _k != _il_cache_key:
+                    del st.session_state[_k]
+            # Cap total inline caches to 10 tickers to bound memory use
+            _all_il = [k for k in st.session_state if k.startswith("_il_cache_")]
+            while len(_all_il) > 10:
+                del st.session_state[_all_il.pop(0)]
+            st.session_state[_il_cache_key] = {
+                "info":       _il_info,
+                "hist":       _il_hist,
+                "fin":        _il_fin,
+                "bal":        _il_bal,
+                "cf":         _il_cf,
+                "fetched_at": _il_fetched_at,
+            }
+
+    if _il_info or not _il_hist.empty:
+        # Compute raw metrics from live data
+        _il_mfi_p = st.session_state.get("slider_mfi_period", 14)
+        _il_rdays = st.session_state.get("slider_range_days", 30)
+        try:
+            _il_vols  = get_volume_signals(_il_hist, _il_mfi_p)
+            _il_tech  = calculate_technical_signals(_il_hist)
+            _il_short = calculate_short_squeeze(_il_info)
+            _il_oe, _il_oey = get_owner_earnings(_il_cf, _il_fin, _il_info)
+            _il_raw = {
+                "OE_Yield":         _il_oey,
+                "ROIC":             calculate_roic(_il_fin, _il_bal),
+                "ROIC_Trend":       calculate_roic_trend(_il_fin, _il_bal),
+                "RevenueGrowth":    _il_info.get("revenueGrowth"),
+                "EarningsGrowth":   _il_info.get("earningsGrowth"),
+                "Piotroski":        calculate_piotroski(_il_fin, _il_bal, _il_cf),
+                "OBV":              _il_vols["OBV"],
+                "MFI":              _il_vols["MFI"],
+                "PCV":              _il_vols["PCV"],
+                "RSI":              _il_tech["RSI"],
+                "MACD":             _il_tech["MACD"],
+                "GoldenCross":      _il_tech["GoldenCross"],
+                "MFISweetSpot":     _il_tech["MFISweetSpot"],
+                "NoBearDiv":        _il_tech["NoBearDiv"],
+                "MA50Proximity":    _il_tech["MA50Proximity"],
+                "ShortPctFloatRaw": _il_short["ShortPctFloatRaw"],
+                "DaysToCover":      _il_short["DaysToCover"],
+                "ShortChange":      _il_short["ShortChange"],
+                "ShortSqueeze":     _il_short["ShortSqueeze"],
+            }
+        except Exception:
+            _il_raw = {}
+
+        # Show all metrics in the inline panel (same as analyze tab default)
+        _il_selected = list(METRICS.keys())
+
+        render_stock_analysis(
+            info       = _il_info,
+            hist_1y    = _il_hist,
+            fin_stmt   = _il_fin,
+            bal_stmt   = _il_bal,
+            cf_stmt    = _il_cf,
+            raw        = _il_raw,
+            sticker    = _inline_tk,
+            selected   = _il_selected,
+            fetched_at = _il_fetched_at,
+            range_days = _il_rdays,
+            mfi_period = _il_mfi_p,
+            key_prefix = f"inline_{_inline_tk.lower()}",
+        )
+    else:
+        st.warning(
+            f"Could not load data for **{_inline_tk}**. "
+            "yfinance may be rate-limited — wait 30 seconds and click the ticker again."
+        )
+
+
+# ───────────────────────────────────────────────────────────────
+# ANALYZE TAB — single ticker deep dive
+# ───────────────────────────────────────────────────────────────
+with tab_analyze:
+    st.subheader("🔍 Single Stock Analyzer")
+    st.caption("Enter any ticker and select which metrics to run. Works on any stock — S&P 500, NYSE, NASDAQ, or international.")
+
+    # ── Input row — ticker box + analyze button side by side ────
+    _pending = st.session_state.pop("_pending_ticker", None)
+    if _pending:
+        st.session_state["analyze_ticker_input"] = _pending
+
+    inp_col, btn_col = st.columns([3, 1])
+    with inp_col:
+        ticker_input = st.text_input(
+            "Stock Ticker",
+            placeholder="e.g. AAPL, MSFT, TSLA",
+            key="analyze_ticker_input",
+            help="Enter the ticker symbol exactly as it appears on the exchange.",
+            label_visibility="collapsed",
+        ).strip().upper()
+    with btn_col:
+        analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True, key="analyze_btn")
+
+    # ── Collapsible metrics selector ─────────────────────────────
+    with st.expander("⚙️ Select Metrics", expanded=False):
+        analyze_metrics = {}
+        m_cols = st.columns(2)
+        for i, (key, cfg) in enumerate(METRICS.items()):
+            with m_cols[i % 2]:
+                analyze_metrics[key] = st.checkbox(
+                    cfg["label"], value=True,
+                    key=f"analyze_{key}", help=cfg["desc"],
+                )
+
+    # ── Search History ────────────────────────────────────────────
+    _history = st.session_state.get("analyze_history", [])
+    if _history:
+        with st.expander(f"🕐 Recent Searches ({len(_history)})", expanded=False):
+            _active = st.session_state.get("analyze_data", {}).get("ticker", "")
+            for _h in _history:
+                _is_active = _h["ticker"] == _active
+                _border = "2px solid #4CAF50" if _is_active else "1px solid #444"
+                _bg     = "rgba(76,175,80,0.08)" if _is_active else "transparent"
+                # Use a button that spans full width — no nested columns
+                _btn_label = f"{'▶ ' if _is_active else ''}{_h['ticker']}  ·  {_h['name'][:35]}{'…' if len(_h['name'])>35 else ''}"
+                if st.button(_btn_label, key=f"hist_btn_{_h['ticker']}",
+                             use_container_width=True,
+                             help=f"Re-analyze {_h['ticker']}",
+                             type="primary" if _is_active else "secondary"):
+                    st.session_state["_pending_ticker"] = _h["ticker"]
+                    st.session_state["_rerun_ticker"]   = _h["ticker"]
+                    st.rerun()
+            if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
+                st.session_state["analyze_history"] = []
+                st.rerun()
+
+    # ── On Analyze click: fetch only what is missing from cache ──
+    _rerun_ticker = st.session_state.pop("_rerun_ticker", None)
+    if _rerun_ticker:
+        ticker_input  = _rerun_ticker
+        analyze_btn   = True
+
+    if analyze_btn and ticker_input:
+        _screener_cache  = st.session_state.get("screener_cache", {})
+        _cached_results  = _screener_cache.get("results", [])
+        _cached_row      = next(
+            (r for r in _cached_results if r.get("Ticker") == ticker_input), None
+        )
+
+        # Also check the nightly pre-computed data if session cache has nothing
+        if not _cached_row:
+            _nightly_results, _ = load_precomputed_data(cache_key=_ck)
+            if _nightly_results:
+                _cached_row = next(
+                    (r for r in _nightly_results if r.get("Ticker") == ticker_input), None
+                )
+
+        # ── Always fetch fresh data — analyze tab prioritises live accuracy ──
+        # Session cache is used ONLY as a fallback if yfinance fails, never
+        # served directly. Nightly data is used to fill metrics gaps only.
+        if "analyze_fin_cache" not in st.session_state:
+            st.session_state["analyze_fin_cache"] = {}
+        _fin_store = st.session_state["analyze_fin_cache"]
+        if len(_fin_store) >= 5:
+            _oldest = next(iter(_fin_store))
+            del _fin_store[_oldest]
+        # Always start with a fresh empty dict — forces live fetch every time
+        _fin_store[ticker_input] = {}
+        _fc = _fin_store[ticker_input]
+
+        # Every field is always needed — we always go live
+        need_info = True
+        need_hist = True
+        need_fin  = True
+        need_bal  = True
+        need_cf   = True
+        need_raw  = True
+
+        anything_missing = True
+
+        if anything_missing:
+            missing_labels = [k for k, n in [
+                ("info", need_info), ("price history", need_hist),
+                ("income stmt", need_fin), ("balance sheet", need_bal),
+                ("cash flow", need_cf), ("metrics", need_raw),
+            ] if n]
+            with st.spinner(f"Fetching for **{ticker_input}**: {', '.join(missing_labels)}..."):
+                # Create ticker object once — used for all fetches below
+                _stock = yf.Ticker(ticker_input)
+
+                # ── info — with retry on sparse/rate-limited response ─────
+                if need_info:
+                    _info = {}
+                    for _attempt in range(3):
+                        try:
+                            _fetched = _stock.info or {}
+                            # A full info dict has 20+ keys; < 5 = rate-limited stub
+                            if len(_fetched) >= 5:
+                                _info = _fetched
+                                _fc["info"] = _info
+                                break
+                            elif _attempt < 2:
+                                time.sleep(3 + _attempt * 3)  # 3s, 6s backoff
+                        except Exception:
+                            if _attempt < 2:
+                                time.sleep(3)
+                    # If still sparse after retries, use whatever we got
+                    if not _info:
+                        _info = _fc.get("info", {})
+                else:
+                    _info = _fc.get("info", {})
+
+                # Patch info with screener/nightly row data for any gaps
+                if _cached_row:
+                    _patch = {
+                        "sector":         _cached_row.get("Sector"),
+                        "currentPrice":   _cached_row.get("Price"),
+                        "regularMarketPrice": _cached_row.get("Price"),
+                        "marketCap":      _cached_row.get("MarketCap"),
+                        "trailingPE":     _cached_row.get("P/E"),
+                        "revenueGrowth":  _cached_row.get("RevenueGrowth"),
+                        "earningsGrowth": _cached_row.get("EarningsGrowth"),
+                    }
+                    for k, v in _patch.items():
+                        if v is not None and not _info.get(k):
+                            _info[k] = v
+
+                # Determine if this is a true not-found vs a rate-limit failure
+                _has_price = (_info.get("currentPrice") or
+                              _info.get("regularMarketPrice") or
+                              (_cached_row and _cached_row.get("Price")))
+
+                if not _has_price and not _cached_row:
+                    # Distinguish: try history — if that works the ticker exists
+                    # but info is rate-limited; if not, ticker is genuinely invalid
+                    _test_hist = pd.DataFrame()
+                    try:
+                        _test_hist = _stock.history(period="5d")
+                    except Exception:
+                        pass
+
+                    if not _test_hist.empty:
+                        # Ticker is real — yfinance info is just rate-limited
+                        st.warning(
+                            f"⚠️ **`{ticker_input}`** exists but yfinance returned limited data "
+                            f"(rate-limited). Price history loaded — some metrics may be unavailable. "
+                            f"Try again in 30 seconds for full data."
+                        )
+                        _fc["hist"] = _test_hist
+                        need_hist   = False
+                        # Synthesise minimal info from history
+                        _info = {
+                            "currentPrice": round(float(_test_hist["Close"].iloc[-1]), 2),
+                            "symbol":       ticker_input,
+                        }
+                        _fc["info"] = _info
+                    else:
+                        # Genuinely not found
+                        _suggestions = {
+                            "APPL":   "AAPL (Apple)",
+                            "GOOGL":  "GOOGL ✓ — if this failed, try GOOG",
+                            "GOOG":   "GOOG ✓ — if this failed, try GOOGL",
+                            "AMZN":   "AMZN ✓",
+                            "TSLA":   "TSLA ✓",
+                            "MSFT":   "MSFT ✓",
+                            "META":   "META (formerly FB)",
+                            "FB":     "META (Facebook rebranded to META in 2021)",
+                            "TWTR":   "TWTR was delisted — Twitter is now private (X)",
+                            "TWITCH": "TWITCH is not public — owned by Amazon (AMZN)",
+                            "BRK":    "BRK.A or BRK.B (Berkshire Hathaway)",
+                            "BRKA":   "BRK-A",
+                            "BRKB":   "BRK-B",
+                            "NVIDA":  "NVDA (Nvidia)",
+                            "NVDIA":  "NVDA (Nvidia)",
+                            "BABA":   "BABA ✓ — if this fails try 9988.HK",
+                        }
+                        _hint = _suggestions.get(ticker_input.upper())
+                        _msg  = f"**`{ticker_input}`** was not found."
+                        if _hint:
+                            _msg += f"\n\n💡 Did you mean **{_hint}**?"
+                        else:
+                            _msg += (
+                                "\n\n**Common causes:**\n"
+                                "- Typo in the ticker (e.g. APPL instead of AAPL)\n"
+                                "- The stock was delisted or went private\n"
+                                "- International stocks may need a suffix (e.g. `TSM`, `ASML`)\n"
+                                "- yfinance may be rate-limited — wait 30 seconds and retry"
+                            )
+                        st.error(_msg)
+                        st.stop()
+
+                # ── price history ─────────────────────────────────
+                # Always try nightly cache first — avoids a live yfinance call
+                if _cached_row and _cached_row.get("_hist") and need_hist:
+                    _hist = _hist_from_cache(_cached_row)
+                    if not _hist.empty:
+                        _fc["hist"] = _hist
+                        need_hist = False
+
+                if need_hist:
+                    try:
+                        _hist = _stock.history(period="1y")
+                        if not _hist.empty:
+                            _fc["hist"] = _hist
+                    except Exception:
+                        _hist = _fc.get("hist", pd.DataFrame())
+                else:
+                    _hist = _fc.get("hist", pd.DataFrame())
+
+                # ── financial statements ──────────────────────────
+                if need_fin:
+                    try:
+                        _fin = _stock.financials
+                        _fc["fin"] = _fin
+                    except Exception:
+                        _fin = _fc.get("fin")
+                else:
+                    _fin = _fc.get("fin")
+
+                if need_bal:
+                    try:
+                        _bal = _stock.balance_sheet
+                        _fc["bal"] = _bal
+                    except Exception:
+                        _bal = _fc.get("bal")
+                else:
+                    _bal = _fc.get("bal")
+
+                if need_cf:
+                    try:
+                        _cf = _stock.cashflow
+                        _fc["cf"] = _cf
+                    except Exception:
+                        _cf = _fc.get("cf")
+                else:
+                    _cf = _fc.get("cf")
+
+                # ── metrics — always computed from live fetched data ────
+                # Never use nightly cached scores here — recalculate from
+                # the fresh financials and history just fetched above.
+                try:
+                    _fin_r  = _fc.get("fin",  pd.DataFrame())
+                    _bal_r  = _fc.get("bal",  pd.DataFrame())
+                    _cf_r   = _fc.get("cf",   pd.DataFrame())
+                    _hist_r = _fc.get("hist", pd.DataFrame())
+                    _mfi_p  = st.session_state.get("slider_mfi_period", 14)
+                    _oe, _oey  = get_owner_earnings(_cf_r, _fin_r, _info)
+                    _vols      = get_volume_signals(_hist_r, _mfi_p)
+                    _tech      = calculate_technical_signals(_hist_r)
+                    _short     = calculate_short_squeeze(_info)
+                    _raw = {
+                        "OE_Yield":         _oey,
+                        "ROIC":             calculate_roic(_fin_r, _bal_r),
+                        "ROIC_Trend":       calculate_roic_trend(_fin_r, _bal_r),
+                        "RevenueGrowth":    _info.get("revenueGrowth"),
+                        "EarningsGrowth":   _info.get("earningsGrowth"),
+                        "Piotroski":        calculate_piotroski(_fin_r, _bal_r, _cf_r),
+                        "OBV":              _vols["OBV"],
+                        "MFI":              _vols["MFI"],
+                        "PCV":              _vols["PCV"],
+                        "RSI":              _tech["RSI"],
+                        "MACD":             _tech["MACD"],
+                        "GoldenCross":      _tech["GoldenCross"],
+                        "MFISweetSpot":     _tech["MFISweetSpot"],
+                        "NoBearDiv":        _tech["NoBearDiv"],
+                        "MA50Proximity":    _tech["MA50Proximity"],
+                        "ShortPctFloatRaw": _short["ShortPctFloatRaw"],
+                        "DaysToCover":      _short["DaysToCover"],
+                        "ShortChange":      _short["ShortChange"],
+                        "ShortSqueeze":     _short["ShortSqueeze"],
+                    }
+                except Exception:
+                    _raw = {}
+                _fc["raw"] = _raw
+
+        # Persist to session store (fallback only — next analyze click re-fetches)
+        _fetched_at = datetime.now().strftime("%b %d, %Y %I:%M %p")
+        _fin_store[ticker_input].update({
+            "info": _info, "hist": _hist,
+            "fin":  _fin,  "bal":  _bal,
+            "cf":   _cf,   "raw":  _raw,
+            "fetched_at": _fetched_at,
+        })
+
+        # Add short interest data directly to analyze_data for display
+        _short_display = {
+            "ShortPctFloatRaw": _raw.get("ShortPctFloatRaw"),
+            "DaysToCover":      _raw.get("DaysToCover"),
+            "ShortChange":      _raw.get("ShortChange"),
+            "ShortSqueeze":     _raw.get("ShortSqueeze"),
+        }
+        st.session_state["analyze_data"] = {
+            "ticker":      ticker_input,
+            "info":        _info,
+            "hist":        _hist,
+            "fin":         _fin,
+            "bal":         _bal,
+            "cf":          _cf,
+            "raw":         _raw,
+            "fetched_at":  _fetched_at,
+            "short":       _short_display,
+            "metrics_sel": dict(analyze_metrics),
+            "from_cache":  bool(_cached_row),
+        }
+
+        # ── Update search history ─────────────────────────────────
+        _company_name = _info.get("longName") or _info.get("shortName") or ticker_input
+        _hist_entry   = {"ticker": ticker_input, "name": _company_name}
+        _history      = st.session_state.get("analyze_history", [])
+        _history      = [h for h in _history if h["ticker"] != ticker_input]
+        _history.insert(0, _hist_entry)
+        st.session_state["analyze_history"] = _history[:30]
+
+    elif analyze_btn and not ticker_input:
+        st.warning("Please enter a ticker symbol.")
+
+    st.divider()
+
+    # ── Render from session_state — persists across all reruns ──
+    if "analyze_data" not in st.session_state:
+        st.info("Enter a ticker above and click **🔬 Analyze** to get started. Works on any publicly traded stock — S&P 500, NYSE, NASDAQ, or international.")
+    else:
+        _d  = st.session_state["analyze_data"]
+        _sel = [k for k, v in _d.get("metrics_sel", {}).items() if v]
+        render_stock_analysis(
+            info       = _d.get("info", {}),
+            hist_1y    = _d.get("hist", pd.DataFrame()),
+            fin_stmt   = _d.get("fin"),
+            bal_stmt   = _d.get("bal"),
+            cf_stmt    = _d.get("cf"),
+            raw        = _d.get("raw", {}),
+            sticker    = _d.get("ticker", ""),
+            selected   = _sel,
+            fetched_at = _d.get("fetched_at", ""),
+            range_days = st.session_state.get("slider_range_days", 30),
+            mfi_period = st.session_state.get("slider_mfi_period", 14),
+            key_prefix = "analyze",
+        )
