@@ -42,9 +42,14 @@ import requests
 import pandas as pd
 
 # ── Rate limit state (module-level, shared across all calls in a process) ────
+import threading
+_AV_LOCK           = threading.Lock()
 _AV_LAST_CALL_TIME = 0.0
 _AV_MIN_INTERVAL   = 12.5   # seconds between calls (free tier: 5/min = 12s apart)
                              # set to 3.5 for premium (100/min)
+_AV_CALLS_MADE     = 0
+_AV_MAX_CALLS      = int(os.environ.get("AV_MAX_CALLS_PER_RUN", "20"))
+                             # per-run budget: free tier is 25/day — leave headroom
 
 AV_BASE = "https://www.alphavantage.co/query"
 
@@ -73,17 +78,22 @@ def _av_get(params: dict, api_key: str) -> dict:
     Returns parsed JSON dict or empty dict on any error.
     Enforces minimum interval between calls to stay within rate limits.
     """
-    global _AV_LAST_CALL_TIME
+    global _AV_LAST_CALL_TIME, _AV_CALLS_MADE
 
-    # Enforce rate limit
-    elapsed = time.time() - _AV_LAST_CALL_TIME
-    if elapsed < _AV_MIN_INTERVAL:
-        time.sleep(_AV_MIN_INTERVAL - elapsed)
+    # Per-run budget: once exhausted, fail fast instead of blocking workers
+    with _AV_LOCK:
+        if _AV_CALLS_MADE >= _AV_MAX_CALLS:
+            return {}
+        # Serialize the rate wait inside the lock so threads can't race the clock
+        elapsed = time.time() - _AV_LAST_CALL_TIME
+        if elapsed < _AV_MIN_INTERVAL:
+            time.sleep(_AV_MIN_INTERVAL - elapsed)
+        _AV_LAST_CALL_TIME = time.time()
+        _AV_CALLS_MADE += 1
 
     params["apikey"] = api_key
     try:
         resp = requests.get(AV_BASE, params=params, timeout=15)
-        _AV_LAST_CALL_TIME = time.time()
         if resp.status_code == 200:
             data = resp.json()
             # AV returns {"Note": "..."} when rate-limited

@@ -481,26 +481,96 @@ def calculate_price_range(hist: pd.DataFrame, range_days: int) -> dict:
 
 
 def calculate_piotroski(fin, bal, cf):
+    """
+    Piotroski-style quality score (6 components), computed component-by-
+    component with label fallbacks. Missing rows SKIP that component
+    instead of nulling the whole score. Returns None only if we can't
+    compute a single component.
+    """
     try:
-        score = 0
-        roa   = fin.loc["Net Income"] / bal.loc["Total Assets"]
-        if roa.iloc[0] > 0:                                       score += 1
-        if cf.loc["Operating Cash Flow"].iloc[0] > 0:             score += 1
-        if roa.iloc[0] > roa.iloc[1]:                             score += 1
-        if cf.loc["Operating Cash Flow"].iloc[0] > fin.loc["Net Income"].iloc[0]: score += 1
-        if bal.loc["Long Term Debt"].iloc[0] < bal.loc["Long Term Debt"].iloc[1]: score += 1
-        if (bal.loc["Current Assets"].iloc[0] / bal.loc["Current Liabilities"].iloc[0]) > \
-           (bal.loc["Current Assets"].iloc[1] / bal.loc["Current Liabilities"].iloc[1]): score += 1
-        return score
+        score, computed = 0, 0
+
+        ni      = _get_fin_value(fin, "Net Income", "NetIncome",
+                                 "Net Income Common Stockholders")
+        assets  = _get_bal_value(bal, "Total Assets", "TotalAssets")
+        ocf     = _get_fin_value(cf,  "Operating Cash Flow", "OperatingCashFlow",
+                                 "Total Cash From Operating Activities",
+                                 "Cash Flow From Continuing Operating Activities")
+        ltd     = _get_bal_value(bal, "Long Term Debt", "LongTermDebt",
+                                 "Long Term Debt And Capital Lease Obligation",
+                                 "Total Debt")
+        ca      = _get_bal_value(bal, "Current Assets", "Total Current Assets",
+                                 "CurrentAssets")
+        cl      = _get_bal_value(bal, "Current Liabilities",
+                                 "Total Current Liabilities", "CurrentLiabilities")
+
+        # 1-2. ROA positive, ROA improving
+        if ni is not None and assets is not None and len(ni) >= 1 and len(assets) >= 1:
+            roa0 = ni.iloc[0] / assets.iloc[0]
+            if pd.notna(roa0):
+                computed += 1
+                if roa0 > 0: score += 1
+                if len(ni) >= 2 and len(assets) >= 2:
+                    roa1 = ni.iloc[1] / assets.iloc[1]
+                    if pd.notna(roa1):
+                        computed += 1
+                        if roa0 > roa1: score += 1
+
+        # 3. Operating cash flow positive
+        if ocf is not None and len(ocf) >= 1 and pd.notna(ocf.iloc[0]):
+            computed += 1
+            if ocf.iloc[0] > 0: score += 1
+
+        # 4. Accruals: OCF > Net Income
+        if (ocf is not None and ni is not None and len(ocf) >= 1 and len(ni) >= 1
+                and pd.notna(ocf.iloc[0]) and pd.notna(ni.iloc[0])):
+            computed += 1
+            if ocf.iloc[0] > ni.iloc[0]: score += 1
+
+        # 5. Leverage decreasing
+        if ltd is not None and len(ltd) >= 2 and pd.notna(ltd.iloc[0]) and pd.notna(ltd.iloc[1]):
+            computed += 1
+            if ltd.iloc[0] < ltd.iloc[1]: score += 1
+
+        # 6. Current ratio improving
+        if (ca is not None and cl is not None and len(ca) >= 2 and len(cl) >= 2
+                and cl.iloc[0] and cl.iloc[1]):
+            cr0, cr1 = ca.iloc[0] / cl.iloc[0], ca.iloc[1] / cl.iloc[1]
+            if pd.notna(cr0) and pd.notna(cr1):
+                computed += 1
+                if cr0 > cr1: score += 1
+
+        return score if computed >= 3 else None
     except Exception:
         return None
 
 
 def get_owner_earnings(cf, fin, info):
+    """
+    Buffett owner earnings = Net Income + D&A - CapEx, with full label
+    fallbacks (yfinance uses several D&A row names; 'Depreciation' alone
+    is rare). Missing D&A degrades gracefully to NI - CapEx.
+    """
     try:
-        oe = (fin.loc["Net Income"].iloc[0]
-              + cf.loc["Depreciation"].iloc[0]
-              - abs(cf.loc["Capital Expenditure"].iloc[0]))
+        ni_s  = _get_fin_value(fin, "Net Income", "NetIncome",
+                               "Net Income Common Stockholders")
+        # D&A lives in the cash-flow statement under many names
+        da_s  = _get_fin_value(cf, "Depreciation And Amortization",
+                               "Depreciation Amortization Depletion",
+                               "Reconciled Depreciation", "Depreciation",
+                               "DepreciationAndAmortization")
+        cap_s = _get_fin_value(cf, "Capital Expenditure", "Capital Expenditures",
+                               "CapitalExpenditure")
+        if ni_s is None or cap_s is None or not len(ni_s) or not len(cap_s):
+            return None, None
+        ni  = ni_s.iloc[0]
+        cap = cap_s.iloc[0]
+        da  = da_s.iloc[0] if (da_s is not None and len(da_s)) else 0
+        if pd.isna(ni) or pd.isna(cap):
+            return None, None
+        if pd.isna(da):
+            da = 0
+        oe = ni + da - abs(cap)
         mc = info.get("marketCap")
         return oe, (oe / mc if mc else None)
     except Exception:
@@ -582,7 +652,14 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         freq_score = 0.0
         if dividends_history is not None and not dividends_history.empty:
             try:
-                one_yr_ago = pd.Timestamp.now(tz="UTC") - pd.DateOffset(years=1)
+                _idx = dividends_history.index
+                if getattr(_idx, "tz", None) is not None:
+                    dividends_history = dividends_history.tz_localize(None) \
+                        if not hasattr(_idx, "tz_convert") \
+                        else dividends_history.copy()
+                    dividends_history.index = _idx.tz_convert(None) \
+                        if _idx.tz is not None else _idx
+                one_yr_ago = pd.Timestamp.now() - pd.DateOffset(years=1)
                 recent = dividends_history[dividends_history.index >= one_yr_ago]
                 n = len(recent)
                 if n >= 10:
@@ -658,7 +735,12 @@ def calculate_short_squeeze(info: dict) -> dict:
 # ── Per-ticker worker ─────────────────────────────────────────────────────────
 
 def process_ticker(args):
-    t, mfi_period, range_days = args
+    """
+    args = (ticker, mfi_period, range_days, prefetched_hist)
+    prefetched_hist: OHLCV(+Dividends) DataFrame from the batch yf.download,
+    or None — in which case we fall back to a per-ticker history fetch.
+    """
+    t, mfi_period, range_days, pre_hist = args
     # 3 attempts with increasing backoff — nightly job has time to spare.
     for attempt in range(3):
         try:
@@ -669,7 +751,8 @@ def process_ticker(args):
             _av_key = _get_av_key() if _AV_AVAILABLE else ""
             info    = stock.info or {}
 
-            if not info or len(info) < 5:
+            # Valid info has quoteType/symbol; rate-limited stubs have 1-2 null keys
+            if not (info.get("quoteType") or info.get("symbol") or len(info) >= 10):
                 # Rate-limited — try Alpha Vantage before giving up
                 if _AV_AVAILABLE and _av_key:
                     try:
@@ -696,12 +779,16 @@ def process_ticker(args):
             if not price:
                 return None
 
-            try:
-                hist = stock.history(period="1y")
-                if hist.empty or len(hist) < 30:
-                    hist = stock.history(period="6mo")
-            except Exception:
-                hist = pd.DataFrame()
+            # Use batch-downloaded history when available (1 request per 30
+            # tickers instead of 1 per ticker); fall back to per-ticker fetch.
+            hist = pre_hist if pre_hist is not None else pd.DataFrame()
+            if hist.empty or len(hist) < 30:
+                try:
+                    hist = stock.history(period="1y", actions=True)
+                    if hist.empty or len(hist) < 30:
+                        hist = stock.history(period="6mo", actions=True)
+                except Exception:
+                    hist = pd.DataFrame()
 
             # AV fallback for missing history
             if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
@@ -716,8 +803,13 @@ def process_ticker(args):
                 fin = stock.financials
             except Exception:
                 fin = pd.DataFrame()
+            # Dividends ride along in the history frame (actions=True) —
+            # saves one HTTP request per ticker vs stock.dividends
             try:
-                div_hist = stock.dividends
+                if "Dividends" in hist.columns:
+                    div_hist = hist["Dividends"][hist["Dividends"] > 0]
+                else:
+                    div_hist = stock.dividends
             except Exception:
                 div_hist = pd.Series(dtype=float)
             try:
@@ -752,11 +844,11 @@ def process_ticker(args):
             if not hist.empty:
                 hist_cache = {
                     "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
-                    "open":   hist["Open"].tolist(),
-                    "high":   hist["High"].tolist(),
-                    "low":    hist["Low"].tolist(),
-                    "close":  hist["Close"].tolist(),
-                    "volume": hist["Volume"].tolist(),
+                    "open":   hist["Open"].round(4).tolist(),
+                    "high":   hist["High"].round(4).tolist(),
+                    "low":    hist["Low"].round(4).tolist(),
+                    "close":  hist["Close"].round(4).tolist(),
+                    "volume": hist["Volume"].fillna(0).astype("int64").tolist(),
                 }
 
             return {
@@ -801,8 +893,12 @@ def process_ticker(args):
                 "_exchange":      "",
             }
 
-        except Exception:
-            if attempt == 2:
+        except Exception as e:
+            # Network/fetch errors are worth retrying; anything that got past
+            # the fetches and blew up in computation will fail identically on
+            # retry — bail immediately instead of re-downloading 3×.
+            if attempt == 2 or "hist" in dir():
+                log.debug(f"    {t}: {type(e).__name__}: {e}")
                 return None
             continue
 
@@ -810,37 +906,7 @@ def process_ticker(args):
 
 # ── Scan one exchange ─────────────────────────────────────────────────────────
 
-def scan_exchange(exchange_key: str, tickers: list) -> list:
-    results   = []
-    total     = len(tickers)
-    done      = 0
-    last_log  = 0
-
-    log.info(f"  Scanning {total} tickers ({exchange_key.upper()}) with {WORKERS} workers...")
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        futures = {
-            executor.submit(process_ticker, (t, MFI_PERIOD, RANGE_DAYS)): t
-            for t in tickers
-        }
-        for future in as_completed(futures):
-            try:
-                result = future.result(timeout=20)
-            except Exception:
-                result = None
-            if result:
-                result["_exchange"] = exchange_key
-                results.append(result)
-            done += 1
-            pct = int(done / total * 100)
-            if pct >= last_log + 10 or done == total:
-                last_log = pct
-                log.info(f"    {done}/{total} ({pct}%)  ·  {len(results)} valid")
-
-    # Polite pause between exchanges to let yfinance rate limits reset
-    time.sleep(30)
-    return results
-
+# (scan_exchange removed — main() owns the batch loop)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -874,11 +940,11 @@ def main():
         log.info(f"  {exch.upper()}: {len(tl)}")
 
     # ── 2. Scan all tickers in small batches with pauses ────────────
-    # Small batches + pauses prevent sustained rate limiting from Yahoo.
-    # At BATCH_SIZE=30, BATCH_PAUSE=8s, WORKERS=3:
-    #   ~7000 tickers / 30 per batch = ~233 batches
-    #   233 batches × (30 tickers / 3 workers × ~2s avg + 8s pause) ≈ 190 min
-    # Well within the 210-minute timeout.
+    # History is batch-downloaded (1 request per 30 tickers, dividends
+    # included via actions=True). Per-ticker requests drop from ~6 to 4
+    # (info + 3 financial statements) — ~12,000 fewer requests per night.
+    # At BATCH_SIZE=30, BATCH_PAUSE=8s, WORKERS=3 → ≈150 min, well inside
+    # the 210-minute timeout, with materially lower rate-limit exposure.
     all_results  = []
     done_count   = 0
     remaining    = list(unique_tickers)
@@ -892,9 +958,33 @@ def main():
         remaining  = remaining[BATCH_SIZE:]
         batch_num += 1
 
+        # ── Batch history download: 1 HTTP request for the whole batch ──
+        # (vs 1 request per ticker). Dividends included via actions=True.
+        batch_hist = {}
+        try:
+            dl = yf.download(
+                tickers=" ".join(batch), period="1y", actions=True,
+                group_by="ticker", threads=False, progress=False,
+                auto_adjust=True,
+            )
+            if not dl.empty:
+                if isinstance(dl.columns, pd.MultiIndex):
+                    for t in batch:
+                        if t in dl.columns.get_level_values(0):
+                            h = dl[t].dropna(how="all")
+                            if not h.empty:
+                                batch_hist[t] = h
+                else:
+                    # single-ticker batch returns flat columns
+                    batch_hist[batch[0]] = dl.dropna(how="all")
+        except Exception as e:
+            log.warning(f"  Batch download failed ({type(e).__name__}) — "
+                        f"falling back to per-ticker history for this batch")
+
         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
             futures = {
-                executor.submit(process_ticker, (t, MFI_PERIOD, RANGE_DAYS)): t
+                executor.submit(process_ticker,
+                                (t, MFI_PERIOD, RANGE_DAYS, batch_hist.get(t))): t
                 for t in batch
             }
             for future in as_completed(futures):
@@ -922,7 +1012,7 @@ def main():
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
 
-    date_tag = end_utc.strftime("%Y-%m-%d") if 'end_utc' in dir() else start_utc.strftime("%Y-%m-%d")
+    date_tag = start_utc.strftime("%Y-%m-%d")
 
     # ── Primary files (always overwritten — what the app reads) ──────
     # Compressed JSON — readable by the Streamlit app with json + gzip
@@ -960,7 +1050,7 @@ def main():
     elapsed   = round((end_utc - start_utc).total_seconds() / 60, 1)
     meta = {
         "scanned_at_utc":  end_utc.strftime("%Y-%m-%d %H:%M UTC"),
-        "scanned_at_est":  end_utc.strftime("%Y-%m-%d %I:%M %p UTC"),   # app converts to local
+        "scanned_at_display": end_utc.strftime("%Y-%m-%d %I:%M %p UTC"),
         "elapsed_minutes": elapsed,
         "total_tickers":   len(unique_tickers),
         "valid_results":   len(all_results),
