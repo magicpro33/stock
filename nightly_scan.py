@@ -688,6 +688,72 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         return default
 
 
+def calculate_clean_setup(hist) -> float:
+    """
+    0-1 bull-pattern score, porting the empirically tuned CleanSetup.pine:
+      pivot length 12 · RSI band 40-60 · pullback <5% · pole 5-20%
+      liquidity gate: price >= $5 and 20-day avg volume >= 250k
+      trend alignment: close > EMA50 and EMA50 > EMA200 (EMA100 fallback
+      when fewer than 200 bars are available)
+
+    Components (weights sum to 1.0):
+      trend alignment  0.30   the pine script's requireTrend condition
+      bull flag        0.25   pole 5-20% with pullback <5% from 12-bar high
+      higher-low seq   0.20   last two pivot-12 lows ascending
+      RSI 40-60 band   0.15   consolidating, not overbought/oversold
+      volume confirm   0.10   last bar volume > 20-bar average
+    Liquidity gate failure returns 0.0 (hard filter, as in the script).
+    """
+    try:
+        if hist is None or len(hist) < 60:
+            return 0.0
+        close = hist["Close"]
+        vol   = hist["Volume"]
+        price = float(close.iloc[-1])
+        avg_vol = float(vol.tail(20).mean())
+        if price < 5 or avg_vol < 250_000:
+            return 0.0
+
+        # ── trend alignment ────────────────────────────────────
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        long_span = 200 if len(close) >= 200 else 100
+        ema_long  = close.ewm(span=long_span, adjust=False).mean()
+        trend = price > ema50.iloc[-1] > ema_long.iloc[-1]
+
+        # ── RSI(14) band 40-60 ─────────────────────────────────
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = (100 - 100 / (1 + rs)).iloc[-1]
+        rsi_band = bool(pd.notna(rsi) and 40 <= rsi <= 60)
+
+        # ── volume confirmation ────────────────────────────────
+        vol_conf = bool(vol.iloc[-1] > avg_vol)
+
+        # ── bull flag: pole 5-20%, pullback <5% from 12-bar high ─
+        hi12 = float(close.tail(12).max())
+        pullback = (hi12 - price) / hi12 if hi12 > 0 else 1.0
+        pole_base = float(close.iloc[-32]) if len(close) >= 32 else float(close.iloc[0])
+        pole = hi12 / pole_base - 1 if pole_base > 0 else 0.0
+        flag = bool(0.05 <= pole <= 0.20 and pullback < 0.05)
+
+        # ── higher-low sequence, pivot length 12 (vectorized) ───
+        lows = hist["Low"]
+        roll_min = lows.rolling(25, center=True).min()
+        piv_mask = (lows == roll_min) & roll_min.notna()
+        piv_lows = lows[piv_mask]
+        # collapse consecutive equal pivots
+        piv_vals = piv_lows[piv_lows.diff().fillna(1) != 0].tolist()
+        higher_low = bool(len(piv_vals) >= 2 and piv_vals[-1] > piv_vals[-2])
+
+        score = (0.30 * trend + 0.25 * flag + 0.20 * higher_low
+                 + 0.15 * rsi_band + 0.10 * vol_conf)
+        return round(float(score), 4)
+    except Exception:
+        return 0.0
+
+
 def calculate_short_squeeze(info: dict) -> dict:
     """Compute short interest metrics from yfinance info dict. No extra API calls."""
     default = {
@@ -836,6 +902,7 @@ def process_ticker(args):
             range_data   = calculate_price_range(hist, range_days)
             short_data   = calculate_short_squeeze(info)
             div_data     = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
+            clean_setup  = calculate_clean_setup(hist)
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                             if len(hist) >= 50 else None)
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -888,6 +955,7 @@ def process_ticker(args):
                 "DividendPayoutRatio": div_data["PayoutRatio"],
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
+                "CleanSetupScore":     clean_setup,
                 "ExDividendDate":      info.get("exDividendDate"),
                 "_hist":          hist_cache,
                 "_exchange":      "",

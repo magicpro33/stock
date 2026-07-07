@@ -255,6 +255,16 @@ METRICS = {
                    "0.0 = short float <5% (little short interest — squeeze unlikely). "
                    "Short interest data from Yahoo Finance / FINRA (updated twice monthly).",
     },
+    "CleanSetupScore": {
+        "label":   "Clean Setup (Bull Patterns)",
+        "weight":  5,
+        "desc":    "Port of the CleanSetup Pine Script's high-conviction bull detector. "
+                   "Components: trend alignment (price > EMA50 > EMA200, 0.30), "
+                   "bull flag (pole 5-20%, pullback <5%, 0.25), higher-low pivot sequence "
+                   "(pivot length 12, 0.20), RSI 40-60 band (0.15), volume above 20-bar avg (0.10). "
+                   "Liquidity gate: price >= $5 and avg volume >= 250k, else score = 0. "
+                   "Same tuned parameters that hit 96.3% win rate in the Pine Script backtest.",
+    },
     "DividendScore": {
         "label":   "Dividend Score",
         "weight":  4,
@@ -462,7 +472,7 @@ for _k, _cfg in METRICS.items():
 # RangePosScore off by default — only meaningful when range filter is on
 _defaults["tog_RangePosScore"] = False
 # New technical metrics — off by default so existing users aren't disrupted
-for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore"]:
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore", "CleanSetupScore"]:
     _defaults[f"tog_{_k}"] = False
     _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
 
@@ -476,12 +486,17 @@ for _key, _val in _defaults.items():
 with st.sidebar:
     st.header("⚙️ Screener Filters")
 
-    # ── Magic Stock preset button ─────────────────────────────
-    if st.button("✨ Magic Stock", use_container_width=True, key="preset_magic_stock",
-                 help="Momentum entry stack anchored by financial quality. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Top picks beat the market median in BOTH regimes (+10% median excess)."):
+    # ── Clean Setup preset button ─────────────────────────────
+    if st.button("📐 Clean Setup", use_container_width=True, key="preset_clean_setup",
+                 help="High-conviction bull patterns from the CleanSetup Pine Script: "
+                      "trend alignment (price > EMA50 > EMA200), bull flag (pole 5-20%, "
+                      "pullback <5%), higher-low pivot sequence, RSI 40-60, volume confirmation, "
+                      "liquidity gate ($5+ / 250k avg vol). Backtested top pick: 80% win rate "
+                      "and +24% median excess in the up-market window; positive in the down "
+                      "window too. The strongest preset in the suite."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_ma50"]           = "off"
         st.session_state["tog_range"]          = False
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
@@ -490,33 +505,21 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # OBV ×5 — institutional accumulation — volume precedes price
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 5.0
+        # CleanSetupScore ×5 — the pattern engine itself (trend + flag + higher-low + RSI band + volume)
+        st.session_state["tog_CleanSetupScore"] = True
+        st.session_state["wt_CleanSetupScore"]  = 5.0
 
-        # PCV ×5 — up-day volume dominance confirms real buying
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 5.0
-
-        # Piotroski ×5 — quality anchor — the backtest's #1 stabilizer across regimes
-        st.session_state["tog_Piotroski"] = True
-        st.session_state["wt_Piotroski"]  = 5.0
-
-        # MACD ×4 — momentum acceleration confirmed
+        # MACD ×4 — backtest demanded momentum confirmation on top of the pattern
         st.session_state["tog_MACD"] = True
         st.session_state["wt_MACD"]  = 4.0
 
-        # NoBearDiv ×3 — no hidden distribution behind the move
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 3.0
+        # RSI ×3 — rewards momentum building within the pattern's 40-60 band
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 3.0
 
-        # GoldenCross ×2 — structural uptrend backdrop
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 2.0
-
-        # EarningsGrowth ×1 — fundamental tiebreaker
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
+        # MA50Proximity ×2 — entries near the MA50 have the tightest stops
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 2.0
 
         st.rerun()
 
@@ -534,61 +537,20 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # ShortSqueeze ×5 — the fuel — float %, days-to-cover, covering momentum
         st.session_state["tog_ShortSqueeze"] = True
         st.session_state["wt_ShortSqueeze"]  = 5.0
-
-        # Piotroski ×5 — critical filter: squeeze candidates that are fundamentally sound rally; broken ones keep falling
         st.session_state["tog_Piotroski"] = True
         st.session_state["wt_Piotroski"]  = 5.0
-
-        # RSI ×2 — momentum building without exhaustion
         st.session_state["tog_RSI"] = True
         st.session_state["wt_RSI"]  = 2.0
-
-        # NoBearDiv ×2 — move is real, not a dead-cat bounce
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 2.0
-
-        # PCV ×1 — covering volume visible on up-days
         st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 1.0
-
-        # EarningsGrowth ×1 — light fundamental tiebreaker
+        st.session_state["wt_PCV"]  = 2.0
         st.session_state["tog_EarningsGrowth"] = True
         st.session_state["wt_EarningsGrowth"]  = 1.0
-
-        st.rerun()
-
-    # ── High Dividend preset button ─────────────────────────────
-    if st.button("💰 High Dividend", use_container_width=True, key="preset_high_dividend",
-                 help="Sustainable yield ranked by cash generation. Backtested on 5,150 stocks across two 60-day market regimes (up + down). OE Yield (Buffett owner earnings) was the single most predictive metric in both regimes (IC 0.21)."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"
-        st.session_state["tog_range"]          = False
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        # DividendScore ×5 — composite yield + payout safety + pay frequency
-        st.session_state["tog_DividendScore"] = True
-        st.session_state["wt_DividendScore"]  = 5.0
-
-        # OE_Yield ×5 — owner-earnings yield — cash that actually funds the dividend; strongest metric in the backtest
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 5.0
-
-        # EarningsGrowth ×2 — growing earnings = growing dividend
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 2.0
-
-        # OBV ×1 — institutions adding to income positions
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 1.0
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 1.0
 
         st.rerun()
 
@@ -608,31 +570,20 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # RangePosScore ×5 — price at the bottom of a tight 30-day range
         st.session_state["tog_RangePosScore"] = True
         st.session_state["wt_RangePosScore"]  = 5.0
-
-        # OBV ×4 — rising OBV at the low = accumulation, not distribution
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 4.0
-
-        # OE_Yield ×4 — cheap on real cash flow — separates value from value-trap
         st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 4.0
-
-        # ROIC ×3 — quality bounces; junk keeps falling
+        st.session_state["wt_OE_Yield"]  = 5.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 5.0
         st.session_state["tog_ROIC"] = True
         st.session_state["wt_ROIC"]  = 3.0
-
-        # NoBearDiv ×2 — the low is not a warning sign
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 2.0
-
-        # EarningsGrowth ×1 — fundamental tiebreaker
+        st.session_state["tog_OBV"] = True
+        st.session_state["wt_OBV"]  = 1.0
         st.session_state["tog_EarningsGrowth"] = True
         st.session_state["wt_EarningsGrowth"]  = 1.0
-
-        # GoldenCross ×1 — long-term trend intact
         st.session_state["tog_GoldenCross"] = True
         st.session_state["wt_GoldenCross"]  = 1.0
 
@@ -643,7 +594,7 @@ with st.sidebar:
                  help="Volume surge detection with momentum confirmation. Backtested on 5,150 stocks across two 60-day market regimes (up + down). MA50 filter removed and MACD raised to ×5 — turned -8.0% excess into +4.8%."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"
+        st.session_state["tog_ma50"]           = "above"
         st.session_state["tog_range"]          = False
         st.session_state["slider_mfi_period"]  = 14
         st.session_state["tog_pe_filter"]      = False
@@ -652,35 +603,28 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # OBV ×5 — cumulative buying pressure rising
         st.session_state["tog_OBV"] = True
         st.session_state["wt_OBV"]  = 5.0
-
-        # PCV ×5 — all volume on up-days = zero distribution
         st.session_state["tog_PCV"] = True
         st.session_state["wt_PCV"]  = 5.0
-
-        # MFISweetSpot ×5 — money flowing in hard but not exhausted (55-75)
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 5.0
-
-        # MACD ×5 — price momentum must confirm the volume — backtest demanded ×5
         st.session_state["tog_MACD"] = True
         st.session_state["wt_MACD"]  = 5.0
-
-        # MFI ×1 — raw flow strength
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 5.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 4.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 3.0
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 3.0
         st.session_state["tog_MFI"] = True
-        st.session_state["wt_MFI"]  = 1.0
-
-        # GoldenCross ×1 — trend backdrop
+        st.session_state["wt_MFI"]  = 2.0
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
         st.session_state["tog_GoldenCross"] = True
         st.session_state["wt_GoldenCross"]  = 1.0
-
-        # EarningsGrowth ×1 — tiebreaker
         st.session_state["tog_EarningsGrowth"] = True
         st.session_state["wt_EarningsGrowth"]  = 1.0
-
-        # OE_Yield ×1 — tiebreaker
         st.session_state["tog_OE_Yield"] = True
         st.session_state["wt_OE_Yield"]  = 1.0
 
@@ -702,51 +646,28 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # RangePosScore ×5 — price coiled at the range low — maximum runway
         st.session_state["tog_RangePosScore"] = True
         st.session_state["wt_RangePosScore"]  = 5.0
-
-        # OBV ×5 — smart money loading during the coil
         st.session_state["tog_OBV"] = True
         st.session_state["wt_OBV"]  = 5.0
-
-        # MACD ×5 — coil energy releasing — raised to ×5 by the backtest
         st.session_state["tog_MACD"] = True
         st.session_state["wt_MACD"]  = 5.0
-
-        # NoBearDiv ×5 — raised to ×5 — divergence at the low is the #1 fakeout tell
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 5.0
-
-        # PCV ×4 — breakout volume confirmation
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 4.0
-
-        # OE_Yield ×4 — cash-flow quality keeps failed breakouts shallow
         st.session_state["tog_OE_Yield"] = True
         st.session_state["wt_OE_Yield"]  = 4.0
-
-        # ROIC ×4 — quality filter
         st.session_state["tog_ROIC"] = True
         st.session_state["wt_ROIC"]  = 4.0
-
-        # MA50Proximity ×3 — entry near MA50 = tight stop
+        st.session_state["tog_PCV"] = True
+        st.session_state["wt_PCV"]  = 3.0
         st.session_state["tog_MA50Proximity"] = True
         st.session_state["wt_MA50Proximity"]  = 3.0
-
-        # GoldenCross ×3 — MA stack support below
         st.session_state["tog_GoldenCross"] = True
         st.session_state["wt_GoldenCross"]  = 3.0
-
-        # MFISweetSpot ×3 — sustained inflow
         st.session_state["tog_MFISweetSpot"] = True
         st.session_state["wt_MFISweetSpot"]  = 3.0
-
-        # RSI ×2 — recovering momentum, not overbought
         st.session_state["tog_RSI"] = True
         st.session_state["wt_RSI"]  = 2.0
-
-        # EarningsGrowth ×1 — tiebreaker
         st.session_state["tog_EarningsGrowth"] = True
         st.session_state["wt_EarningsGrowth"]  = 1.0
 
@@ -758,7 +679,7 @@ with st.sidebar:
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
         st.session_state["tog_ma50"]           = "above"
-        st.session_state["tog_range"]          = True
+        st.session_state["tog_range"]          = False
         st.session_state["slider_range_days"]  = 60
         st.session_state["slider_range_pct"]   = 15.0
         st.session_state["slider_mfi_period"]  = 14
@@ -768,49 +689,26 @@ with st.sidebar:
             st.session_state[f"tog_{_k}"] = False
             st.session_state[f"wt_{_k}"]  = 0.0
 
-        # OBV ×5 — institutions cannot hide volume footprints
         st.session_state["tog_OBV"] = True
         st.session_state["wt_OBV"]  = 5.0
-
-        # Piotroski ×5 — funds concentrate in financially sound names — backtest anchor
         st.session_state["tog_Piotroski"] = True
         st.session_state["wt_Piotroski"]  = 5.0
-
-        # MFISweetSpot ×4 — sustained quiet inflow without overbought readings
         st.session_state["tog_MFISweetSpot"] = True
         st.session_state["wt_MFISweetSpot"]  = 4.0
-
-        # ROIC ×3 — durable competitive advantage
-        st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 3.0
-
-        # RangePosScore ×3 — institutions buy low in the range, not after the run
         st.session_state["tog_RangePosScore"] = True
         st.session_state["wt_RangePosScore"]  = 3.0
-
-        # PCV ×2 — aggressive buying on specific days
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
         st.session_state["tog_PCV"] = True
         st.session_state["wt_PCV"]  = 2.0
-
-        # EarningsGrowth ×2 — the institutional buy trigger
         st.session_state["tog_EarningsGrowth"] = True
         st.session_state["wt_EarningsGrowth"]  = 2.0
-
-        # NoBearDiv ×2 — accumulation is genuine
         st.session_state["tog_NoBearDiv"] = True
         st.session_state["wt_NoBearDiv"]  = 2.0
-
-        # GoldenCross ×2 — Stage 2 uptrends only
         st.session_state["tog_GoldenCross"] = True
         st.session_state["wt_GoldenCross"]  = 2.0
-
-        # OE_Yield ×2 — cash-flow support
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 2.0
-
-        # RevenueGrowth ×1 — validates earnings quality
-        st.session_state["tog_RevenueGrowth"] = True
-        st.session_state["wt_RevenueGrowth"]  = 1.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 1.0
 
         st.rerun()
 
@@ -973,6 +871,22 @@ with st.sidebar:
     # ── Technical / momentum metrics ─────────────────────────
     st.markdown("**Technical & Momentum**")
     for key in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity"]:
+        cfg = METRICS[key]
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            metric_enabled[key] = st.toggle(cfg["label"], key=f"tog_{key}")
+        with col_b:
+            metric_weight[key] = st.slider(
+                "Weight", min_value=0.0, max_value=5.0, step=0.5,
+                key=f"wt_{key}",
+                disabled=not metric_enabled[key],
+                label_visibility="collapsed",
+            )
+        st.caption(cfg["desc"])
+
+    # ── Pattern setup metric ──────────────────────────────────
+    st.markdown("**Pattern Setups**")
+    for key in ["CleanSetupScore"]:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -1811,6 +1725,72 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         }
     except Exception:
         return default
+
+
+def calculate_clean_setup(hist) -> float:
+    """
+    0-1 bull-pattern score, porting the empirically tuned CleanSetup.pine:
+      pivot length 12 · RSI band 40-60 · pullback <5% · pole 5-20%
+      liquidity gate: price >= $5 and 20-day avg volume >= 250k
+      trend alignment: close > EMA50 and EMA50 > EMA200 (EMA100 fallback
+      when fewer than 200 bars are available)
+
+    Components (weights sum to 1.0):
+      trend alignment  0.30   the pine script's requireTrend condition
+      bull flag        0.25   pole 5-20% with pullback <5% from 12-bar high
+      higher-low seq   0.20   last two pivot-12 lows ascending
+      RSI 40-60 band   0.15   consolidating, not overbought/oversold
+      volume confirm   0.10   last bar volume > 20-bar average
+    Liquidity gate failure returns 0.0 (hard filter, as in the script).
+    """
+    try:
+        if hist is None or len(hist) < 60:
+            return 0.0
+        close = hist["Close"]
+        vol   = hist["Volume"]
+        price = float(close.iloc[-1])
+        avg_vol = float(vol.tail(20).mean())
+        if price < 5 or avg_vol < 250_000:
+            return 0.0
+
+        # ── trend alignment ────────────────────────────────────
+        ema50 = close.ewm(span=50, adjust=False).mean()
+        long_span = 200 if len(close) >= 200 else 100
+        ema_long  = close.ewm(span=long_span, adjust=False).mean()
+        trend = price > ema50.iloc[-1] > ema_long.iloc[-1]
+
+        # ── RSI(14) band 40-60 ─────────────────────────────────
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, np.nan)
+        rsi   = (100 - 100 / (1 + rs)).iloc[-1]
+        rsi_band = bool(pd.notna(rsi) and 40 <= rsi <= 60)
+
+        # ── volume confirmation ────────────────────────────────
+        vol_conf = bool(vol.iloc[-1] > avg_vol)
+
+        # ── bull flag: pole 5-20%, pullback <5% from 12-bar high ─
+        hi12 = float(close.tail(12).max())
+        pullback = (hi12 - price) / hi12 if hi12 > 0 else 1.0
+        pole_base = float(close.iloc[-32]) if len(close) >= 32 else float(close.iloc[0])
+        pole = hi12 / pole_base - 1 if pole_base > 0 else 0.0
+        flag = bool(0.05 <= pole <= 0.20 and pullback < 0.05)
+
+        # ── higher-low sequence, pivot length 12 (vectorized) ───
+        lows = hist["Low"]
+        roll_min = lows.rolling(25, center=True).min()
+        piv_mask = (lows == roll_min) & roll_min.notna()
+        piv_lows = lows[piv_mask]
+        # collapse consecutive equal pivots
+        piv_vals = piv_lows[piv_lows.diff().fillna(1) != 0].tolist()
+        higher_low = bool(len(piv_vals) >= 2 and piv_vals[-1] > piv_vals[-2])
+
+        score = (0.30 * trend + 0.25 * flag + 0.20 * higher_low
+                 + 0.15 * rsi_band + 0.10 * vol_conf)
+        return round(float(score), 4)
+    except Exception:
+        return 0.0
 
 
 def calculate_short_squeeze(info: dict) -> dict:
@@ -2966,6 +2946,7 @@ def process_ticker(args):
         range_data     = calculate_price_range(hist, range_days)
         short_data     = calculate_short_squeeze(info)
         div_data       = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
+        clean_setup    = calculate_clean_setup(hist)
         ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                           if len(hist) >= 50 else None)
         owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -3026,6 +3007,7 @@ def process_ticker(args):
             "DividendPayoutRatio": div_data["PayoutRatio"],
             "DividendFrequency": div_data["DividendFrequency"],
             "DividendScore":     div_data["DividendScore"],
+            "CleanSetupScore":   clean_setup,
             "_hist":          hist_cache,
         }
 
@@ -3611,7 +3593,8 @@ with tab_screener:
                   "RangePos", "RangeHigh", "RangeLow", "MA50",
                   "ShortSqueeze", "ShortPctFloat", "ShortPctFloatRaw",
                   "DaysToCover", "ShortChange",
-                  "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
+                  "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore",
+                  "CleanSetupScore"]
     for _c in _zero_cols:
         if _c not in df.columns:
             df[_c] = 0.0
@@ -3628,7 +3611,8 @@ with tab_screener:
                     "Piotroski", "OBV", "MFI", "PCV",
                     "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity",
                     "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
-                    "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore"]
+                    "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore",
+                    "CleanSetupScore"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -3873,7 +3857,8 @@ with tab_screener:
         # MFI: replaced by MFI_Signal label — hide numeric score
         ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv",
                          "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
-                         "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendFrequency", "DividendScore"}
+                         "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendFrequency", "DividendScore",
+                         "CleanSetupScore"}
 
         # Hide columns for metrics that are toggled off
         all_metric_keys = list(METRICS.keys())
