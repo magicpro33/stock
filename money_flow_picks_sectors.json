@@ -1,0 +1,22 @@
+{
+  "as_of": "2026-07-09",
+  "flow_lookback": 21,
+  "top_sectors": [
+    "Healthcare",
+    "Consumer Cyclical",
+    "Financial Services"
+  ],
+  "sector_flows": {
+    "Healthcare": 0.1878,
+    "Consumer Cyclical": 0.1257,
+    "Financial Services": 0.1121,
+    "Utilities": 0.1108,
+    "Real Estate": 0.0715,
+    "Industrials": 0.0525,
+    "Technology": 0.0416,
+    "Consumer Defensive": 0.0152,
+    "Communication Services": -0.0606,
+    "Basic Materials": -0.0613,
+    "Energy": -0.1194
+  }
+}

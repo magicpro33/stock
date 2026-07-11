@@ -146,6 +146,14 @@ def main():
     df = df.drop(columns='qrank')
     df.to_csv(a.csv, index=False)
 
+    # sector flows + metadata for the Streamlit tab
+    meta = dict(as_of=str(dates[t]), flow_lookback=lb, top_sectors=top_sectors,
+                sector_flows={sc: round(float(flows[sc]), 4) for sc in ranked})
+    json_path = a.csv.rsplit('.', 1)[0] + '_sectors.json'
+    with open(json_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+    print(f'Saved: {json_path}')
+
     print(f'\n=== TOP {len(df)} CANDIDATES in leading sectors ===')
     print(df.to_string(index=False))
     print(f'\nSaved: {a.csv}')
