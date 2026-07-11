@@ -164,4 +164,20 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    # Guard: if Streamlit Cloud is (mis)configured with this file as the app's
+    # main file, don't crash-loop on argparse — show a pointer instead.
+    _in_streamlit = False
+    try:
+        from streamlit.runtime import exists as _st_exists
+        _in_streamlit = _st_exists()
+    except Exception:
+        pass
+    if _in_streamlit:
+        import streamlit as st
+        st.error(
+            "money_flow_engine.py is the nightly batch script run by GitHub Actions — "
+            "it isn't a Streamlit app. In Streamlit Cloud, set the app's Main file path "
+            "to app.py (the Money Flow tab lives there)."
+        )
+    else:
+        sys.exit(main())

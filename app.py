@@ -107,7 +107,14 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
+tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Money Flow"])
+
+with tab_money:
+    try:
+        from money_flow_tab import render_money_flow_tab
+        render_money_flow_tab()
+    except Exception as _mf_err:
+        st.error(f"Money Flow tab failed to load: {_mf_err}")
 
 # ───────────────────────────────────────────────────────────────
 # METRIC CONFIG  — name, default weight, full description
