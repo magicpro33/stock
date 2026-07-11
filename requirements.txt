@@ -1,5 +1,10 @@
 streamlit
 yfinance
+# Pin curl_cffi: 0.15.0 (latest stable, what unpinned installs pull) has
+# memory-corruption/segfault bugs — same issue previously fixed in IGNITION.
+# 0.15.1b2 is the patched pre-release; pip installs it only because it's
+# explicitly pinned. If it ever misbehaves, fall back to: curl_cffi==0.13.0
+curl_cffi==0.15.1b2
 pandas
 numpy
 openpyxl

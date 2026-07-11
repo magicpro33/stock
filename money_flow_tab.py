@@ -80,7 +80,7 @@ def render_money_flow_tab():
         flows.style
         .map(_flow_color, subset=["NetFlow"])
         .format({"NetFlow": "{:+.3f}"}),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     st.bar_chart(flows.set_index("Sector")["NetFlow"])
@@ -100,7 +100,7 @@ def render_money_flow_tab():
             | {c: "{:.1%}" for c in ("Mom63", "OE_Yield", "ROIC", "ShortPctFloat") if c in show}
             | ({"Score": "{:.3f}"} if "Score" in show else {})
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=600,
     )
