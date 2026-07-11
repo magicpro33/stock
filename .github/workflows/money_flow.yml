@@ -2,17 +2,16 @@ name: Money Flow Engine
 
 # Runs after your nightly stock-data workflow finishes, so the engine always
 # scores the freshest dump. Fallback cron included in case the workflow_run
-# trigger name doesn't match — delete whichever trigger you don't want.
-#
-# IMPORTANT: change "Nightly Stock Data" below to the exact `name:` of your
-# existing nightly workflow in magicpro33/stock.
+# trigger fails for any reason — delete whichever trigger you don't want.
+# Trigger name verified against magicpro33/stock: "Nightly Stock Scan"
+# (.github/workflows/nightly_scan.yml, runs 07:00 UTC weekdays).
 
 on:
   workflow_run:
-    workflows: ["Nightly Stock Data"]
+    workflows: ["Nightly Stock Scan"]
     types: [completed]
   schedule:
-    - cron: "45 12 * * 1-5"   # 8:45am ET weekdays, ~1h after a typical nightly job; adjust to yours
+    - cron: "30 8 * * 1-5"   # 08:30 UTC weekdays, ~90 min after Nightly Stock Scan (07:00 UTC) as a fallback
   workflow_dispatch: {}        # manual "Run workflow" button
 
 permissions:
