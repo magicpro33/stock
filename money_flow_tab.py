@@ -66,9 +66,19 @@ def render_money_flow_tab():
         columns=["Sector", "NetFlow"],
     )
     flows["Leading"] = flows["Sector"].isin(meta["top_sectors"])
+
+    def _flow_color(v):
+        # red -> yellow -> green ramp over [-0.2, +0.2], no matplotlib needed
+        x = max(-0.2, min(0.2, float(v))) / 0.2          # -1..1
+        if x >= 0:
+            r, g = int(255 * (1 - x)), 200
+        else:
+            r, g = 255, int(200 * (1 + x))
+        return f"background-color: rgb({r},{g},110); color: black"
+
     st.dataframe(
         flows.style
-        .background_gradient(subset=["NetFlow"], cmap="RdYlGn", vmin=-0.2, vmax=0.2)
+        .map(_flow_color, subset=["NetFlow"])
         .format({"NetFlow": "{:+.3f}"}),
         use_container_width=True,
         hide_index=True,
