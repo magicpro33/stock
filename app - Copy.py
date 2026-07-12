@@ -116,7 +116,7 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Money Flow"])
+tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Sector Money Flow"])
 
 with tab_money:
     try:
@@ -1875,6 +1875,30 @@ def calculate_short_squeeze(info: dict) -> dict:
 
 
 
+
+def _coerce_numeric_info(info: dict) -> dict:
+    """Fallback data sources can return numbers as strings; float format codes
+    like :,.2f then crash. Convert numeric-looking strings to floats, leave
+    genuine text fields alone."""
+    _TEXT_KEYS = {
+        "longName", "shortName", "sector", "industry", "symbol", "currency",
+        "exchange", "fullExchangeName", "longBusinessSummary", "website",
+        "dividendFrequency", "recommendationKey", "quoteType",
+        "financialCurrency", "city", "state", "country", "phone", "address1",
+    }
+    out = {}
+    for k, v in (info or {}).items():
+        if isinstance(v, str) and k not in _TEXT_KEYS:
+            s = v.replace(",", "").replace("%", "").replace("$", "").strip()
+            try:
+                out[k] = float(s)
+                continue
+            except ValueError:
+                pass
+        out[k] = v
+    return out
+
+
 def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                            raw, sticker, selected, fetched_at,
                            range_days=30, mfi_period=14, key_prefix="analyze"):
@@ -1883,6 +1907,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
     Called from both the analyze tab and the inline screener panel.
     """
     try:
+        info = _coerce_numeric_info(info)
 
         name    = info.get("longName") or info.get("shortName") or sticker
         price   = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -2710,7 +2735,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 ha = hd.copy()
                 ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
                 ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
-                ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                ha.loc[ha.index[0], "HA_Open"] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
                 ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
                 ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
 
@@ -2865,7 +2890,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 st.info("No price history available.")
 
     except Exception as _render_err:
-        st.error(f"Error rendering analysis: {_render_err}")
+        import traceback as _tb; print("render_stock_analysis failed:\n" + _tb.format_exc(), flush=True); st.error(f"Error rendering analysis: {_render_err}")
 
 
 def process_ticker(args):
@@ -4073,6 +4098,20 @@ with tab_screener:
                 "fetched_at": _il_fetched_at,
             }
 
+    # ── field-level completion: Alpaca -> yfinance -> nightly dump ──
+    _il_row, _il_sources, _il_missing = None, {}, []
+    try:
+        from data_chain import complete_info_hist, patch_raw_from_dump
+        try:
+            _nr_a, _ = load_precomputed_data(cache_key=_get_cache_key())
+            _il_row = next((r for r in (_nr_a or []) if r.get("Ticker") == _inline_tk), None)
+        except Exception:
+            _il_row = None
+        _il_info, _il_hist, _il_sources, _il_missing = complete_info_hist(
+            _inline_tk, _il_info, _il_hist, _il_row)
+    except Exception:
+        pass
+
     if _il_info or not _il_hist.empty:
         # Compute raw metrics from live data
         _il_mfi_p = st.session_state.get("slider_mfi_period", 14)
@@ -4103,6 +4142,10 @@ with tab_screener:
                 "ShortChange":      _il_short["ShortChange"],
                 "ShortSqueeze":     _il_short["ShortSqueeze"],
             }
+            try:
+                _il_raw = patch_raw_from_dump(_il_raw, _il_row)
+            except Exception:
+                pass
         except Exception:
             _il_raw = {}
 
@@ -4388,6 +4431,18 @@ with tab_analyze:
                 else:
                     _cf = _fc.get("cf")
 
+                # ── field-level completion: Alpaca -> yfinance -> nightly dump ──
+                _b_sources, _b_missing = {}, []
+                try:
+                    from data_chain import complete_info_hist, patch_raw_from_dump
+                    _info, _h2, _b_sources, _b_missing = complete_info_hist(
+                        ticker_input, _info, _fc.get("hist", pd.DataFrame()), _cached_row)
+                    _fc["hist"] = _h2
+                    _hist = _h2
+                    _fc["info"] = _info
+                except Exception:
+                    pass
+
                 # ── metrics — always computed from live fetched data ────
                 # Never use nightly cached scores here — recalculate from
                 # the fresh financials and history just fetched above.
@@ -4424,6 +4479,10 @@ with tab_analyze:
                     }
                 except Exception:
                     _raw = {}
+                try:
+                    _raw = patch_raw_from_dump(_raw, _cached_row)
+                except Exception:
+                    pass
                 _fc["raw"] = _raw
 
         # Persist to session store (fallback only — next analyze click re-fetches)
@@ -4444,6 +4503,8 @@ with tab_analyze:
         }
         st.session_state["analyze_data"] = {
             "ticker":      ticker_input,
+            "sources":     _b_sources,
+            "missing":     _b_missing,
             "info":        _info,
             "hist":        _hist,
             "fin":         _fin,
@@ -4474,6 +4535,14 @@ with tab_analyze:
         st.info("Enter a ticker above and click **🔬 Analyze** to get started. Works on any publicly traded stock — S&P 500, NYSE, NASDAQ, or international.")
     else:
         _d  = st.session_state["analyze_data"]
+        if _d.get("sources"):
+            try:
+                from data_chain import sources_caption, status_report
+                st.caption(sources_caption(_d["sources"], _d.get("missing", [])))
+                with st.expander("🔑 Data source status", expanded=bool(_d.get("missing"))):
+                    st.markdown(status_report(_d["sources"], _d.get("missing", [])))
+            except Exception:
+                pass
         _sel = [k for k, v in _d.get("metrics_sel", {}).items() if v]
         render_stock_analysis(
             info       = _d.get("info", {}),
