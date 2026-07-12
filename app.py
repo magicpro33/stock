@@ -6,6 +6,15 @@
 #   streamlit run app.py
 # -----------------------------------
 
+# ── CRITICAL: disable curl_cffi BEFORE yfinance is imported ──────────
+# curl_cffi 0.15.x has segfault-class memory-corruption bugs (upstream
+# issue #677) that crash the interpreter on Streamlit Cloud with no
+# traceback. Same fix as IGNITION: with this env var set, yfinance uses
+# its officially supported plain-requests fallback and curl_cffi is
+# never even loaded.
+import os
+os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")
+
 import io
 import sys
 import time

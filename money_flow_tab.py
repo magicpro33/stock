@@ -54,6 +54,9 @@ def render_money_flow_tab():
         )
         st.caption(f"Loader detail: {err}")
         return
+    if picks is None or picks.empty or not meta.get("sector_flows"):
+        st.warning("Money-flow files exist but are empty — check the last Money Flow Engine run in Actions.")
+        return
 
     st.subheader("💸 Sector Money Flow")
     st.caption(

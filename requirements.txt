@@ -1,13 +1,18 @@
-streamlit
-yfinance
-# Pin curl_cffi: 0.15.0 (latest stable, what unpinned installs pull) has
-# memory-corruption/segfault bugs — same issue previously fixed in IGNITION.
-# 0.15.1b2 is the patched pre-release; pip installs it only because it's
-# explicitly pinned. If it ever misbehaves, fall back to: curl_cffi==0.13.0
-curl_cffi==0.15.1b2
-pandas
-numpy
-openpyxl
-requests
-lxml
-plotly
+# Stock screener — dependencies
+#
+# NOTE: curl_cffi (yfinance's default HTTP backend) is disabled at runtime
+# via YF_DISABLE_CURL_CFFI=1, set at the top of app.py BEFORE yfinance is
+# imported. curl_cffi 0.15.x has segfault-class memory-corruption bugs
+# (upstream issue #677) that crashed the interpreter on Streamlit Cloud
+# with no traceback. With the env var set, yfinance uses its officially
+# supported plain-requests fallback and curl_cffi is never even loaded.
+# Same proven fix as the IGNITION scanner.
+# yfinance pinned for reproducibility — bump deliberately, not by float.
+streamlit>=1.32
+yfinance==1.5.1
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1
+requests>=2.31
+lxml>=4.9
+plotly>=5.18
