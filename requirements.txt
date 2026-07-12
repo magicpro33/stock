@@ -1,16 +1,24 @@
 # Stock screener — dependencies
 #
-# NOTE: curl_cffi (yfinance's default HTTP backend) is disabled at runtime
-# via YF_DISABLE_CURL_CFFI=1, set at the top of app.py BEFORE yfinance is
-# imported. curl_cffi 0.15.x has segfault-class memory-corruption bugs
-# (upstream issue #677) that crashed the interpreter on Streamlit Cloud
-# with no traceback. With the env var set, yfinance uses its officially
-# supported plain-requests fallback and curl_cffi is never even loaded.
-# Same proven fix as the IGNITION scanner.
-# yfinance pinned for reproducibility — bump deliberately, not by float.
+# TWO documented native-crash pins below. Both produced hard segfaults with
+# no Python traceback. Bump deliberately, never by float.
+#
+# 1) pyarrow<25 — pyarrow 25.0.0 segfaults in pandas<->arrow conversion
+#    (pandas_compat.convert_column / string_arrow._from_sequence), crashing
+#    Streamlit when it marshals dataframes. Reproduced and stack-traced
+#    locally; pyarrow 24.0.0 verified clean across repeated app runs.
+# 2) pandas<3 — pandas 3.0 defaults to arrow-backed strings, which routes
+#    every string column through the crashing pyarrow path and also changes
+#    copy-on-write semantics this app was not written for.
+#
+# curl_cffi (yfinance's HTTP backend) is additionally disabled at runtime via
+# YF_DISABLE_CURL_CFFI=1 at the top of app.py — curl_cffi 0.15.x has its own
+# segfault-class bugs (upstream #677). Same proven fix as IGNITION. pip will
+# still install it as a yfinance dependency; it is simply never imported.
 streamlit>=1.32
 yfinance==1.5.1
-pandas>=2.0
+pandas>=2.0,<3.0
+pyarrow<25
 numpy>=1.24
 openpyxl>=3.1
 requests>=2.31

@@ -116,7 +116,7 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Money Flow"])
+tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Sector Money Flow"])
 
 with tab_money:
     try:
