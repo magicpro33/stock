@@ -294,6 +294,212 @@ METRICS = {
     },
 }
 
+SCREENER_PRESETS = {'Clean Setup': {'icon': '📐',
+                 'key': 'preset_clean_setup',
+                 'desc': 'High-conviction bull patterns from the CleanSetup Pine Script:  trend '
+                         'alignment (price > EMA50 > EMA200), bull flag (p…',
+                 'backtest': '80% win rate  and +24% median excess in the up-market window; '
+                             'positive in the down  window too',
+                 'reset': True,
+                 'settings': {'slider_max_price': 500,
+                              'slider_min_score': 0.0,
+                              'tog_ma50': 'off',
+                              'tog_range': False,
+                              'slider_mfi_period': 14,
+                              'tog_pe_filter': False,
+                              'tog_rev_filter': False,
+                              'tog_CleanSetupScore': True,
+                              'wt_CleanSetupScore': 5.0,
+                              'tog_MACD': True,
+                              'wt_MACD': 4.0,
+                              'tog_RSI': True,
+                              'wt_RSI': 3.0,
+                              'tog_MA50Proximity': True,
+                              'wt_MA50Proximity': 2.0}},
+ 'Short Squeeze': {'icon': '🎯',
+                   'key': 'preset_short_squeeze',
+                   'desc': "High short interest + quality filter so you're not long a genuinely "
+                           'broken company.',
+                   'backtest': '+9.9% median excess',
+                   'reset': True,
+                   'settings': {'slider_max_price': 500,
+                                'slider_min_score': 0.0,
+                                'tog_ma50': 'above',
+                                'tog_range': False,
+                                'slider_mfi_period': 14,
+                                'tog_pe_filter': False,
+                                'tog_rev_filter': False,
+                                'tog_ShortSqueeze': True,
+                                'wt_ShortSqueeze': 5.0,
+                                'tog_Piotroski': True,
+                                'wt_Piotroski': 5.0,
+                                'tog_RSI': True,
+                                'wt_RSI': 2.0,
+                                'tog_NoBearDiv': True,
+                                'wt_NoBearDiv': 2.0,
+                                'tog_PCV': True,
+                                'wt_PCV': 2.0,
+                                'tog_EarningsGrowth': True,
+                                'wt_EarningsGrowth': 1.0,
+                                'tog_MACD': True,
+                                'wt_MACD': 1.0}},
+ 'Low Price Position': {'icon': '📉',
+                        'key': 'preset_low_price_pos',
+                        'desc': 'Price at range low + accumulation + cheap on cash flow.',
+                        'backtest': '+6.2% median excess',
+                        'reset': True,
+                        'settings': {'slider_max_price': 500,
+                                     'slider_min_score': 0.0,
+                                     'tog_ma50': 'off',
+                                     'tog_range': True,
+                                     'slider_range_days': 30,
+                                     'slider_range_pct': 20.0,
+                                     'slider_mfi_period': 14,
+                                     'tog_pe_filter': False,
+                                     'tog_rev_filter': False,
+                                     'tog_RangePosScore': True,
+                                     'wt_RangePosScore': 5.0,
+                                     'tog_OE_Yield': True,
+                                     'wt_OE_Yield': 5.0,
+                                     'tog_RSI': True,
+                                     'wt_RSI': 5.0,
+                                     'tog_ROIC': True,
+                                     'wt_ROIC': 3.0,
+                                     'tog_NoBearDiv': True,
+                                     'wt_NoBearDiv': 2.0,
+                                     'tog_OBV': True,
+                                     'wt_OBV': 1.0,
+                                     'tog_EarningsGrowth': True,
+                                     'wt_EarningsGrowth': 1.0,
+                                     'tog_GoldenCross': True,
+                                     'wt_GoldenCross': 1.0}},
+ 'Magic Volume': {'icon': '⚡',
+                  'key': 'preset_magic_volume',
+                  'desc': 'Volume surge detection with momentum confirmation.',
+                  'backtest': '',
+                  'reset': True,
+                  'settings': {'slider_max_price': 500,
+                               'slider_min_score': 0.0,
+                               'tog_ma50': 'above',
+                               'tog_range': False,
+                               'slider_mfi_period': 14,
+                               'tog_pe_filter': False,
+                               'tog_rev_filter': False,
+                               'tog_OBV': True,
+                               'wt_OBV': 5.0,
+                               'tog_PCV': True,
+                               'wt_PCV': 5.0,
+                               'tog_MACD': True,
+                               'wt_MACD': 5.0,
+                               'tog_Piotroski': True,
+                               'wt_Piotroski': 5.0,
+                               'tog_NoBearDiv': True,
+                               'wt_NoBearDiv': 4.0,
+                               'tog_RSI': True,
+                               'wt_RSI': 3.0,
+                               'tog_MA50Proximity': True,
+                               'wt_MA50Proximity': 3.0,
+                               'tog_MFI': True,
+                               'wt_MFI': 2.0,
+                               'tog_MFISweetSpot': True,
+                               'wt_MFISweetSpot': 1.0,
+                               'tog_GoldenCross': True,
+                               'wt_GoldenCross': 1.0,
+                               'tog_EarningsGrowth': True,
+                               'wt_EarningsGrowth': 1.0,
+                               'tog_OE_Yield': True,
+                               'wt_OE_Yield': 1.0}},
+ 'Breakout Setup': {'icon': '🚀',
+                    'key': 'preset_breakout_setup',
+                    'desc': 'Tight coil at range low ready to break resistance (the RAIL/SEZL/PM '
+                            'pattern).',
+                    'backtest': '87% win rate in the up-window; adding OE Yield + ROIC kept it '
+                                'positive in the down-window too',
+                    'reset': True,
+                    'settings': {'slider_max_price': 500,
+                                 'slider_min_score': 0.0,
+                                 'tog_ma50': 'off',
+                                 'tog_range': True,
+                                 'slider_range_days': 30,
+                                 'slider_range_pct': 15.0,
+                                 'slider_mfi_period': 14,
+                                 'tog_pe_filter': False,
+                                 'tog_rev_filter': False,
+                                 'tog_RangePosScore': True,
+                                 'wt_RangePosScore': 5.0,
+                                 'tog_OBV': True,
+                                 'wt_OBV': 5.0,
+                                 'tog_MACD': True,
+                                 'wt_MACD': 5.0,
+                                 'tog_NoBearDiv': True,
+                                 'wt_NoBearDiv': 5.0,
+                                 'tog_OE_Yield': True,
+                                 'wt_OE_Yield': 4.0,
+                                 'tog_ROIC': True,
+                                 'wt_ROIC': 4.0,
+                                 'tog_PCV': True,
+                                 'wt_PCV': 3.0,
+                                 'tog_MA50Proximity': True,
+                                 'wt_MA50Proximity': 3.0,
+                                 'tog_GoldenCross': True,
+                                 'wt_GoldenCross': 3.0,
+                                 'tog_MFISweetSpot': True,
+                                 'wt_MFISweetSpot': 3.0,
+                                 'tog_RSI': True,
+                                 'wt_RSI': 2.0,
+                                 'tog_EarningsGrowth': True,
+                                 'wt_EarningsGrowth': 1.0}},
+ 'Insider Buying': {'icon': '🕵️',
+                    'key': 'preset_insider_buying',
+                    'desc': 'Institutional accumulation footprints in quiet ranges.',
+                    'backtest': '+6.6% median excess on independent halves',
+                    'reset': True,
+                    'settings': {'slider_max_price': 500,
+                                 'slider_min_score': 0.0,
+                                 'tog_ma50': 'above',
+                                 'tog_range': False,
+                                 'slider_range_days': 60,
+                                 'slider_range_pct': 15.0,
+                                 'slider_mfi_period': 14,
+                                 'tog_pe_filter': False,
+                                 'tog_rev_filter': False,
+                                 'tog_OBV': True,
+                                 'wt_OBV': 5.0,
+                                 'tog_Piotroski': True,
+                                 'wt_Piotroski': 5.0,
+                                 'tog_MFISweetSpot': True,
+                                 'wt_MFISweetSpot': 4.0,
+                                 'tog_RangePosScore': True,
+                                 'wt_RangePosScore': 3.0,
+                                 'tog_MACD': True,
+                                 'wt_MACD': 3.0,
+                                 'tog_PCV': True,
+                                 'wt_PCV': 2.0,
+                                 'tog_EarningsGrowth': True,
+                                 'wt_EarningsGrowth': 2.0,
+                                 'tog_NoBearDiv': True,
+                                 'wt_NoBearDiv': 2.0,
+                                 'tog_GoldenCross': True,
+                                 'wt_GoldenCross': 2.0,
+                                 'tog_RSI': True,
+                                 'wt_RSI': 1.0}}}
+
+
+def _apply_preset(_pname: str) -> None:
+    """Single source of truth for screener presets — used by the sidebar
+    buttons and the mobile Quick cards. Safe in on_click callbacks."""
+    _p = SCREENER_PRESETS[_pname]
+    if _p["reset"]:
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+    for _k, _v in _p["settings"].items():
+        st.session_state[_k] = _v
+    st.session_state["active_preset"] = _pname
+    st.session_state["screener_cache"] = {}
+
+
+
 ALL_SECTORS = [
     "All Sectors",
     "Basic Materials",
@@ -510,221 +716,42 @@ with st.sidebar:
                       "liquidity gate ($5+ / 250k avg vol). Backtested top pick: 80% win rate "
                       "and +24% median excess in the up-market window; positive in the down "
                       "window too. The strongest preset in the suite."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"
-        st.session_state["tog_range"]          = False
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        # CleanSetupScore ×5 — the pattern engine itself (trend + flag + higher-low + RSI band + volume)
-        st.session_state["tog_CleanSetupScore"] = True
-        st.session_state["wt_CleanSetupScore"]  = 5.0
-
-        # MACD ×4 — backtest demanded momentum confirmation on top of the pattern
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 4.0
-
-        # RSI ×3 — rewards momentum building within the pattern's 40-60 band
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 3.0
-
-        # MA50Proximity ×2 — entries near the MA50 have the tightest stops
-        st.session_state["tog_MA50Proximity"] = True
-        st.session_state["wt_MA50Proximity"]  = 2.0
+        _apply_preset("Clean Setup")
 
         st.rerun()
 
     # ── Short Squeeze preset button ─────────────────────────────
     if st.button("🎯 Short Squeeze", width="stretch", key="preset_short_squeeze",
                  help="High short interest + quality filter so you're not long a genuinely broken company. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Raw short-interest chasing lost money; adding Piotroski + above-MA50 flipped it to +9.9% median excess."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"
-        st.session_state["tog_range"]          = False
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        st.session_state["tog_ShortSqueeze"] = True
-        st.session_state["wt_ShortSqueeze"]  = 5.0
-        st.session_state["tog_Piotroski"] = True
-        st.session_state["wt_Piotroski"]  = 5.0
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 2.0
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 2.0
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 2.0
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 1.0
+        _apply_preset("Short Squeeze")
 
         st.rerun()
 
     # ── Low Price Position preset button ─────────────────────────────
     if st.button("📉 Low Price Position", width="stretch", key="preset_low_price_pos",
                  help="Price at range low + accumulation + cheap on cash flow. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Range low alone is NEGATIVE alpha — pairing it with OE Yield and ROIC made it +6.2% median excess."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"
-        st.session_state["tog_range"]          = True
-        st.session_state["slider_range_days"]  = 30
-        st.session_state["slider_range_pct"]   = 20.0
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        st.session_state["tog_RangePosScore"] = True
-        st.session_state["wt_RangePosScore"]  = 5.0
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 5.0
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 5.0
-        st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 3.0
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 2.0
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 1.0
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 1.0
+        _apply_preset("Low Price Position")
 
         st.rerun()
 
     # ── Magic Volume preset button ─────────────────────────────
     if st.button("⚡ Magic Volume", width="stretch", key="preset_magic_volume",
                  help="Volume surge detection with momentum confirmation. Backtested on 5,150 stocks across two 60-day market regimes (up + down). MA50 filter removed and MACD raised to ×5 — turned -8.0% excess into +4.8%."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"
-        st.session_state["tog_range"]          = False
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 5.0
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 5.0
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 5.0
-        st.session_state["tog_Piotroski"] = True
-        st.session_state["wt_Piotroski"]  = 5.0
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 4.0
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 3.0
-        st.session_state["tog_MA50Proximity"] = True
-        st.session_state["wt_MA50Proximity"]  = 3.0
-        st.session_state["tog_MFI"] = True
-        st.session_state["wt_MFI"]  = 2.0
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 1.0
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 1.0
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 1.0
+        _apply_preset("Magic Volume")
 
         st.rerun()
 
     # ── Breakout Setup preset button ─────────────────────────────
     if st.button("🚀 Breakout Setup", width="stretch", key="preset_breakout_setup",
                  help="Tight coil at range low ready to break resistance (the RAIL/SEZL/PM pattern). Backtested on 5,150 stocks across two 60-day market regimes (up + down). 87% win rate in the up-window; adding OE Yield + ROIC kept it positive in the down-window too."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "off"
-        st.session_state["tog_range"]          = True
-        st.session_state["slider_range_days"]  = 30
-        st.session_state["slider_range_pct"]   = 15.0
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        st.session_state["tog_RangePosScore"] = True
-        st.session_state["wt_RangePosScore"]  = 5.0
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 5.0
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 5.0
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 5.0
-        st.session_state["tog_OE_Yield"] = True
-        st.session_state["wt_OE_Yield"]  = 4.0
-        st.session_state["tog_ROIC"] = True
-        st.session_state["wt_ROIC"]  = 4.0
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 3.0
-        st.session_state["tog_MA50Proximity"] = True
-        st.session_state["wt_MA50Proximity"]  = 3.0
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 3.0
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 3.0
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 2.0
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 1.0
+        _apply_preset("Breakout Setup")
 
         st.rerun()
 
     # ── Insider Buying preset button ─────────────────────────────
     if st.button("🕵️ Insider Buying", width="stretch", key="preset_insider_buying",
                  help="Institutional accumulation footprints in quiet ranges. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Split-half validated: +4.5% and +6.6% median excess on independent halves."):
-        st.session_state["slider_max_price"]   = 500
-        st.session_state["slider_min_score"]   = 0.0
-        st.session_state["tog_ma50"]           = "above"
-        st.session_state["tog_range"]          = False
-        st.session_state["slider_range_days"]  = 60
-        st.session_state["slider_range_pct"]   = 15.0
-        st.session_state["slider_mfi_period"]  = 14
-        st.session_state["tog_pe_filter"]      = False
-        st.session_state["tog_rev_filter"]     = False
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-
-        st.session_state["tog_OBV"] = True
-        st.session_state["wt_OBV"]  = 5.0
-        st.session_state["tog_Piotroski"] = True
-        st.session_state["wt_Piotroski"]  = 5.0
-        st.session_state["tog_MFISweetSpot"] = True
-        st.session_state["wt_MFISweetSpot"]  = 4.0
-        st.session_state["tog_RangePosScore"] = True
-        st.session_state["wt_RangePosScore"]  = 3.0
-        st.session_state["tog_MACD"] = True
-        st.session_state["wt_MACD"]  = 3.0
-        st.session_state["tog_PCV"] = True
-        st.session_state["wt_PCV"]  = 2.0
-        st.session_state["tog_EarningsGrowth"] = True
-        st.session_state["wt_EarningsGrowth"]  = 2.0
-        st.session_state["tog_NoBearDiv"] = True
-        st.session_state["wt_NoBearDiv"]  = 2.0
-        st.session_state["tog_GoldenCross"] = True
-        st.session_state["wt_GoldenCross"]  = 2.0
-        st.session_state["tog_RSI"] = True
-        st.session_state["wt_RSI"]  = 1.0
+        _apply_preset("Insider Buying")
 
         st.rerun()
 
@@ -3337,6 +3364,64 @@ def color_score(val):
 # ───────────────────────────────────────────────────────────────
 
 with tab_screener:
+ # ═══ Quick / Advanced filter modes (mobile-first — sidebar hides on phones) ═══
+ try:
+     _fmode = st.segmented_control(
+         "Filter mode", ["⚡ Quick presets", "🎛 Advanced"],
+         key="scr_filter_mode", default="⚡ Quick presets",
+         label_visibility="collapsed",
+     )
+ except Exception:
+     _fmode = st.radio("Filter mode", ["⚡ Quick presets", "🎛 Advanced"],
+                       horizontal=True, key="scr_filter_mode_radio",
+                       label_visibility="collapsed")
+
+ _active = st.session_state.get("active_preset")
+
+ if (_fmode or "").startswith("⚡"):
+     _names = list(SCREENER_PRESETS)
+     for _i in range(0, len(_names), 2):
+         _cols = st.columns(2)
+         for _c, _nm in zip(_cols, _names[_i:_i + 2]):
+             _p = SCREENER_PRESETS[_nm]
+             with _c, st.container(border=True):
+                 _badge = " · ✅ active" if _nm == _active else ""
+                 st.markdown(f"**{_p['icon']} {_nm}**{_badge}")
+                 st.caption(_p["desc"] or "Custom signal blend.")
+                 if _p.get("backtest"):
+                     st.caption(f"📊 {_p['backtest']}")
+                 st.button(
+                     "Use preset", key=f"card_{_p['key']}",
+                     width="stretch",
+                     type="primary" if _nm == _active else "secondary",
+                     on_click=_apply_preset, args=(_nm,),
+                 )
+ else:
+     def _sync_adv_price():
+         st.session_state["slider_max_price"] = st.session_state["adv_max_price"]
+         st.session_state["screener_cache"] = {}
+
+     def _sync_adv_score():
+         st.session_state["slider_min_score"] = st.session_state["adv_min_score"]
+         st.session_state["screener_cache"] = {}
+
+     if "adv_max_price" not in st.session_state:
+         st.session_state["adv_max_price"] = int(st.session_state.get("slider_max_price", 500))
+     if "adv_min_score" not in st.session_state:
+         st.session_state["adv_min_score"] = float(st.session_state.get("slider_min_score", 0.0))
+
+     _a1, _a2 = st.columns(2)
+     _a1.number_input("Max price ($)", min_value=1, max_value=5000, step=25,
+                      key="adv_max_price", on_change=_sync_adv_price)
+     _a2.number_input("Min score", min_value=0.0, max_value=1.0, step=0.05,
+                      key="adv_min_score", on_change=_sync_adv_score)
+     if _active:
+         st.caption(f"Base preset: **{_active}** — tweak away, changes apply on top.")
+     st.caption("Signal weights, MA50 gate, range and growth filters live in the "
+                "sidebar — tap the **»** icon (top-left) to open it on mobile.")
+
+ st.divider()
+
 
  # ── Nightly data status banner (always visible) ───────────────
  _ck = _get_cache_key()
