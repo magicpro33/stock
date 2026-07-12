@@ -56,50 +56,67 @@ _RAW_KEYS = [
 
 
 # ── credentials ──────────────────────────────────────────────────────
-def alpaca_keys():
-    pairs = [("ALPACA_API_KEY", "ALPACA_SECRET_KEY"),
-             ("ALPACA_KEY_ID", "ALPACA_SECRET"),
-             ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")]
+_KEY_PAIRS = [
+    ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"),
+    ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"),
+    ("ALPACA_KEY_ID", "ALPACA_SECRET"),
+    ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY"),
+]
+
+
+def alpaca_keys_detail():
+    """(key_id, secret, matched_name) — checks Streamlit secrets, then env."""
     getters = []
     try:
         import streamlit as st
-        getters.append(lambda k: st.secrets.get(k, ""))
+        getters.append(("secrets", lambda k: st.secrets.get(k, "")))
     except Exception:
         pass
-    getters.append(lambda k: os.environ.get(k, ""))
-    for kid_name, sec_name in pairs:
-        for g in getters:
+    getters.append(("env", lambda k: os.environ.get(k, "")))
+    for kid_name, sec_name in _KEY_PAIRS:
+        for where, g in getters:
             try:
                 kid, sec = g(kid_name), g(sec_name)
             except Exception:
                 continue
             if kid and sec:
-                return kid, sec
-    return None, None
+                return kid, sec, f"{kid_name} ({where})"
+    return None, None, None
+
+
+def alpaca_keys():
+    kid, sec, _ = alpaca_keys_detail()
+    return kid, sec
+
+
+def _mask(key: str) -> str:
+    return f"{key[:4]}…{key[-4:]}" if key and len(key) > 8 else "set"
 
 
 def _alpaca_get(path, params=None):
-    kid, sec = alpaca_keys()
+    """Returns (json_or_None, status_string)."""
+    kid, sec, name = alpaca_keys_detail()
     if not kid:
-        return None
+        return None, "no key configured"
+    ident = f"key {_mask(kid)} via {name}"
     try:
         r = requests.get(f"{ALPACA_DATA}/{path}", params=params or {},
                          headers={"APCA-API-KEY-ID": kid,
                                   "APCA-API-SECRET-KEY": sec},
                          timeout=_TIMEOUT)
         if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
+            return r.json(), f"OK — {ident}"
+        return None, f"HTTP {r.status_code} — {ident}"
+    except Exception as e:
+        return None, f"request failed ({type(e).__name__}) — {ident}"
 
 
 # ── Alpaca sources ───────────────────────────────────────────────────
 def alpaca_snapshot(ticker: str) -> dict:
     """Latest trade + daily/prev-daily bars in one call. {} if unavailable."""
-    data = _alpaca_get(f"{ticker}/snapshot", {"feed": "iex"})
+    data, status = _alpaca_get(f"{ticker}/snapshot", {"feed": "iex"})
     if not data:
-        return {}
+        return {"_status": status}
     out = {}
     lt = data.get("latestTrade") or {}
     db = data.get("dailyBar") or {}
@@ -116,12 +133,13 @@ def alpaca_snapshot(ticker: str) -> dict:
         out["volume"] = float(db["v"])
     if lt.get("t"):
         out["_alpaca_asof"] = str(lt["t"])[:19].replace("T", " ")
+    out["_status"] = status
     return out
 
 
 def alpaca_daily_bars(ticker: str, start_iso: str) -> pd.DataFrame:
     """Daily OHLCV bars from start_iso (inclusive). Empty df if unavailable."""
-    data = _alpaca_get(f"{ticker}/bars",
+    data, _status = _alpaca_get(f"{ticker}/bars",
                        {"timeframe": "1Day", "start": start_iso,
                         "adjustment": "split", "feed": "iex", "limit": 400})
     bars = (data or {}).get("bars") or []
@@ -268,6 +286,7 @@ def complete_info_hist(ticker: str, info: dict, hist: pd.DataFrame, row: dict):
 
     # 3. quote: Alpaca snapshot overrides — freshest price wins
     snap = alpaca_snapshot(ticker)
+    sources["alpaca"] = snap.get("_status", "no key configured")
     if snap.get("currentPrice"):
         info.update({k: v for k, v in snap.items() if not k.startswith("_")})
         sources["price"] = f"Alpaca ({snap.get('_alpaca_asof', 'live')})"
@@ -300,7 +319,41 @@ def sources_caption(sources: dict, missing: list) -> str:
         if sources.get("history_topup"):
             h += f" + {sources['history_topup']}"
         bits.append(f"history: {h}")
+    alp = sources.get("alpaca", "")
+    if alp:
+        bits.append("Alpaca: " + ("✅ " + alp if alp.startswith("OK") else "⚠️ " + alp))
     if sources.get("filled_from_dump"):
         bits.append(f"filled from nightly: {len(sources['filled_from_dump'])} fields")
     bits.append("missing: " + (", ".join(missing) if missing else "none"))
     return "🔗 Data sources — " + " · ".join(bits)
+
+
+def status_report(sources: dict, missing: list) -> str:
+    """Markdown detail block for the data-source status expander."""
+    kid, _sec, name = alpaca_keys_detail()
+    lines = ["**Alpaca API**"]
+    if kid:
+        lines.append(f"- Key detected: `{_mask(kid)}` from `{name}`")
+        lines.append(f"- Last call: {sources.get('alpaca', 'not attempted')}")
+    else:
+        lines.append("- No key found. Add `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` "
+                     "(or `APCA_API_KEY_ID` + `APCA_API_SECRET_KEY`) to Streamlit secrets.")
+    try:
+        import streamlit as st
+        av = bool(st.secrets.get("AV_API_KEY", "")) or bool(os.environ.get("AV_API_KEY", ""))
+    except Exception:
+        av = bool(os.environ.get("AV_API_KEY", ""))
+    lines.append("")
+    lines.append(f"**Alpha Vantage**: key {'detected' if av else 'not found'}")
+    lines.append("")
+    lines.append(f"**Price source**: {sources.get('price', '—')}")
+    h = sources.get("history", "—")
+    if sources.get("history_topup"):
+        h += f" + {sources['history_topup']}"
+    lines.append(f"**History source**: {h}")
+    filled = sources.get("filled_from_dump") or []
+    lines.append(f"**Filled from nightly dump** ({len(filled)}): "
+                 + (", ".join(f"`{f}`" for f in filled) if filled else "none"))
+    lines.append(f"**Still missing**: "
+                 + (", ".join(f"`{m}`" for m in missing) if missing else "none ✅"))
+    return "\n".join(lines)
