@@ -6,6 +6,15 @@
 #   streamlit run app.py
 # -----------------------------------
 
+# ── CRITICAL: disable curl_cffi BEFORE yfinance is imported ──────────
+# curl_cffi 0.15.x has segfault-class memory-corruption bugs (upstream
+# issue #677) that crash the interpreter on Streamlit Cloud with no
+# traceback. Same fix as IGNITION: with this env var set, yfinance uses
+# its officially supported plain-requests fallback and curl_cffi is
+# never even loaded.
+import os
+os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")
+
 import io
 import sys
 import time
@@ -107,7 +116,14 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
+tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Money Flow"])
+
+with tab_money:
+    try:
+        from money_flow_tab import render_money_flow_tab
+        render_money_flow_tab()
+    except Exception as _mf_err:
+        st.error(f"Money Flow tab failed to load: {_mf_err}")
 
 # ───────────────────────────────────────────────────────────────
 # METRIC CONFIG  — name, default weight, full description
@@ -487,7 +503,7 @@ with st.sidebar:
     st.header("⚙️ Screener Filters")
 
     # ── Clean Setup preset button ─────────────────────────────
-    if st.button("📐 Clean Setup", use_container_width=True, key="preset_clean_setup",
+    if st.button("📐 Clean Setup", width="stretch", key="preset_clean_setup",
                  help="High-conviction bull patterns from the CleanSetup Pine Script: "
                       "trend alignment (price > EMA50 > EMA200), bull flag (pole 5-20%, "
                       "pullback <5%), higher-low pivot sequence, RSI 40-60, volume confirmation, "
@@ -524,7 +540,7 @@ with st.sidebar:
         st.rerun()
 
     # ── Short Squeeze preset button ─────────────────────────────
-    if st.button("🎯 Short Squeeze", use_container_width=True, key="preset_short_squeeze",
+    if st.button("🎯 Short Squeeze", width="stretch", key="preset_short_squeeze",
                  help="High short interest + quality filter so you're not long a genuinely broken company. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Raw short-interest chasing lost money; adding Piotroski + above-MA50 flipped it to +9.9% median excess."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
@@ -555,7 +571,7 @@ with st.sidebar:
         st.rerun()
 
     # ── Low Price Position preset button ─────────────────────────────
-    if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
+    if st.button("📉 Low Price Position", width="stretch", key="preset_low_price_pos",
                  help="Price at range low + accumulation + cheap on cash flow. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Range low alone is NEGATIVE alpha — pairing it with OE Yield and ROIC made it +6.2% median excess."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
@@ -590,7 +606,7 @@ with st.sidebar:
         st.rerun()
 
     # ── Magic Volume preset button ─────────────────────────────
-    if st.button("⚡ Magic Volume", use_container_width=True, key="preset_magic_volume",
+    if st.button("⚡ Magic Volume", width="stretch", key="preset_magic_volume",
                  help="Volume surge detection with momentum confirmation. Backtested on 5,150 stocks across two 60-day market regimes (up + down). MA50 filter removed and MACD raised to ×5 — turned -8.0% excess into +4.8%."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
@@ -631,7 +647,7 @@ with st.sidebar:
         st.rerun()
 
     # ── Breakout Setup preset button ─────────────────────────────
-    if st.button("🚀 Breakout Setup", use_container_width=True, key="preset_breakout_setup",
+    if st.button("🚀 Breakout Setup", width="stretch", key="preset_breakout_setup",
                  help="Tight coil at range low ready to break resistance (the RAIL/SEZL/PM pattern). Backtested on 5,150 stocks across two 60-day market regimes (up + down). 87% win rate in the up-window; adding OE Yield + ROIC kept it positive in the down-window too."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
@@ -674,7 +690,7 @@ with st.sidebar:
         st.rerun()
 
     # ── Insider Buying preset button ─────────────────────────────
-    if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
+    if st.button("🕵️ Insider Buying", width="stretch", key="preset_insider_buying",
                  help="Institutional accumulation footprints in quiet ranges. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Split-half validated: +4.5% and +6.6% median excess on independent halves."):
         st.session_state["slider_max_price"]   = 500
         st.session_state["slider_min_score"]   = 0.0
@@ -966,7 +982,7 @@ with st.sidebar:
     st.markdown("**📡 yfinance Connection**")
 
     # ── Live health check ─────────────────────────────────────────
-    _do_check = st.button("🔍 Check Connection", use_container_width=True, key="check_conn_btn",
+    _do_check = st.button("🔍 Check Connection", width="stretch", key="check_conn_btn",
                           help="Test the yfinance data connection before scanning.")
     if _do_check or st.session_state.get("_yf_health"):
         if _do_check:
@@ -1003,13 +1019,13 @@ with st.sidebar:
         # ── Fix buttons ───────────────────────────────────────────
         if _fix == "wait":
             st.caption("⏳ **Fix:** Wait 30–60 seconds for the rate limit to reset, then scan again.")
-            if st.button("⏱️ Wait 30s then Re-check", use_container_width=True,
+            if st.button("⏱️ Wait 30s then Re-check", width="stretch",
                          key="fix_wait_btn"):
                 import time as _t; _t.sleep(30)
                 _health = check_yfinance_health()
                 st.session_state["_yf_health"] = _health
                 st.rerun()
-            if st.button("⬇️ Reduce Workers to 3", use_container_width=True,
+            if st.button("⬇️ Reduce Workers to 3", width="stretch",
                          key="fix_reduce_btn"):
                 st.session_state["max_workers_val"] = 3
                 st.session_state.pop("_yf_health", None)
@@ -1021,24 +1037,24 @@ with st.sidebar:
 
         elif _fix == "timeout":
             st.caption("🔄 **Fix:** Retry — transient timeout, server may be temporarily overloaded.")
-            if st.button("🔄 Re-check Connection", use_container_width=True,
+            if st.button("🔄 Re-check Connection", width="stretch",
                          key="fix_timeout_btn"):
                 st.session_state.pop("_yf_health", None)
                 st.rerun()
 
         elif _fix == "sp500":
             st.caption("🔄 **Fix:** Switch to S&P 500 (smaller universe), or wait for network to recover.")
-            if st.button("📊 Switch to S&P 500", use_container_width=True,
+            if st.button("📊 Switch to S&P 500", width="stretch",
                          key="fix_sp500_btn"):
                 st.session_state.pop("_yf_health", None)
                 st.rerun()
 
-        if st.button("✕ Clear Status", use_container_width=True, key="clear_health_btn"):
+        if st.button("✕ Clear Status", width="stretch", key="clear_health_btn"):
             st.session_state.pop("_yf_health", None)
             st.rerun()
 
     st.divider()
-    run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary", key="run_screener_btn")
+    run_btn = st.button("🚀 Run Screener", width="stretch", type="primary", key="run_screener_btn")
 
     # ── Cache status panel ────────────────────────────────────────
     st.divider()
@@ -1068,7 +1084,7 @@ with st.sidebar:
             st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
                        f"Cache clears automatically when you close the browser tab.")
 
-        if st.button("🗑️ Clear All Cache", use_container_width=True, key="clear_all_cache_btn"):
+        if st.button("🗑️ Clear All Cache", width="stretch", key="clear_all_cache_btn"):
             _clear_all_cache()
             st.success("All cache cleared.")
             st.rerun()
@@ -2348,7 +2364,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
             cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
             cdf["High"] = rh; cdf["Low"] = rl
-            st.line_chart(cdf, use_container_width=True)
+            st.line_chart(cdf, width="stretch")
         else:
             st.warning("Not enough price history to calculate range.")
 
@@ -2452,7 +2468,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 fd = fin_stmt.T.copy()
                 fd.index = [str(i)[:10] for i in fd.index]
                 for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(fd, use_container_width=True)
+                st.dataframe(fd, width="stretch")
             else:
                 st.info("Income statement not available.")
             i1,i2,i3,i4 = st.columns(4)
@@ -2480,7 +2496,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 bd = bal_stmt.T.copy()
                 bd.index = [str(i)[:10] for i in bd.index]
                 for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(bd, use_container_width=True)
+                st.dataframe(bd, width="stretch")
             else:
                 st.info("Balance sheet not available.")
             b1,b2,b3,b4 = st.columns(4)
@@ -2508,7 +2524,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 cd = cf_stmt.T.copy()
                 cd.index = [str(i)[:10] for i in cd.index]
                 for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(cd, use_container_width=True)
+                st.dataframe(cd, width="stretch")
             else:
                 st.info("Cash flow not available.")
             cf1,cf2,cf3,cf4 = st.columns(4)
@@ -2836,7 +2852,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 fig.update_yaxes(title_text="Price ($)", row=1, col=1,
                                  title_font=dict(size=10), tickfont=dict(size=9))
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 # ── Period stats ──────────────────────────
                 s1, s2, s3, s4 = st.columns(4)
@@ -3775,7 +3791,7 @@ with tab_screener:
                 ["Ticker", "Price", "MA50", "Score"] +
                 [k for k in active_metrics if k in df.columns][:4]
             ].copy()
-            st.dataframe(_sample, use_container_width=True)
+            st.dataframe(_sample, width="stretch")
 
             st.markdown("**Current filter settings:**")
             st.json({
@@ -3913,7 +3929,7 @@ with tab_screener:
         with _btn_cols[_bi % len(_btn_cols)]:
             _is_sel = st.session_state.get("_inline_ticker") == _tk
             if st.button(_tk, key=f"tk2_{_tk}_{_bi}",
-                         use_container_width=True,
+                         width="stretch",
                          type="primary" if _is_sel else "secondary"):
                 st.session_state["_inline_ticker"] = _tk
 
@@ -3940,14 +3956,14 @@ with tab_screener:
         _styled2 = _saved_display.style.map(color_score, subset=["Score"])
         st.dataframe(
             _styled2,
-            use_container_width=True,
+            width="stretch",
             height=600,
             column_order=_col_order,
         )
     except Exception:
         st.dataframe(
             _saved_display,
-            use_container_width=True,
+            width="stretch",
             height=600,
             column_order=_col_order,
         )
@@ -3960,7 +3976,7 @@ with tab_screener:
         data=_excel2,
         file_name=f"stock_screener_{datetime.today().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
         key="dl_btn2",
     )
 
@@ -4136,7 +4152,7 @@ with tab_analyze:
             label_visibility="collapsed",
         ).strip().upper()
     with btn_col:
-        analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True, key="analyze_btn")
+        analyze_btn = st.button("🔬 Analyze", type="primary", width="stretch", key="analyze_btn")
 
     # ── Collapsible metrics selector ─────────────────────────────
     with st.expander("⚙️ Select Metrics", expanded=False):
@@ -4161,13 +4177,13 @@ with tab_analyze:
                 # Use a button that spans full width — no nested columns
                 _btn_label = f"{'▶ ' if _is_active else ''}{_h['ticker']}  ·  {_h['name'][:35]}{'…' if len(_h['name'])>35 else ''}"
                 if st.button(_btn_label, key=f"hist_btn_{_h['ticker']}",
-                             use_container_width=True,
+                             width="stretch",
                              help=f"Re-analyze {_h['ticker']}",
                              type="primary" if _is_active else "secondary"):
                     st.session_state["_pending_ticker"] = _h["ticker"]
                     st.session_state["_rerun_ticker"]   = _h["ticker"]
                     st.rerun()
-            if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
+            if st.button("🗑️ Clear History", width="stretch", key="clear_hist_btn"):
                 st.session_state["analyze_history"] = []
                 st.rerun()
 
