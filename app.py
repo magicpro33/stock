@@ -2710,7 +2710,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 ha = hd.copy()
                 ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
                 ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
-                ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                ha.loc[ha.index[0], "HA_Open"] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
                 ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
                 ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
 
