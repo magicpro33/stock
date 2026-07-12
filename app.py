@@ -497,6 +497,7 @@ def _apply_preset(_pname: str) -> None:
         st.session_state[_k] = _v
     st.session_state["active_preset"] = _pname
     st.session_state["screener_cache"] = {}
+    st.session_state["_trigger_screener"] = True
     try:
         st.toast(f"✅ {_pname} applied — running scan…", icon="🔍")
     except Exception:
@@ -3413,6 +3414,7 @@ with tab_screener:
      if _a2.button("🔍 Run scan", key="adv_run_scan", type="primary",
                    width="stretch"):
          st.session_state.pop("screener_cache", None)
+         st.session_state["_trigger_screener"] = True
          try:
              st.toast("🔍 Rescanning with current filters…")
          except Exception:
@@ -3453,7 +3455,7 @@ with tab_screener:
             "Until then the screener will do a live scan."
         )
 
- if run_btn:
+ if run_btn or st.session_state.pop("_trigger_screener", False):
     active_metrics = [k for k, v in metric_enabled.items() if v]
 
     exchange_key  = EXCHANGES[exchange]
