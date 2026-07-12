@@ -497,6 +497,10 @@ def _apply_preset(_pname: str) -> None:
         st.session_state[_k] = _v
     st.session_state["active_preset"] = _pname
     st.session_state["screener_cache"] = {}
+    try:
+        st.toast(f"✅ {_pname} applied — running scan…", icon="🔍")
+    except Exception:
+        pass
 
 
 
@@ -3399,22 +3403,21 @@ with tab_screener:
  else:
      def _sync_adv_price():
          st.session_state["slider_max_price"] = st.session_state["adv_max_price"]
-         st.session_state["screener_cache"] = {}
-
-     def _sync_adv_score():
-         st.session_state["slider_min_score"] = st.session_state["adv_min_score"]
-         st.session_state["screener_cache"] = {}
 
      if "adv_max_price" not in st.session_state:
          st.session_state["adv_max_price"] = int(st.session_state.get("slider_max_price", 500))
-     if "adv_min_score" not in st.session_state:
-         st.session_state["adv_min_score"] = float(st.session_state.get("slider_min_score", 0.0))
 
-     _a1, _a2 = st.columns(2)
+     _a1, _a2 = st.columns([3, 2], vertical_alignment="bottom")
      _a1.number_input("Max price ($)", min_value=1, max_value=5000, step=25,
                       key="adv_max_price", on_change=_sync_adv_price)
-     _a2.number_input("Min score", min_value=0.0, max_value=1.0, step=0.05,
-                      key="adv_min_score", on_change=_sync_adv_score)
+     if _a2.button("🔍 Run scan", key="adv_run_scan", type="primary",
+                   width="stretch"):
+         st.session_state.pop("screener_cache", None)
+         try:
+             st.toast("🔍 Rescanning with current filters…")
+         except Exception:
+             pass
+         st.rerun()
      if _active:
          st.caption(f"Base preset: **{_active}** — tweak away, changes apply on top.")
      st.caption("Signal weights, MA50 gate, range and growth filters live in the "
