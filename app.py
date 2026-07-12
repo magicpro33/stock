@@ -555,9 +555,10 @@ def _normalise_sector(raw: str) -> str:
     return _SECTOR_ALIASES.get(raw.strip().lower(), raw.strip())
 
 EXCHANGES = {
-    "S&P 500":  "sp500",
-    "NYSE":     "nyse",
-    "NASDAQ":   "nasdaq",
+    "All Markets": "all",
+    "S&P 500":     "sp500",
+    "NYSE":        "nyse",
+    "NASDAQ":      "nasdaq",
 }
 
 # Keywords used to detect and exclude non-company securities (ETFs, funds, trusts, etc.)
@@ -767,7 +768,7 @@ with st.sidebar:
         options=list(EXCHANGES.keys()),
         index=0,
         key="sel_exchange",
-        help="S&P 500 = ~500 stocks (fast). NYSE/NASDAQ = 2,000–3,500 stocks (slow, 30–60+ min)."
+        help="All Markets = every stock in the nightly data (default). S&P 500 = ~500 stocks. NYSE/NASDAQ = 2,000–3,500 stocks. Live scans on large universes take 30–60+ min."
     )
 
     sector = st.selectbox(
@@ -1237,6 +1238,8 @@ def get_precomputed_for_exchange(exchange_key: str) -> list:
     results, _ = load_precomputed_data(cache_key=_get_cache_key())
     if not results:
         return []
+    if exchange_key == "all":
+        return results
     if exchange_key == "sp500":
         return [r for r in results if "sp500" in r.get("_exchanges", [])]
     return [r for r in results if exchange_key in r.get("_exchanges", [])]
@@ -3276,6 +3279,15 @@ def load_tickers(exchange_key: str) -> list:
     Return a deduplicated list of tickers for the chosen exchange.
     Results cached for 24 hours — clear cache if count looks wrong.
     """
+    if exchange_key == "all":
+        seen, unique = set(), []
+        for _ek in ("nyse", "nasdaq"):
+            for t in _fetch_exchange_tickers(_ek):
+                if t not in seen:
+                    seen.add(t)
+                    unique.append(t)
+        return unique
+
     if exchange_key == "sp500":
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -3407,6 +3419,16 @@ with tab_screener:
 
      if "adv_max_price" not in st.session_state:
          st.session_state["adv_max_price"] = int(st.session_state.get("slider_max_price", 500))
+
+     def _sync_adv_exchange():
+         st.session_state["sel_exchange"] = st.session_state["adv_exchange"]
+
+     if "adv_exchange" not in st.session_state:
+         st.session_state["adv_exchange"] = st.session_state.get("sel_exchange", "All Markets")
+
+     st.selectbox("Exchange / Universe", options=list(EXCHANGES.keys()),
+                  key="adv_exchange", on_change=_sync_adv_exchange,
+                  help="All Markets searches every stock in the nightly data at once.")
 
      _a1, _a2 = st.columns([3, 2], vertical_alignment="bottom")
      _a1.number_input("Max price ($)", min_value=1, max_value=5000, step=25,
