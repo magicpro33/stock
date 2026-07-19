@@ -6,15 +6,6 @@
 #   streamlit run app.py
 # -----------------------------------
 
-# ── CRITICAL: disable curl_cffi BEFORE yfinance is imported ──────────
-# curl_cffi 0.15.x has segfault-class memory-corruption bugs (upstream
-# issue #677) that crash the interpreter on Streamlit Cloud with no
-# traceback. Same fix as IGNITION: with this env var set, yfinance uses
-# its officially supported plain-requests fallback and curl_cffi is
-# never even loaded.
-import os
-os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")
-
 import io
 import sys
 import time
@@ -116,14 +107,7 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze, tab_money = st.tabs(["📊 Screener", "🔍 Analyze a Stock", "💸 Sector Money Flow"])
-
-with tab_money:
-    try:
-        from money_flow_tab import render_money_flow_tab
-        render_money_flow_tab()
-    except Exception as _mf_err:
-        st.error(f"Money Flow tab failed to load: {_mf_err}")
+tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
 
 # ───────────────────────────────────────────────────────────────
 # METRIC CONFIG  — name, default weight, full description
@@ -163,6 +147,14 @@ METRICS = {
         "desc":    "Year-over-year earnings (EPS) growth rate. Confirms that revenue growth "
                    "is translating into real profit. Ideally grows faster than revenue, "
                    "indicating improving operating leverage.",
+    },
+    "GrossMargin": {
+        "label":   "Gross Margin (Moat)",
+        "weight":  4,
+        "desc":    "Gross profit ÷ revenue — the moat test. Companies that keep 60%+ of every "
+                   "revenue dollar after direct costs have pricing power competitors can't easily "
+                   "attack (Mastercard ~75%, elite software ~90%). Below 30% = commodity business "
+                   "fighting on price. Score is the raw margin (0.75 = 75%).",
     },
     "Piotroski": {
         "label":   "Piotroski Score",
@@ -294,217 +286,6 @@ METRICS = {
     },
 }
 
-SCREENER_PRESETS = {'Clean Setup': {'icon': '📐',
-                 'key': 'preset_clean_setup',
-                 'desc': 'High-conviction bull patterns from the CleanSetup Pine Script:  trend '
-                         'alignment (price > EMA50 > EMA200), bull flag (p…',
-                 'backtest': '80% win rate  and +24% median excess in the up-market window; '
-                             'positive in the down  window too',
-                 'reset': True,
-                 'settings': {'slider_max_price': 500,
-                              'slider_min_score': 0.0,
-                              'tog_ma50': 'off',
-                              'tog_range': False,
-                              'slider_mfi_period': 14,
-                              'tog_pe_filter': False,
-                              'tog_rev_filter': False,
-                              'tog_CleanSetupScore': True,
-                              'wt_CleanSetupScore': 5.0,
-                              'tog_MACD': True,
-                              'wt_MACD': 4.0,
-                              'tog_RSI': True,
-                              'wt_RSI': 3.0,
-                              'tog_MA50Proximity': True,
-                              'wt_MA50Proximity': 2.0}},
- 'Short Squeeze': {'icon': '🎯',
-                   'key': 'preset_short_squeeze',
-                   'desc': "High short interest + quality filter so you're not long a genuinely "
-                           'broken company.',
-                   'backtest': '+9.9% median excess',
-                   'reset': True,
-                   'settings': {'slider_max_price': 500,
-                                'slider_min_score': 0.0,
-                                'tog_ma50': 'above',
-                                'tog_range': False,
-                                'slider_mfi_period': 14,
-                                'tog_pe_filter': False,
-                                'tog_rev_filter': False,
-                                'tog_ShortSqueeze': True,
-                                'wt_ShortSqueeze': 5.0,
-                                'tog_Piotroski': True,
-                                'wt_Piotroski': 5.0,
-                                'tog_RSI': True,
-                                'wt_RSI': 2.0,
-                                'tog_NoBearDiv': True,
-                                'wt_NoBearDiv': 2.0,
-                                'tog_PCV': True,
-                                'wt_PCV': 2.0,
-                                'tog_EarningsGrowth': True,
-                                'wt_EarningsGrowth': 1.0,
-                                'tog_MACD': True,
-                                'wt_MACD': 1.0}},
- 'Low Price Position': {'icon': '📉',
-                        'key': 'preset_low_price_pos',
-                        'desc': 'Price at range low + accumulation + cheap on cash flow.',
-                        'backtest': '+6.2% median excess',
-                        'reset': True,
-                        'settings': {'slider_max_price': 500,
-                                     'slider_min_score': 0.0,
-                                     'tog_ma50': 'off',
-                                     'tog_range': True,
-                                     'slider_range_days': 30,
-                                     'slider_range_pct': 20.0,
-                                     'slider_mfi_period': 14,
-                                     'tog_pe_filter': False,
-                                     'tog_rev_filter': False,
-                                     'tog_RangePosScore': True,
-                                     'wt_RangePosScore': 5.0,
-                                     'tog_OE_Yield': True,
-                                     'wt_OE_Yield': 5.0,
-                                     'tog_RSI': True,
-                                     'wt_RSI': 5.0,
-                                     'tog_ROIC': True,
-                                     'wt_ROIC': 3.0,
-                                     'tog_NoBearDiv': True,
-                                     'wt_NoBearDiv': 2.0,
-                                     'tog_OBV': True,
-                                     'wt_OBV': 1.0,
-                                     'tog_EarningsGrowth': True,
-                                     'wt_EarningsGrowth': 1.0,
-                                     'tog_GoldenCross': True,
-                                     'wt_GoldenCross': 1.0}},
- 'Magic Volume': {'icon': '⚡',
-                  'key': 'preset_magic_volume',
-                  'desc': 'Volume surge detection with momentum confirmation.',
-                  'backtest': '',
-                  'reset': True,
-                  'settings': {'slider_max_price': 500,
-                               'slider_min_score': 0.0,
-                               'tog_ma50': 'above',
-                               'tog_range': False,
-                               'slider_mfi_period': 14,
-                               'tog_pe_filter': False,
-                               'tog_rev_filter': False,
-                               'tog_OBV': True,
-                               'wt_OBV': 5.0,
-                               'tog_PCV': True,
-                               'wt_PCV': 5.0,
-                               'tog_MACD': True,
-                               'wt_MACD': 5.0,
-                               'tog_Piotroski': True,
-                               'wt_Piotroski': 5.0,
-                               'tog_NoBearDiv': True,
-                               'wt_NoBearDiv': 4.0,
-                               'tog_RSI': True,
-                               'wt_RSI': 3.0,
-                               'tog_MA50Proximity': True,
-                               'wt_MA50Proximity': 3.0,
-                               'tog_MFI': True,
-                               'wt_MFI': 2.0,
-                               'tog_MFISweetSpot': True,
-                               'wt_MFISweetSpot': 1.0,
-                               'tog_GoldenCross': True,
-                               'wt_GoldenCross': 1.0,
-                               'tog_EarningsGrowth': True,
-                               'wt_EarningsGrowth': 1.0,
-                               'tog_OE_Yield': True,
-                               'wt_OE_Yield': 1.0}},
- 'Breakout Setup': {'icon': '🚀',
-                    'key': 'preset_breakout_setup',
-                    'desc': 'Tight coil at range low ready to break resistance (the RAIL/SEZL/PM '
-                            'pattern).',
-                    'backtest': '87% win rate in the up-window; adding OE Yield + ROIC kept it '
-                                'positive in the down-window too',
-                    'reset': True,
-                    'settings': {'slider_max_price': 500,
-                                 'slider_min_score': 0.0,
-                                 'tog_ma50': 'off',
-                                 'tog_range': True,
-                                 'slider_range_days': 30,
-                                 'slider_range_pct': 15.0,
-                                 'slider_mfi_period': 14,
-                                 'tog_pe_filter': False,
-                                 'tog_rev_filter': False,
-                                 'tog_RangePosScore': True,
-                                 'wt_RangePosScore': 5.0,
-                                 'tog_OBV': True,
-                                 'wt_OBV': 5.0,
-                                 'tog_MACD': True,
-                                 'wt_MACD': 5.0,
-                                 'tog_NoBearDiv': True,
-                                 'wt_NoBearDiv': 5.0,
-                                 'tog_OE_Yield': True,
-                                 'wt_OE_Yield': 4.0,
-                                 'tog_ROIC': True,
-                                 'wt_ROIC': 4.0,
-                                 'tog_PCV': True,
-                                 'wt_PCV': 3.0,
-                                 'tog_MA50Proximity': True,
-                                 'wt_MA50Proximity': 3.0,
-                                 'tog_GoldenCross': True,
-                                 'wt_GoldenCross': 3.0,
-                                 'tog_MFISweetSpot': True,
-                                 'wt_MFISweetSpot': 3.0,
-                                 'tog_RSI': True,
-                                 'wt_RSI': 2.0,
-                                 'tog_EarningsGrowth': True,
-                                 'wt_EarningsGrowth': 1.0}},
- 'Insider Buying': {'icon': '🕵️',
-                    'key': 'preset_insider_buying',
-                    'desc': 'Institutional accumulation footprints in quiet ranges.',
-                    'backtest': '+6.6% median excess on independent halves',
-                    'reset': True,
-                    'settings': {'slider_max_price': 500,
-                                 'slider_min_score': 0.0,
-                                 'tog_ma50': 'above',
-                                 'tog_range': False,
-                                 'slider_range_days': 60,
-                                 'slider_range_pct': 15.0,
-                                 'slider_mfi_period': 14,
-                                 'tog_pe_filter': False,
-                                 'tog_rev_filter': False,
-                                 'tog_OBV': True,
-                                 'wt_OBV': 5.0,
-                                 'tog_Piotroski': True,
-                                 'wt_Piotroski': 5.0,
-                                 'tog_MFISweetSpot': True,
-                                 'wt_MFISweetSpot': 4.0,
-                                 'tog_RangePosScore': True,
-                                 'wt_RangePosScore': 3.0,
-                                 'tog_MACD': True,
-                                 'wt_MACD': 3.0,
-                                 'tog_PCV': True,
-                                 'wt_PCV': 2.0,
-                                 'tog_EarningsGrowth': True,
-                                 'wt_EarningsGrowth': 2.0,
-                                 'tog_NoBearDiv': True,
-                                 'wt_NoBearDiv': 2.0,
-                                 'tog_GoldenCross': True,
-                                 'wt_GoldenCross': 2.0,
-                                 'tog_RSI': True,
-                                 'wt_RSI': 1.0}}}
-
-
-def _apply_preset(_pname: str) -> None:
-    """Single source of truth for screener presets — used by the sidebar
-    buttons and the mobile Quick cards. Safe in on_click callbacks."""
-    _p = SCREENER_PRESETS[_pname]
-    if _p["reset"]:
-        for _k in METRICS:
-            st.session_state[f"tog_{_k}"] = False
-            st.session_state[f"wt_{_k}"]  = 0.0
-    for _k, _v in _p["settings"].items():
-        st.session_state[_k] = _v
-    st.session_state["active_preset"] = _pname
-    st.session_state["screener_cache"] = {}
-    st.session_state["_trigger_screener"] = True
-    try:
-        st.toast(f"✅ {_pname} applied — running scan…", icon="🔍")
-    except Exception:
-        pass
-
-
-
 ALL_SECTORS = [
     "All Sectors",
     "Basic Materials",
@@ -555,10 +336,9 @@ def _normalise_sector(raw: str) -> str:
     return _SECTOR_ALIASES.get(raw.strip().lower(), raw.strip())
 
 EXCHANGES = {
-    "All Markets": "all",
-    "S&P 500":     "sp500",
-    "NYSE":        "nyse",
-    "NASDAQ":      "nasdaq",
+    "S&P 500":  "sp500",
+    "NYSE":     "nyse",
+    "NASDAQ":   "nasdaq",
 }
 
 # Keywords used to detect and exclude non-company securities (ETFs, funds, trusts, etc.)
@@ -700,7 +480,7 @@ for _k, _cfg in METRICS.items():
 # RangePosScore off by default — only meaningful when range filter is on
 _defaults["tog_RangePosScore"] = False
 # New technical metrics — off by default so existing users aren't disrupted
-for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore", "CleanSetupScore"]:
+for _k in ["RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity", "ShortSqueeze", "DividendScore", "CleanSetupScore", "GrossMargin"]:
     _defaults[f"tog_{_k}"] = False
     _defaults[f"wt_{_k}"]  = float(METRICS[_k]["weight"])
 
@@ -715,49 +495,282 @@ with st.sidebar:
     st.header("⚙️ Screener Filters")
 
     # ── Clean Setup preset button ─────────────────────────────
-    if st.button("📐 Clean Setup", width="stretch", key="preset_clean_setup",
+    if st.button("📐 Clean Setup", use_container_width=True, key="preset_clean_setup",
                  help="High-conviction bull patterns from the CleanSetup Pine Script: "
                       "trend alignment (price > EMA50 > EMA200), bull flag (pole 5-20%, "
                       "pullback <5%), higher-low pivot sequence, RSI 40-60, volume confirmation, "
                       "liquidity gate ($5+ / 250k avg vol). Backtested top pick: 80% win rate "
                       "and +24% median excess in the up-market window; positive in the down "
                       "window too. The strongest preset in the suite."):
-        _apply_preset("Clean Setup")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # CleanSetupScore ×5 — the pattern engine itself (trend + flag + higher-low + RSI band + volume)
+        st.session_state["tog_CleanSetupScore"] = True
+        st.session_state["wt_CleanSetupScore"]  = 5.0
+
+        # MACD ×4 — backtest demanded momentum confirmation on top of the pattern
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 4.0
+
+        # RSI ×3 — rewards momentum building within the pattern's 40-60 band
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 3.0
+
+        # MA50Proximity ×2 — entries near the MA50 have the tightest stops
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 2.0
+
+        st.rerun()
+
+    # ── Felix preset button ─────────────────────────────
+    if st.button("🎩 Felix", use_container_width=True, key="preset_felix",
+                 help="The investment-banker quality checklist — five tests every serious "
+                      "business gets run through: (1) Return on capital: does every dollar "
+                      "invested earn real profit (ROIC 15%+)? (2) Moat: gross margin 60%+ = "
+                      "pricing power competitors can't attack. (3) Cash: real owner earnings, "
+                      "not just revenue. (4) Stability: Piotroski health score — can it survive "
+                      "a bad year? (5) Sane price: P/E capped at 50 — pay for a business, not "
+                      "a story. Only ~3% of all US stocks pass all five."):
+        st.session_state["slider_max_price"]   = 1000   # quality is worth paying for per share
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"  # quality test ignores price position
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        # Test 5 — sane price: hard P/E gate (0-50). Story stocks at 400x get filtered out.
+        st.session_state["tog_pe_filter"]      = True
+        st.session_state["slider_pe_range"]    = (0, 50)
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        # Test 1 — Return on capital ×5: THE profitability test.
+        # 26% ROIC (Nvidia) = every invested dollar returns 26c/yr. Negative = value destruction.
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 5.0
+
+        # Test 2 — Moat ×5: gross margin. 60%+ = toll-booth pricing power (Mastercard 75%).
+        # Low-margin businesses fight on price and get competed away.
+        st.session_state["tog_GrossMargin"] = True
+        st.session_state["wt_GrossMargin"]  = 5.0
+
+        # Test 3 — Cash ×4: owner-earnings yield. Real money in the door relative to what
+        # you pay for the business — revenue is vanity, cash is sanity.
+        st.session_state["tog_OE_Yield"] = True
+        st.session_state["wt_OE_Yield"]  = 4.0
+
+        # Test 4 — Stability ×4: Piotroski health score — leverage falling, liquidity
+        # improving, cash flow exceeding paper earnings. Can it take a punch?
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 4.0
+
+        # Moat durability ×2: ROIC trend — a real moat keeps returns from eroding.
+        st.session_state["tog_ROIC_Trend"] = True
+        st.session_state["wt_ROIC_Trend"]  = 2.0
+
+        # The business should still be growing — light weights, quality comes first.
+        st.session_state["tog_RevenueGrowth"] = True
+        st.session_state["wt_RevenueGrowth"]  = 1.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
 
         st.rerun()
 
     # ── Short Squeeze preset button ─────────────────────────────
-    if st.button("🎯 Short Squeeze", width="stretch", key="preset_short_squeeze",
+    if st.button("🎯 Short Squeeze", use_container_width=True, key="preset_short_squeeze",
                  help="High short interest + quality filter so you're not long a genuinely broken company. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Raw short-interest chasing lost money; adding Piotroski + above-MA50 flipped it to +9.9% median excess."):
-        _apply_preset("Short Squeeze")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        st.session_state["tog_ShortSqueeze"] = True
+        st.session_state["wt_ShortSqueeze"]  = 5.0
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 5.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 2.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+        st.session_state["tog_PCV"] = True
+        st.session_state["wt_PCV"]  = 2.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 1.0
 
         st.rerun()
 
     # ── Low Price Position preset button ─────────────────────────────
-    if st.button("📉 Low Price Position", width="stretch", key="preset_low_price_pos",
+    if st.button("📉 Low Price Position", use_container_width=True, key="preset_low_price_pos",
                  help="Price at range low + accumulation + cheap on cash flow. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Range low alone is NEGATIVE alpha — pairing it with OE Yield and ROIC made it +6.2% median excess."):
-        _apply_preset("Low Price Position")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 20.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+        st.session_state["tog_OE_Yield"] = True
+        st.session_state["wt_OE_Yield"]  = 5.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 5.0
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 3.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+        st.session_state["tog_OBV"] = True
+        st.session_state["wt_OBV"]  = 1.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
 
         st.rerun()
 
     # ── Magic Volume preset button ─────────────────────────────
-    if st.button("⚡ Magic Volume", width="stretch", key="preset_magic_volume",
+    if st.button("⚡ Magic Volume", use_container_width=True, key="preset_magic_volume",
                  help="Volume surge detection with momentum confirmation. Backtested on 5,150 stocks across two 60-day market regimes (up + down). MA50 filter removed and MACD raised to ×5 — turned -8.0% excess into +4.8%."):
-        _apply_preset("Magic Volume")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        st.session_state["tog_OBV"] = True
+        st.session_state["wt_OBV"]  = 5.0
+        st.session_state["tog_PCV"] = True
+        st.session_state["wt_PCV"]  = 5.0
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 5.0
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 5.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 4.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 3.0
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 3.0
+        st.session_state["tog_MFI"] = True
+        st.session_state["wt_MFI"]  = 2.0
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 1.0
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 1.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
+        st.session_state["tog_OE_Yield"] = True
+        st.session_state["wt_OE_Yield"]  = 1.0
 
         st.rerun()
 
     # ── Breakout Setup preset button ─────────────────────────────
-    if st.button("🚀 Breakout Setup", width="stretch", key="preset_breakout_setup",
+    if st.button("🚀 Breakout Setup", use_container_width=True, key="preset_breakout_setup",
                  help="Tight coil at range low ready to break resistance (the RAIL/SEZL/PM pattern). Backtested on 5,150 stocks across two 60-day market regimes (up + down). 87% win rate in the up-window; adding OE Yield + ROIC kept it positive in the down-window too."):
-        _apply_preset("Breakout Setup")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "off"
+        st.session_state["tog_range"]          = True
+        st.session_state["slider_range_days"]  = 30
+        st.session_state["slider_range_pct"]   = 15.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 5.0
+        st.session_state["tog_OBV"] = True
+        st.session_state["wt_OBV"]  = 5.0
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 5.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 5.0
+        st.session_state["tog_OE_Yield"] = True
+        st.session_state["wt_OE_Yield"]  = 4.0
+        st.session_state["tog_ROIC"] = True
+        st.session_state["wt_ROIC"]  = 4.0
+        st.session_state["tog_PCV"] = True
+        st.session_state["wt_PCV"]  = 3.0
+        st.session_state["tog_MA50Proximity"] = True
+        st.session_state["wt_MA50Proximity"]  = 3.0
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 3.0
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 3.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 2.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 1.0
 
         st.rerun()
 
     # ── Insider Buying preset button ─────────────────────────────
-    if st.button("🕵️ Insider Buying", width="stretch", key="preset_insider_buying",
+    if st.button("🕵️ Insider Buying", use_container_width=True, key="preset_insider_buying",
                  help="Institutional accumulation footprints in quiet ranges. Backtested on 5,150 stocks across two 60-day market regimes (up + down). Split-half validated: +4.5% and +6.6% median excess on independent halves."):
-        _apply_preset("Insider Buying")
+        st.session_state["slider_max_price"]   = 500
+        st.session_state["slider_min_score"]   = 0.0
+        st.session_state["tog_ma50"]           = "above"
+        st.session_state["tog_range"]          = False
+        st.session_state["slider_range_days"]  = 60
+        st.session_state["slider_range_pct"]   = 15.0
+        st.session_state["slider_mfi_period"]  = 14
+        st.session_state["tog_pe_filter"]      = False
+        st.session_state["tog_rev_filter"]     = False
+        for _k in METRICS:
+            st.session_state[f"tog_{_k}"] = False
+            st.session_state[f"wt_{_k}"]  = 0.0
+
+        st.session_state["tog_OBV"] = True
+        st.session_state["wt_OBV"]  = 5.0
+        st.session_state["tog_Piotroski"] = True
+        st.session_state["wt_Piotroski"]  = 5.0
+        st.session_state["tog_MFISweetSpot"] = True
+        st.session_state["wt_MFISweetSpot"]  = 4.0
+        st.session_state["tog_RangePosScore"] = True
+        st.session_state["wt_RangePosScore"]  = 3.0
+        st.session_state["tog_MACD"] = True
+        st.session_state["wt_MACD"]  = 3.0
+        st.session_state["tog_PCV"] = True
+        st.session_state["wt_PCV"]  = 2.0
+        st.session_state["tog_EarningsGrowth"] = True
+        st.session_state["wt_EarningsGrowth"]  = 2.0
+        st.session_state["tog_NoBearDiv"] = True
+        st.session_state["wt_NoBearDiv"]  = 2.0
+        st.session_state["tog_GoldenCross"] = True
+        st.session_state["wt_GoldenCross"]  = 2.0
+        st.session_state["tog_RSI"] = True
+        st.session_state["wt_RSI"]  = 1.0
 
         st.rerun()
 
@@ -768,7 +781,7 @@ with st.sidebar:
         options=list(EXCHANGES.keys()),
         index=0,
         key="sel_exchange",
-        help="All Markets = every stock in the nightly data (default). S&P 500 = ~500 stocks. NYSE/NASDAQ = 2,000–3,500 stocks. Live scans on large universes take 30–60+ min."
+        help="S&P 500 = ~500 stocks (fast). NYSE/NASDAQ = 2,000–3,500 stocks (slow, 30–60+ min)."
     )
 
     sector = st.selectbox(
@@ -887,7 +900,7 @@ with st.sidebar:
 
     # ── Fundamental metrics ──────────────────────────────────────
     st.markdown("**Fundamental**")
-    for key in ["OE_Yield", "ROIC", "ROIC_Trend", "RevenueGrowth", "EarningsGrowth", "Piotroski"]:
+    for key in ["OE_Yield", "ROIC", "ROIC_Trend", "GrossMargin", "RevenueGrowth", "EarningsGrowth", "Piotroski"]:
         cfg = METRICS[key]
         col_a, col_b = st.columns([1, 2])
         with col_a:
@@ -1015,7 +1028,7 @@ with st.sidebar:
     st.markdown("**📡 yfinance Connection**")
 
     # ── Live health check ─────────────────────────────────────────
-    _do_check = st.button("🔍 Check Connection", width="stretch", key="check_conn_btn",
+    _do_check = st.button("🔍 Check Connection", use_container_width=True, key="check_conn_btn",
                           help="Test the yfinance data connection before scanning.")
     if _do_check or st.session_state.get("_yf_health"):
         if _do_check:
@@ -1052,13 +1065,13 @@ with st.sidebar:
         # ── Fix buttons ───────────────────────────────────────────
         if _fix == "wait":
             st.caption("⏳ **Fix:** Wait 30–60 seconds for the rate limit to reset, then scan again.")
-            if st.button("⏱️ Wait 30s then Re-check", width="stretch",
+            if st.button("⏱️ Wait 30s then Re-check", use_container_width=True,
                          key="fix_wait_btn"):
                 import time as _t; _t.sleep(30)
                 _health = check_yfinance_health()
                 st.session_state["_yf_health"] = _health
                 st.rerun()
-            if st.button("⬇️ Reduce Workers to 3", width="stretch",
+            if st.button("⬇️ Reduce Workers to 3", use_container_width=True,
                          key="fix_reduce_btn"):
                 st.session_state["max_workers_val"] = 3
                 st.session_state.pop("_yf_health", None)
@@ -1070,24 +1083,24 @@ with st.sidebar:
 
         elif _fix == "timeout":
             st.caption("🔄 **Fix:** Retry — transient timeout, server may be temporarily overloaded.")
-            if st.button("🔄 Re-check Connection", width="stretch",
+            if st.button("🔄 Re-check Connection", use_container_width=True,
                          key="fix_timeout_btn"):
                 st.session_state.pop("_yf_health", None)
                 st.rerun()
 
         elif _fix == "sp500":
             st.caption("🔄 **Fix:** Switch to S&P 500 (smaller universe), or wait for network to recover.")
-            if st.button("📊 Switch to S&P 500", width="stretch",
+            if st.button("📊 Switch to S&P 500", use_container_width=True,
                          key="fix_sp500_btn"):
                 st.session_state.pop("_yf_health", None)
                 st.rerun()
 
-        if st.button("✕ Clear Status", width="stretch", key="clear_health_btn"):
+        if st.button("✕ Clear Status", use_container_width=True, key="clear_health_btn"):
             st.session_state.pop("_yf_health", None)
             st.rerun()
 
     st.divider()
-    run_btn = st.button("🚀 Run Screener", width="stretch", type="primary", key="run_screener_btn")
+    run_btn = st.button("🚀 Run Screener", use_container_width=True, type="primary", key="run_screener_btn")
 
     # ── Cache status panel ────────────────────────────────────────
     st.divider()
@@ -1117,7 +1130,7 @@ with st.sidebar:
             st.caption(f"🕐 Last scan: {_sc['scanned_at']}  ·  "
                        f"Cache clears automatically when you close the browser tab.")
 
-        if st.button("🗑️ Clear All Cache", width="stretch", key="clear_all_cache_btn"):
+        if st.button("🗑️ Clear All Cache", use_container_width=True, key="clear_all_cache_btn"):
             _clear_all_cache()
             st.success("All cache cleared.")
             st.rerun()
@@ -1238,8 +1251,6 @@ def get_precomputed_for_exchange(exchange_key: str) -> list:
     results, _ = load_precomputed_data(cache_key=_get_cache_key())
     if not results:
         return []
-    if exchange_key == "all":
-        return results
     if exchange_key == "sp500":
         return [r for r in results if "sp500" in r.get("_exchanges", [])]
     return [r for r in results if exchange_key in r.get("_exchanges", [])]
@@ -1627,6 +1638,95 @@ def get_owner_earnings(cf, fin, info):
         return None, None
 
 
+def _get_fin_value(fin, *labels):
+    for label in labels:
+        if label in fin.index:
+            return fin.loc[label]
+    return None
+
+
+def _get_bal_value(bal, *labels):
+    for label in labels:
+        if label in bal.index:
+            return bal.loc[label]
+    return None
+
+
+def get_volume_signals(hist: pd.DataFrame, mfi_period: int) -> dict:
+    default = {"OBV": 0.0, "MFI": 0.0, "PCV": 0.0}
+    try:
+        if hist.empty or len(hist) < 10:
+            return default
+        close, high, low, vol = hist["Close"], hist["High"], hist["Low"], hist["Volume"]
+        mask = vol > 0
+        close, high, low, vol = close[mask], high[mask], low[mask], vol[mask]
+        if len(close) < 10:
+            return default
+
+        # OBV
+        direction = np.sign(close.diff().fillna(0))
+        obv       = (direction * vol).cumsum()
+        obv_win   = min(20, len(obv))
+        obv_slope = np.polyfit(range(obv_win), obv.iloc[-obv_win:].values, 1)[0]
+        obv_score = 1.0 if obv_slope > 0 else 0.0
+
+        # MFI
+        eff  = min(mfi_period, max(5, len(close) // 2))
+        tp   = (high + low + close) / 3
+        rmf  = tp * vol
+        tpd  = tp.diff()
+        pos  = rmf.where(tpd > 0, 0).rolling(eff).sum()
+        neg  = rmf.where(tpd < 0, 0).rolling(eff).sum()
+        ap   = neg == 0
+        mfr  = pos / neg.replace(0, np.nan)
+        mfi  = 100 - (100 / (1 + mfr))
+        mfi  = mfi.where(~(ap & (pos > 0)), 100.0)
+        mfi_val = None
+        for i in range(1, 6):
+            c = mfi.iloc[-i]
+            if pd.notnull(c):
+                mfi_val = float(c)
+                break
+        mfi_score = round(mfi_val / 100.0, 4) if mfi_val is not None else 0.0
+
+        # PCV
+        pcv_win = min(20, len(close))
+        rec     = pd.DataFrame({"Close": close, "Volume": vol}).iloc[-pcv_win:]
+        up      = rec["Close"] > rec["Close"].shift(1)
+        up_vol  = rec.loc[up, "Volume"].sum()
+        tot_vol = rec["Volume"].sum()
+        pcv     = max(0.0, (up_vol / tot_vol - 0.5) / 0.5) if tot_vol > 0 else 0.0
+
+        return {"OBV": round(obv_score, 4), "MFI": round(mfi_score, 4), "PCV": round(pcv, 4)}
+    except Exception:
+        return default
+
+
+
+def calculate_gross_margin(fin) -> float | None:
+    """
+    Gross margin = Gross Profit / Total Revenue, with label fallbacks.
+    Falls back to (Revenue - Cost of Revenue) / Revenue when Gross Profit
+    isn't reported. Returns a 0-1 ratio (0.75 = 75%) or None.
+    """
+    try:
+        rev = _get_fin_value(fin, "Total Revenue", "TotalRevenue", "Operating Revenue")
+        if rev is None or not len(rev) or not rev.iloc[0]:
+            return None
+        gp = _get_fin_value(fin, "Gross Profit", "GrossProfit")
+        if gp is not None and len(gp) and pd.notna(gp.iloc[0]):
+            m = gp.iloc[0] / rev.iloc[0]
+        else:
+            cogs = _get_fin_value(fin, "Cost Of Revenue", "CostOfRevenue",
+                                  "Reconciled Cost Of Revenue")
+            if cogs is None or not len(cogs) or pd.isna(cogs.iloc[0]):
+                return None
+            m = (rev.iloc[0] - cogs.iloc[0]) / rev.iloc[0]
+        return round(float(m), 4) if -1 < m < 1.5 else None
+    except Exception:
+        return None
+
+
 def calculate_roic(fin, bal):
     """Accepts pre-fetched financials/balance DataFrames — no extra API calls."""
     try:
@@ -1910,30 +2010,6 @@ def calculate_short_squeeze(info: dict) -> dict:
 
 
 
-
-def _coerce_numeric_info(info: dict) -> dict:
-    """Fallback data sources can return numbers as strings; float format codes
-    like :,.2f then crash. Convert numeric-looking strings to floats, leave
-    genuine text fields alone."""
-    _TEXT_KEYS = {
-        "longName", "shortName", "sector", "industry", "symbol", "currency",
-        "exchange", "fullExchangeName", "longBusinessSummary", "website",
-        "dividendFrequency", "recommendationKey", "quoteType",
-        "financialCurrency", "city", "state", "country", "phone", "address1",
-    }
-    out = {}
-    for k, v in (info or {}).items():
-        if isinstance(v, str) and k not in _TEXT_KEYS:
-            s = v.replace(",", "").replace("%", "").replace("$", "").strip()
-            try:
-                out[k] = float(s)
-                continue
-            except ValueError:
-                pass
-        out[k] = v
-    return out
-
-
 def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                            raw, sticker, selected, fetched_at,
                            range_days=30, mfi_period=14, key_prefix="analyze"):
@@ -1942,7 +2018,6 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
     Called from both the analyze tab and the inline screener panel.
     """
     try:
-        info = _coerce_numeric_info(info)
 
         name    = info.get("longName") or info.get("shortName") or sticker
         price   = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -2424,7 +2499,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 else:          st.error(f"📉 Wide Range ({rp:.1f}%) — volatile")
             cdf = hist_1y["Close"].iloc[-range_days:].to_frame()
             cdf["High"] = rh; cdf["Low"] = rl
-            st.line_chart(cdf, width="stretch")
+            st.line_chart(cdf, use_container_width=True)
         else:
             st.warning("Not enough price history to calculate range.")
 
@@ -2528,7 +2603,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 fd = fin_stmt.T.copy()
                 fd.index = [str(i)[:10] for i in fd.index]
                 for c in fd.columns: fd[c] = fd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(fd, width="stretch")
+                st.dataframe(fd, use_container_width=True)
             else:
                 st.info("Income statement not available.")
             i1,i2,i3,i4 = st.columns(4)
@@ -2556,7 +2631,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 bd = bal_stmt.T.copy()
                 bd.index = [str(i)[:10] for i in bd.index]
                 for c in bd.columns: bd[c] = bd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(bd, width="stretch")
+                st.dataframe(bd, use_container_width=True)
             else:
                 st.info("Balance sheet not available.")
             b1,b2,b3,b4 = st.columns(4)
@@ -2584,7 +2659,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 cd = cf_stmt.T.copy()
                 cd.index = [str(i)[:10] for i in cd.index]
                 for c in cd.columns: cd[c] = cd[c].apply(lambda x: _fb(x) if pd.notnull(x) else "N/A")
-                st.dataframe(cd, width="stretch")
+                st.dataframe(cd, use_container_width=True)
             else:
                 st.info("Cash flow not available.")
             cf1,cf2,cf3,cf4 = st.columns(4)
@@ -2770,7 +2845,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 ha = hd.copy()
                 ha["HA_Close"] = (hd["Open"] + hd["High"] + hd["Low"] + hd["Close"]) / 4
                 ha["HA_Open"]  = ((hd["Open"] + hd["Close"]) / 2).shift(1)
-                ha.loc[ha.index[0], "HA_Open"] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
+                ha["HA_Open"].iloc[0] = (hd["Open"].iloc[0] + hd["Close"].iloc[0]) / 2
                 ha["HA_High"]  = pd.concat([hd["High"], ha["HA_Open"], ha["HA_Close"]], axis=1).max(axis=1)
                 ha["HA_Low"]   = pd.concat([hd["Low"],  ha["HA_Open"], ha["HA_Close"]], axis=1).min(axis=1)
 
@@ -2912,7 +2987,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 fig.update_yaxes(title_text="Price ($)", row=1, col=1,
                                  title_font=dict(size=10), tickfont=dict(size=9))
 
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, use_container_width=True)
 
                 # ── Period stats ──────────────────────────
                 s1, s2, s3, s4 = st.columns(4)
@@ -2925,7 +3000,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 st.info("No price history available.")
 
     except Exception as _render_err:
-        import traceback as _tb; print("render_stock_analysis failed:\n" + _tb.format_exc(), flush=True); st.error(f"Error rendering analysis: {_render_err}")
+        st.error(f"Error rendering analysis: {_render_err}")
 
 
 def process_ticker(args):
@@ -3023,6 +3098,7 @@ def process_ticker(args):
         short_data     = calculate_short_squeeze(info)
         div_data       = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
         clean_setup    = calculate_clean_setup(hist)
+        gross_margin   = calculate_gross_margin(fin)
         ma50           = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                           if len(hist) >= 50 else None)
         owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -3084,6 +3160,7 @@ def process_ticker(args):
             "DividendFrequency": div_data["DividendFrequency"],
             "DividendScore":     div_data["DividendScore"],
             "CleanSetupScore":   clean_setup,
+            "GrossMargin":       gross_margin,
             "_hist":          hist_cache,
         }
 
@@ -3279,15 +3356,6 @@ def load_tickers(exchange_key: str) -> list:
     Return a deduplicated list of tickers for the chosen exchange.
     Results cached for 24 hours — clear cache if count looks wrong.
     """
-    if exchange_key == "all":
-        seen, unique = set(), []
-        for _ek in ("nyse", "nasdaq"):
-            for t in _fetch_exchange_tickers(_ek):
-                if t not in seen:
-                    seen.add(t)
-                    unique.append(t)
-        return unique
-
     if exchange_key == "sp500":
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -3381,74 +3449,6 @@ def color_score(val):
 # ───────────────────────────────────────────────────────────────
 
 with tab_screener:
- # ═══ Quick / Advanced filter modes (mobile-first — sidebar hides on phones) ═══
- try:
-     _fmode = st.segmented_control(
-         "Filter mode", ["⚡ Quick presets", "🎛 Advanced"],
-         key="scr_filter_mode", default="⚡ Quick presets",
-         label_visibility="collapsed",
-     )
- except Exception:
-     _fmode = st.radio("Filter mode", ["⚡ Quick presets", "🎛 Advanced"],
-                       horizontal=True, key="scr_filter_mode_radio",
-                       label_visibility="collapsed")
-
- _active = st.session_state.get("active_preset")
-
- if (_fmode or "").startswith("⚡"):
-     _names = list(SCREENER_PRESETS)
-     for _i in range(0, len(_names), 2):
-         _cols = st.columns(2)
-         for _c, _nm in zip(_cols, _names[_i:_i + 2]):
-             _p = SCREENER_PRESETS[_nm]
-             with _c, st.container(border=True):
-                 _badge = " · ✅ active" if _nm == _active else ""
-                 st.markdown(f"**{_p['icon']} {_nm}**{_badge}")
-                 st.caption(_p["desc"] or "Custom signal blend.")
-                 if _p.get("backtest"):
-                     st.caption(f"📊 {_p['backtest']}")
-                 st.button(
-                     "Use preset", key=f"card_{_p['key']}",
-                     width="stretch",
-                     type="primary" if _nm == _active else "secondary",
-                     on_click=_apply_preset, args=(_nm,),
-                 )
- else:
-     def _sync_adv_price():
-         st.session_state["slider_max_price"] = st.session_state["adv_max_price"]
-
-     if "adv_max_price" not in st.session_state:
-         st.session_state["adv_max_price"] = int(st.session_state.get("slider_max_price", 500))
-
-     def _sync_adv_exchange():
-         st.session_state["sel_exchange"] = st.session_state["adv_exchange"]
-
-     if "adv_exchange" not in st.session_state:
-         st.session_state["adv_exchange"] = st.session_state.get("sel_exchange", "All Markets")
-
-     st.selectbox("Exchange / Universe", options=list(EXCHANGES.keys()),
-                  key="adv_exchange", on_change=_sync_adv_exchange,
-                  help="All Markets searches every stock in the nightly data at once.")
-
-     _a1, _a2 = st.columns([3, 2], vertical_alignment="bottom")
-     _a1.number_input("Max price ($)", min_value=1, max_value=5000, step=25,
-                      key="adv_max_price", on_change=_sync_adv_price)
-     if _a2.button("🔍 Run scan", key="adv_run_scan", type="primary",
-                   width="stretch"):
-         st.session_state.pop("screener_cache", None)
-         st.session_state["_trigger_screener"] = True
-         try:
-             st.toast("🔍 Rescanning with current filters…")
-         except Exception:
-             pass
-         st.rerun()
-     if _active:
-         st.caption(f"Base preset: **{_active}** — tweak away, changes apply on top.")
-     st.caption("Signal weights, MA50 gate, range and growth filters live in the "
-                "sidebar — tap the **»** icon (top-left) to open it on mobile.")
-
- st.divider()
-
 
  # ── Nightly data status banner (always visible) ───────────────
  _ck = _get_cache_key()
@@ -3477,7 +3477,7 @@ with tab_screener:
             "Until then the screener will do a live scan."
         )
 
- if run_btn or st.session_state.pop("_trigger_screener", False):
+ if run_btn:
     active_metrics = [k for k, v in metric_enabled.items() if v]
 
     exchange_key  = EXCHANGES[exchange]
@@ -3747,7 +3747,7 @@ with tab_screener:
                   "ShortSqueeze", "ShortPctFloat", "ShortPctFloatRaw",
                   "DaysToCover", "ShortChange",
                   "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore",
-                  "CleanSetupScore"]
+                  "CleanSetupScore", "GrossMargin"]
     for _c in _zero_cols:
         if _c not in df.columns:
             df[_c] = 0.0
@@ -3765,7 +3765,7 @@ with tab_screener:
                     "RSI", "MACD", "GoldenCross", "MFISweetSpot", "NoBearDiv", "MA50Proximity",
                     "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
                     "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendScore",
-                    "CleanSetupScore"]
+                    "CleanSetupScore", "GrossMargin"]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -3928,7 +3928,7 @@ with tab_screener:
                 ["Ticker", "Price", "MA50", "Score"] +
                 [k for k in active_metrics if k in df.columns][:4]
             ].copy()
-            st.dataframe(_sample, width="stretch")
+            st.dataframe(_sample, use_container_width=True)
 
             st.markdown("**Current filter settings:**")
             st.json({
@@ -4011,7 +4011,7 @@ with tab_screener:
         ALWAYS_HIDDEN = {"ROIC", "OBV", "PCV", "RSI", "MACD", "GoldenCross", "MFI", "MFISweetSpot", "NoBearDiv",
                          "ShortPctFloat", "ShortPctFloatRaw", "DaysToCover", "ShortChange", "ShortSqueeze",
                          "DividendYieldPct", "DividendRate", "DividendPayoutRatio", "DividendFrequency", "DividendScore",
-                         "CleanSetupScore"}
+                         "CleanSetupScore", "GrossMargin"}
 
         # Hide columns for metrics that are toggled off
         all_metric_keys = list(METRICS.keys())
@@ -4066,7 +4066,7 @@ with tab_screener:
         with _btn_cols[_bi % len(_btn_cols)]:
             _is_sel = st.session_state.get("_inline_ticker") == _tk
             if st.button(_tk, key=f"tk2_{_tk}_{_bi}",
-                         width="stretch",
+                         use_container_width=True,
                          type="primary" if _is_sel else "secondary"):
                 st.session_state["_inline_ticker"] = _tk
 
@@ -4093,14 +4093,14 @@ with tab_screener:
         _styled2 = _saved_display.style.map(color_score, subset=["Score"])
         st.dataframe(
             _styled2,
-            width="stretch",
+            use_container_width=True,
             height=600,
             column_order=_col_order,
         )
     except Exception:
         st.dataframe(
             _saved_display,
-            width="stretch",
+            use_container_width=True,
             height=600,
             column_order=_col_order,
         )
@@ -4113,7 +4113,7 @@ with tab_screener:
         data=_excel2,
         file_name=f"stock_screener_{datetime.today().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width="stretch",
+        use_container_width=True,
         key="dl_btn2",
     )
 
@@ -4210,20 +4210,6 @@ with tab_screener:
                 "fetched_at": _il_fetched_at,
             }
 
-    # ── field-level completion: Alpaca -> yfinance -> nightly dump ──
-    _il_row, _il_sources, _il_missing = None, {}, []
-    try:
-        from data_chain import complete_info_hist, patch_raw_from_dump
-        try:
-            _nr_a, _ = load_precomputed_data(cache_key=_get_cache_key())
-            _il_row = next((r for r in (_nr_a or []) if r.get("Ticker") == _inline_tk), None)
-        except Exception:
-            _il_row = None
-        _il_info, _il_hist, _il_sources, _il_missing = complete_info_hist(
-            _inline_tk, _il_info, _il_hist, _il_row)
-    except Exception:
-        pass
-
     if _il_info or not _il_hist.empty:
         # Compute raw metrics from live data
         _il_mfi_p = st.session_state.get("slider_mfi_period", 14)
@@ -4254,10 +4240,6 @@ with tab_screener:
                 "ShortChange":      _il_short["ShortChange"],
                 "ShortSqueeze":     _il_short["ShortSqueeze"],
             }
-            try:
-                _il_raw = patch_raw_from_dump(_il_raw, _il_row)
-            except Exception:
-                pass
         except Exception:
             _il_raw = {}
 
@@ -4307,7 +4289,7 @@ with tab_analyze:
             label_visibility="collapsed",
         ).strip().upper()
     with btn_col:
-        analyze_btn = st.button("🔬 Analyze", type="primary", width="stretch", key="analyze_btn")
+        analyze_btn = st.button("🔬 Analyze", type="primary", use_container_width=True, key="analyze_btn")
 
     # ── Collapsible metrics selector ─────────────────────────────
     with st.expander("⚙️ Select Metrics", expanded=False):
@@ -4332,13 +4314,13 @@ with tab_analyze:
                 # Use a button that spans full width — no nested columns
                 _btn_label = f"{'▶ ' if _is_active else ''}{_h['ticker']}  ·  {_h['name'][:35]}{'…' if len(_h['name'])>35 else ''}"
                 if st.button(_btn_label, key=f"hist_btn_{_h['ticker']}",
-                             width="stretch",
+                             use_container_width=True,
                              help=f"Re-analyze {_h['ticker']}",
                              type="primary" if _is_active else "secondary"):
                     st.session_state["_pending_ticker"] = _h["ticker"]
                     st.session_state["_rerun_ticker"]   = _h["ticker"]
                     st.rerun()
-            if st.button("🗑️ Clear History", width="stretch", key="clear_hist_btn"):
+            if st.button("🗑️ Clear History", use_container_width=True, key="clear_hist_btn"):
                 st.session_state["analyze_history"] = []
                 st.rerun()
 
@@ -4543,18 +4525,6 @@ with tab_analyze:
                 else:
                     _cf = _fc.get("cf")
 
-                # ── field-level completion: Alpaca -> yfinance -> nightly dump ──
-                _b_sources, _b_missing = {}, []
-                try:
-                    from data_chain import complete_info_hist, patch_raw_from_dump
-                    _info, _h2, _b_sources, _b_missing = complete_info_hist(
-                        ticker_input, _info, _fc.get("hist", pd.DataFrame()), _cached_row)
-                    _fc["hist"] = _h2
-                    _hist = _h2
-                    _fc["info"] = _info
-                except Exception:
-                    pass
-
                 # ── metrics — always computed from live fetched data ────
                 # Never use nightly cached scores here — recalculate from
                 # the fresh financials and history just fetched above.
@@ -4591,10 +4561,6 @@ with tab_analyze:
                     }
                 except Exception:
                     _raw = {}
-                try:
-                    _raw = patch_raw_from_dump(_raw, _cached_row)
-                except Exception:
-                    pass
                 _fc["raw"] = _raw
 
         # Persist to session store (fallback only — next analyze click re-fetches)
@@ -4615,8 +4581,6 @@ with tab_analyze:
         }
         st.session_state["analyze_data"] = {
             "ticker":      ticker_input,
-            "sources":     _b_sources,
-            "missing":     _b_missing,
             "info":        _info,
             "hist":        _hist,
             "fin":         _fin,
@@ -4647,14 +4611,6 @@ with tab_analyze:
         st.info("Enter a ticker above and click **🔬 Analyze** to get started. Works on any publicly traded stock — S&P 500, NYSE, NASDAQ, or international.")
     else:
         _d  = st.session_state["analyze_data"]
-        if _d.get("sources"):
-            try:
-                from data_chain import sources_caption, status_report
-                st.caption(sources_caption(_d["sources"], _d.get("missing", [])))
-                with st.expander("🔑 Data source status", expanded=bool(_d.get("missing"))):
-                    st.markdown(status_report(_d["sources"], _d.get("missing", [])))
-            except Exception:
-                pass
         _sel = [k for k, v in _d.get("metrics_sel", {}).items() if v]
         render_stock_analysis(
             info       = _d.get("info", {}),
