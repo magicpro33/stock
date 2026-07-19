@@ -577,6 +577,30 @@ def get_owner_earnings(cf, fin, info):
         return None, None
 
 
+def calculate_gross_margin(fin) -> float | None:
+    """
+    Gross margin = Gross Profit / Total Revenue, with label fallbacks.
+    Falls back to (Revenue - Cost of Revenue) / Revenue when Gross Profit
+    isn't reported. Returns a 0-1 ratio (0.75 = 75%) or None.
+    """
+    try:
+        rev = _get_fin_value(fin, "Total Revenue", "TotalRevenue", "Operating Revenue")
+        if rev is None or not len(rev) or not rev.iloc[0]:
+            return None
+        gp = _get_fin_value(fin, "Gross Profit", "GrossProfit")
+        if gp is not None and len(gp) and pd.notna(gp.iloc[0]):
+            m = gp.iloc[0] / rev.iloc[0]
+        else:
+            cogs = _get_fin_value(fin, "Cost Of Revenue", "CostOfRevenue",
+                                  "Reconciled Cost Of Revenue")
+            if cogs is None or not len(cogs) or pd.isna(cogs.iloc[0]):
+                return None
+            m = (rev.iloc[0] - cogs.iloc[0]) / rev.iloc[0]
+        return round(float(m), 4) if -1 < m < 1.5 else None
+    except Exception:
+        return None
+
+
 def calculate_roic(fin, bal):
     try:
         ebit_s = _get_fin_value(fin, "EBIT","Ebit","Operating Income","OperatingIncome","EBITDA","Ebitda")
@@ -903,6 +927,7 @@ def process_ticker(args):
             short_data   = calculate_short_squeeze(info)
             div_data     = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
             clean_setup  = calculate_clean_setup(hist)
+            gross_margin = calculate_gross_margin(fin)
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                             if len(hist) >= 50 else None)
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
@@ -956,6 +981,7 @@ def process_ticker(args):
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
                 "CleanSetupScore":     clean_setup,
+                "GrossMargin":         gross_margin,
                 "ExDividendDate":      info.get("exDividendDate"),
                 "_hist":          hist_cache,
                 "_exchange":      "",
