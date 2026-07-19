@@ -336,9 +336,10 @@ def _normalise_sector(raw: str) -> str:
     return _SECTOR_ALIASES.get(raw.strip().lower(), raw.strip())
 
 EXCHANGES = {
-    "S&P 500":  "sp500",
-    "NYSE":     "nyse",
-    "NASDAQ":   "nasdaq",
+    "All Stocks": "all",
+    "S&P 500":    "sp500",
+    "NYSE":       "nyse",
+    "NASDAQ":     "nasdaq",
 }
 
 # Keywords used to detect and exclude non-company securities (ETFs, funds, trusts, etc.)
@@ -781,7 +782,8 @@ with st.sidebar:
         options=list(EXCHANGES.keys()),
         index=0,
         key="sel_exchange",
-        help="S&P 500 = ~500 stocks (fast). NYSE/NASDAQ = 2,000–3,500 stocks (slow, 30–60+ min)."
+        help="All Stocks = every scanned ticker across NYSE + NASDAQ + S&P 500 (~5,500 with nightly data). "
+             "S&P 500 = ~500 (fast live scan). NYSE/NASDAQ = 2,000–3,500 each (slow live scan)."
     )
 
     sector = st.selectbox(
@@ -1251,6 +1253,8 @@ def get_precomputed_for_exchange(exchange_key: str) -> list:
     results, _ = load_precomputed_data(cache_key=_get_cache_key())
     if not results:
         return []
+    if exchange_key == "all":
+        return list(results)
     if exchange_key == "sp500":
         return [r for r in results if "sp500" in r.get("_exchanges", [])]
     return [r for r in results if exchange_key in r.get("_exchanges", [])]
@@ -3356,6 +3360,17 @@ def load_tickers(exchange_key: str) -> list:
     Return a deduplicated list of tickers for the chosen exchange.
     Results cached for 24 hours — clear cache if count looks wrong.
     """
+    if exchange_key == "all":
+        combined, seen = [], set()
+        for k in ("nyse", "nasdaq", "sp500"):
+            try:
+                for t in load_tickers(k):
+                    if t not in seen:
+                        seen.add(t); combined.append(t)
+            except Exception:
+                continue
+        return combined
+
     if exchange_key == "sp500":
         url  = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -3557,7 +3572,7 @@ with tab_screener:
             st.stop()
 
         # Warn if count looks suspiciously low (pagination may have failed)
-        expected_min = {"sp500": 400, "nyse": 1500, "nasdaq": 2000}
+        expected_min = {"sp500": 400, "nyse": 1500, "nasdaq": 2000, "all": 3500}
         if len(tickers) < expected_min.get(exchange_key, 400):
             st.warning(
                 f"⚠️ Only **{len(tickers)}** tickers loaded for {exchange} "
