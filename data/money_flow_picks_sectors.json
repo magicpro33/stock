@@ -7,16 +7,16 @@
     "Consumer Cyclical"
   ],
   "sector_flows": {
-    "Healthcare": 0.1558,
+    "Healthcare": 0.1565,
     "Real Estate": 0.0997,
     "Consumer Cyclical": 0.078,
     "Utilities": 0.077,
-    "Financial Services": 0.0581,
-    "Industrials": -0.0059,
+    "Financial Services": 0.0582,
+    "Industrials": -0.006,
     "Consumer Defensive": -0.0212,
     "Energy": -0.028,
-    "Technology": -0.0501,
-    "Communication Services": -0.0907,
+    "Technology": -0.0503,
+    "Communication Services": -0.0902,
     "Basic Materials": -0.1391
   }
 }
