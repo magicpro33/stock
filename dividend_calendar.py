@@ -237,6 +237,19 @@ def _freq_to_pays(freq_label):
     if 'quarter' in f: return 4
     return 4
 
+# The scan emits Monthly / Quarterly / Quarterly (est) / Semi-Annual / Annual /
+# Irregular / Unknown / None. Collapse them into five pickable buckets so the
+# filter is exact -- substring matching wrongly counted Semi-Annual as Annual.
+_FREQ_BUCKETS = ['Monthly', 'Quarterly', 'Semi-Annual', 'Annual', 'Other']
+
+def _freq_bucket(freq_label):
+    f = (freq_label or '').lower()
+    if 'month' in f:   return 'Monthly'
+    if 'semi' in f:    return 'Semi-Annual'
+    if 'quarter' in f: return 'Quarterly'
+    if 'annual' in f:  return 'Annual'
+    return 'Other'
+
 def tip(label, text):
     safe = text.replace("'", '&#39;').replace('"', '&quot;')
     # Use <details>/<summary> -- works in Streamlit's HTML sandbox
@@ -322,7 +335,8 @@ def load_scan_data():
         rows.append({'ticker': ticker, 'sector': item.get('Sector') or 'Unknown',
             'price': item.get('Price'), 'yield_pct': round(yp, 2),
             'div_rate': dr, 'monthly_pay': mp, 'payout': pr,
-            'frequency': freq, 'div_score': float(item.get('DividendScore') or 0),
+            'frequency': freq, 'freq_bucket': _freq_bucket(freq),
+            'div_score': float(item.get('DividendScore') or 0),
             'ex_date': ex_date})
     if not rows: return None, 'No valid dividend stocks found.', False
     df = pd.DataFrame(rows).sort_values('yield_pct', ascending=False).reset_index(drop=True)
@@ -719,7 +733,10 @@ with st.sidebar:
     max_price  = st.number_input('Max stock price ($)', min_value=1,
         max_value=100000, value=1000, step=1, key='sb_max_price',
         help='Type any dollar amount - only shows stocks at or below this price')
-    freq_filter = st.selectbox('Frequency', ['All','Monthly','Quarterly','Semi-Annual','Annual'], key='sb_freq')
+    freq_filter = st.multiselect(
+        'Payout frequency', _FREQ_BUCKETS, default=_FREQ_BUCKETS, key='sb_freq',
+        help='All frequencies are shown by default. Deselect any you do not '
+             'want. "Other" covers irregular and unclassified payers.')
     st.markdown('---')
     if st.button('Refresh', key='sb_refresh',
                  help='Reload scan file and fetch live ex-dividend dates from Yahoo'):
@@ -778,8 +795,9 @@ df = df_all[
     (df_all['yield_pct'] <= max_yield) &
     (df_all['price'].fillna(0) <= max_price)
 ].copy()
-if freq_filter != 'All':
-    df = df[df['frequency'].str.contains(freq_filter, case=False, na=False)]
+# Empty selection is treated as no filter rather than an empty screen
+if freq_filter and len(freq_filter) < len(_FREQ_BUCKETS):
+    df = df[df['freq_bucket'].isin(freq_filter)]
 if sector_filter != 'All sectors':
     df = df[df['sector'] == sector_filter]
 
