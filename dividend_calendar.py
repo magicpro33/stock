@@ -1746,11 +1746,12 @@ with tab_az:
     # the number_input below doesn't reset the whole analysis
     if az_btn and az_ticker:
         _has_api = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
-        _spin_msg = ('Fetching live data for ' + az_ticker.upper() +
-                     ' via web search...' if (_has_api and live_mode) else
-                     'Loading scan data for ' + az_ticker.upper() + '...')
+        _spin_msg = 'Querying all sources for ' + az_ticker.upper() + '...'
         with st.spinner(_spin_msg):
-            _res = fetch_stock_analysis(az_ticker, live=live_mode)
+            # Analyze is an explicit, single-ticker action -- run every source.
+            # (live_mode only ever gated this to keep app STARTUP fast, which
+            #  is irrelevant here; results are cached for an hour anyway.)
+            _res = fetch_stock_analysis(az_ticker, live=True)
         # fetch returns 5 values now (added source_summary)
         ai, ah, ad, ae = _res[0], _res[1], _res[2], _res[3]
         _src = _res[4] if len(_res) > 4 else {}
@@ -1923,18 +1924,19 @@ with tab_az:
 
             # ── Data source readout ─────────────────────────────────────
             _PROV = [
-                ('alpaca',   'Alpaca',      '#22d3a6'),
-                ('yfinance', 'Yahoo',       '#4ac4ff'),
-                ('fmp',      'FMP',         '#ff9f4a'),
-                ('finnhub',  'Finnhub',     '#7ee081'),
-                ('scan',     'Nightly Scan','#ffe066'),
-                ('derived',  'Computed',    '#9ecbff'),
-                ('claude',   'Claude Web',  '#b388ff'),
+                ('alpaca',   'Alpaca',      '#22d3a6', 'Price, daily bars, cash dividends and company name. Alpaca does not publish fundamentals -- a low count here is normal, not a failure.'),
+                ('yfinance', 'Yahoo',       '#4ac4ff', 'Broadest fundamentals set, but frequently rate-limited on Streamlit Cloud shared IPs.'),
+                ('fmp',      'FMP',         '#ff9f4a', 'Financial Modeling Prep: TTM valuation and profitability ratios.'),
+                ('finnhub',  'Finnhub',     '#7ee081', 'Finnhub: ratios, growth, 52-week range and analyst price targets.'),
+                ('scan',     'Nightly Scan','#ffe066', 'Your own nightly screener dump from the repo.'),
+                ('derived',  'Computed',    '#9ecbff', 'Calculated from data already retrieved (e.g. P/E from price and EPS, beta from returns vs SPY).'),
+                ('claude',   'Claude Web',  '#b388ff', 'Claude web search, used last and only for fields still empty.'),
             ]
-            def _src_badge(label, count, color):
+            def _src_badge(label, count, color, why=''):
                 if not count: return ''
                 return (
-                    '<span style="display:inline-flex;align-items:center;gap:5px;'
+                    '<span title="' + why.replace('"', '&quot;') + '" '
+                    'style="display:inline-flex;align-items:center;gap:5px;'
                     'background:rgba(255,255,255,0.05);border:1px solid ' + color + ';'
                     'border-radius:5px;padding:3px 10px;font-size:0.72rem;'
                     'font-family:DM Mono,monospace;color:' + color + ';'
@@ -1949,10 +1951,11 @@ with tab_az:
             _hist_label = {'alpaca':'Alpaca', 'yfinance':'Yahoo Finance',
                            'scan':'Nightly Scan', 'stooq':'Stooq',
                            'none':'unavailable'}.get(_hs, _hs)
-            _badges = ''.join(_src_badge(lbl, _byp.get(k, 0), col)
-                              for k, lbl, col in _PROV)
+            _badges = ''.join(_src_badge(lbl, _byp.get(k, 0), col, why)
+                              for k, lbl, col, why in _PROV)
             if _gone:
-                _badges += _src_badge('Not found', len(_gone), '#ff6666')
+                _badges += _src_badge('Not found', len(_gone), '#ff6666',
+                                      'No connected source publishes these fields.')
             _pct = int(_fill / _appl * 100) if _appl else 0
             _bar_col = '#22d3a6' if _pct >= 90 else ('#ffe066' if _pct >= 70 else '#ff9f4a')
             if _src:
@@ -1976,11 +1979,28 @@ with tab_az:
                         + ('...' if len(_navs) > 8 else '')
                         + '. Funds and ETFs have no earnings, equity or analyst coverage.')
                 if _gone:
-                    st.caption('No source returned: ' + ', '.join(_gone[:8])
-                        + ('...' if len(_gone) > 8 else '')
-                        + '. Adding API keys in Settings -> Secrets raises coverage '
-                          '(APCA_API_KEY_ID + APCA_API_SECRET_KEY, FMP_API_KEY, '
-                          'FINNHUB_API_KEY, ANTHROPIC_API_KEY).')
+                    _want = []
+                    if not _secret('FINNHUB_API_KEY'):
+                        _want.append('**FINNHUB_API_KEY** (free tier) -- covers P/E, '
+                                     'P/B, P/S, margins, ROE, ROA, debt/equity, '
+                                     'current ratio, growth and analyst targets')
+                    if not _secret('FMP_API_KEY'):
+                        _want.append('**FMP_API_KEY** (free tier) -- a second source '
+                                     'for the same ratio set')
+                    if not _secret('ANTHROPIC_API_KEY'):
+                        _want.append('**ANTHROPIC_API_KEY** -- web-search fallback for '
+                                     'anything the APIs miss')
+                    st.caption('No source returned ' + str(len(_gone)) + ' field(s): '
+                        + ', '.join(_gone[:8]) + ('...' if len(_gone) > 8 else ''))
+                    if _want:
+                        st.markdown('These are fundamentals. Alpaca does not carry '
+                                    'them -- it is a price, bars and corporate-actions '
+                                    'feed. To fill them, add:')
+                        for _w in _want:
+                            st.markdown('- ' + _w)
+                    else:
+                        st.caption('All sources are connected; these fields are simply '
+                                   'not published for this security.')
             st.markdown('---')
             colA, colB, colC = st.columns(3)
 
