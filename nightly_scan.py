@@ -638,7 +638,26 @@ def calculate_roic_trend(fin, bal):
 
 # ── Short interest ───────────────────────────────────────────────────────────
 
-def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
+def _normalize_yield(v):
+    """Return a decimal yield (0.0312 = 3.12%) from either format.
+
+    yfinance changed `dividendYield` from a decimal to a percentage in 2025,
+    while `trailingAnnualDividendYield` stayed a decimal. Feeding a
+    percent-scaled value into `* 100` produced yields like 312% or 15010%,
+    which the calendar app then silently discarded via its >50% filter.
+    """
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    if v > 1.0:            # value arrived percent-scaled
+        v = v / 100.0
+    return v if v <= 0.60 else None
+
+
+def calculate_dividend_score(info: dict, dividends_history=None, price=None) -> dict:
     """Compute composite dividend quality score — same logic as app.py."""
     default = {
         "DividendYieldPct":  None,
@@ -646,13 +665,41 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
         "PayoutRatio":       None,
         "DividendFrequency": "None",
         "DividendScore":     0.0,
+        "DividendBasis":     None,
     }
     try:
-        yield_raw = (info.get("trailingAnnualDividendYield") or info.get("dividendYield"))
-        div_rate  = (info.get("trailingAnnualDividendRate") or info.get("dividendRate"))
-        payout    = info.get("payoutRatio")
+        # Keep yield and rate on the SAME basis. Mixing a trailing yield with a
+        # forward rate makes DividendYieldPct disagree with DividendRate/Price
+        # downstream. Prefer the trailing pair; fall back to the forward pair.
+        t_yield = _normalize_yield(info.get("trailingAnnualDividendYield"))
+        t_rate  = info.get("trailingAnnualDividendRate")
+        f_yield = _normalize_yield(info.get("dividendYield"))
+        f_rate  = info.get("dividendRate")
+        if t_yield is not None or t_rate:
+            yield_raw, div_rate, basis = t_yield, t_rate, "trailing"
+        else:
+            yield_raw, div_rate, basis = f_yield, f_rate, "forward"
+        if yield_raw is None and t_yield is None:
+            yield_raw = f_yield
+        if not div_rate:
+            div_rate = t_rate or f_rate
+        payout = info.get("payoutRatio")
         if not yield_raw and not div_rate:
             return default
+        try:
+            div_rate = float(div_rate) if div_rate else None
+        except (TypeError, ValueError):
+            div_rate = None
+        # Ground truth: rate / price. Keeps the stored yield consistent with the
+        # stored rate so the app never shows a yield that contradicts Div/Share.
+        implied = None
+        try:
+            if div_rate and price and float(price) > 0:
+                implied = div_rate / float(price)
+        except (TypeError, ValueError):
+            implied = None
+        if implied is not None and 0 < implied <= 0.60:
+            yield_raw = implied
         yield_pct = round(yield_raw * 100, 2) if yield_raw else None
         y = yield_pct or 0.0
         if y >= 8:    yield_score = 0.60
@@ -707,6 +754,7 @@ def calculate_dividend_score(info: dict, dividends_history=None) -> dict:
             "PayoutRatio":       round(payout * 100, 1) if payout is not None else None,
             "DividendFrequency": freq_label,
             "DividendScore":     composite,
+            "DividendBasis":     basis,
         }
     except Exception:
         return default
@@ -925,7 +973,8 @@ def process_ticker(args):
             tech_signals = calculate_technical_signals(hist)
             range_data   = calculate_price_range(hist, range_days)
             short_data   = calculate_short_squeeze(info)
-            div_data     = calculate_dividend_score(info, div_hist if not div_hist.empty else None)
+            div_data     = calculate_dividend_score(
+                info, div_hist if not div_hist.empty else None, price)
             clean_setup  = calculate_clean_setup(hist)
             gross_margin = calculate_gross_margin(fin)
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
@@ -980,6 +1029,7 @@ def process_ticker(args):
                 "DividendPayoutRatio": div_data["PayoutRatio"],
                 "DividendFrequency":   div_data["DividendFrequency"],
                 "DividendScore":       div_data["DividendScore"],
+                "DividendBasis":        div_data.get("DividendBasis"),
                 "CleanSetupScore":     clean_setup,
                 "GrossMargin":         gross_margin,
                 "ExDividendDate":      info.get("exDividendDate"),
