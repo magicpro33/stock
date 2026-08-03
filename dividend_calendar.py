@@ -399,6 +399,7 @@ def _hist_to_df(hist_dict):
 
 _ALPACA_DATA = 'https://data.alpaca.markets'
 _ALPACA_TRADE = 'https://api.alpaca.markets'
+_ALPACA_PAPER = 'https://paper-api.alpaca.markets'
 
 # Every field the analyzer renders.
 _YF_FIELDS = [
@@ -428,17 +429,84 @@ _EQUITY_ONLY = {
     'numberOfAnalystOpinions', 'recommendationKey',
 }
 
+# Secrets get named a dozen different ways in the wild, and Streamlit's
+# secrets.toml is often written with a [section] header. Accept all of it.
+_SECRET_ALIASES = {
+    'APCA_API_KEY_ID': ['APCA_API_KEY_ID', 'ALPACA_API_KEY_ID', 'ALPACA_API_KEY',
+                        'ALPACA_KEY_ID', 'ALPACA_KEY', 'APCA_KEY_ID', 'api_key',
+                        'key_id', 'APCA-API-KEY-ID'],
+    'APCA_API_SECRET_KEY': ['APCA_API_SECRET_KEY', 'ALPACA_API_SECRET_KEY',
+                            'ALPACA_SECRET_KEY', 'ALPACA_SECRET', 'APCA_SECRET_KEY',
+                            'secret_key', 'api_secret', 'APCA-API-SECRET-KEY'],
+    'FMP_API_KEY':       ['FMP_API_KEY', 'FMP_KEY', 'FINANCIAL_MODELING_PREP_KEY'],
+    'FINNHUB_API_KEY':   ['FINNHUB_API_KEY', 'FINNHUB_KEY', 'FINNHUB_TOKEN'],
+    'ANTHROPIC_API_KEY': ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY', 'ANTHROPIC_KEY'],
+}
+_SECRET_SECTIONS = ['alpaca', 'ALPACA', 'Alpaca', 'apca', 'APCA', 'api', 'keys',
+                    'fmp', 'FMP', 'finnhub', 'FINNHUB', 'anthropic', 'ANTHROPIC']
+
 def _secret(name):
+    aliases = _SECRET_ALIASES.get(name, [name])
     try:
-        return st.secrets.get(name, '') or ''
+        sec = st.secrets
     except Exception:
         return ''
+    def _grab(container, key):
+        try:
+            v = container.get(key)
+        except Exception:
+            return ''
+        # A pasted key often carries a trailing newline or space
+        return str(v).strip() if v not in (None, '') else ''
+    for a in aliases:
+        v = _grab(sec, a)
+        if v:
+            return v
+    for section in _SECRET_SECTIONS:
+        try:
+            sub = sec.get(section)
+        except Exception:
+            sub = None
+        if sub is None or not hasattr(sub, 'get'):
+            continue
+        for a in aliases:
+            v = _grab(sub, a)
+            if v:
+                return v
+    return ''
+
+def _creds_fp():
+    # Included in cache keys so editing a secret invalidates cached failures
+    # instead of serving an empty result until the TTL expires.
+    k = _secret('APCA_API_KEY_ID')
+    return (k[:4] + ':' + str(len(k))) if k else 'none'
 
 def _http_json(url, headers=None, timeout=12):
     import urllib.request as ur, ssl
     req = ur.Request(url, headers=headers or {'User-Agent': 'Mozilla/5.0'})
     with ur.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as r:
         return json.loads(r.read().decode('utf-8'))
+
+def _http_probe(url, headers=None, timeout=12):
+    # Never raises. Returns (status_code, parsed_json_or_None, error_text).
+    import urllib.request as ur, urllib.error as ue, ssl
+    req = ur.Request(url, headers=headers or {'User-Agent': 'Mozilla/5.0'})
+    try:
+        with ur.urlopen(req, timeout=timeout,
+                        context=ssl.create_default_context()) as r:
+            body = r.read().decode('utf-8', 'ignore')
+            try:
+                return r.status, json.loads(body), ''
+            except Exception:
+                return r.status, None, body[:200]
+    except ue.HTTPError as e:
+        try:
+            detail = e.read().decode('utf-8', 'ignore')[:300]
+        except Exception:
+            detail = ''
+        return e.code, None, detail
+    except Exception as e:
+        return 0, None, str(e)[:200]
 
 def _fnum(v):
     # Coerce to float, rejecting None/''/NaN/inf so a bad value never
@@ -470,7 +538,7 @@ def _alpaca_headers():
             'User-Agent': 'Mozilla/5.0'}
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _fetch_alpaca(sym):
+def _fetch_alpaca(sym, _fp=''):
     # Returns (info_fragment, hist_df, dividends_series).
     # Alpaca is the most reliable source for price and bars from cloud IPs --
     # it authenticates by key, so there is no shared-IP rate limiting.
@@ -479,23 +547,31 @@ def _fetch_alpaca(sym):
     if not h:
         return out, hist, divs
     # Asset name / class
-    try:
-        a = _http_json(_ALPACA_TRADE + '/v2/assets/' + sym, h)
-        if a.get('name'):
-            out['longName'] = a['name']
-        out['_asset_class'] = a.get('class') or ''
-    except Exception:
-        pass
+    # Paper-trading keys are rejected by the live trading host and vice versa,
+    # so try both before giving up on the asset record.
+    for _host in (_ALPACA_TRADE, _ALPACA_PAPER):
+        try:
+            a = _http_json(_host + '/v2/assets/' + sym, h)
+            if a.get('name'):
+                out['longName'] = a['name']
+            out['_asset_class'] = a.get('class') or ''
+            break
+        except Exception:
+            continue
     # Latest snapshot -> current price
-    try:
-        s = _http_json(_ALPACA_DATA + '/v2/stocks/' + sym + '/snapshot', h)
-        px = (((s.get('latestTrade') or {}).get('p'))
-              or ((s.get('dailyBar') or {}).get('c'))
-              or ((s.get('prevDailyBar') or {}).get('c')))
-        if _fnum(px):
-            out['currentPrice'] = _fnum(px)
-    except Exception:
-        pass
+    # Free Alpaca plans are limited to the IEX feed; the default (SIP) returns
+    # 403 for them, so fall back rather than losing the price entirely.
+    for _suffix in ('', '?feed=iex'):
+        try:
+            s = _http_json(_ALPACA_DATA + '/v2/stocks/' + sym + '/snapshot' + _suffix, h)
+            px = (((s.get('latestTrade') or {}).get('p'))
+                  or ((s.get('dailyBar') or {}).get('c'))
+                  or ((s.get('prevDailyBar') or {}).get('c')))
+            if _fnum(px):
+                out['currentPrice'] = _fnum(px)
+                break
+        except Exception:
+            continue
     # Daily bars -> 1y history
     try:
         start = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
@@ -556,7 +632,7 @@ def _fetch_alpaca(sym):
     return out, hist, divs
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _alpaca_benchmark():
+def _alpaca_benchmark(_fp=''):
     # SPY daily closes, used to derive beta when no provider reports one.
     h = _alpaca_headers()
     if not h:
@@ -843,6 +919,132 @@ def _derive_fields(info, hist, divs, sources, benchmark=None):
             pass
     return info
 
+def _alpaca_diagnose(sym='AAPL'):
+    # Live end-to-end check of the Alpaca setup. Returns a list of
+    # (step, ok, detail) tuples. Never raises, never prints a secret.
+    steps = []
+    kid = _secret('APCA_API_KEY_ID')
+    sec = _secret('APCA_API_SECRET_KEY')
+
+    if not kid or not sec:
+        found = []
+        try:
+            found = [k for k in list(st.secrets.keys())]
+        except Exception:
+            pass
+        steps.append(('Credentials found in secrets', False,
+            'Missing ' + ('key id' if not kid else '') +
+            (' and ' if (not kid and not sec) else '') +
+            ('secret key' if not sec else '') +
+            '. Top-level secret names detected: ' +
+            (', '.join(found) if found else 'none') +
+            '. Expected APCA_API_KEY_ID and APCA_API_SECRET_KEY (aliases such as '
+            'ALPACA_API_KEY / ALPACA_SECRET_KEY and [alpaca] sections also work).'))
+        return steps
+
+    steps.append(('Credentials found in secrets', True,
+        'Key id ' + kid[:4] + '...' + kid[-2:] + ' (' + str(len(kid)) +
+        ' chars), secret ' + str(len(sec)) + ' chars.'))
+
+    if len(kid) < 15 or len(sec) < 30:
+        steps.append(('Key format looks plausible', False,
+            'Alpaca key ids are ~20 chars and secrets ~40. These look truncated '
+            '-- check for a missing character or an accidental line break.'))
+    else:
+        steps.append(('Key format looks plausible', True, 'Lengths are in range.'))
+
+    h = {'APCA-API-KEY-ID': kid, 'APCA-API-SECRET-KEY': sec,
+         'User-Agent': 'Mozilla/5.0'}
+
+    # 1. Authentication against the market data host
+    code, body, err = _http_probe(_ALPACA_DATA + '/v2/stocks/AAPL/snapshot', h)
+    if code == 200:
+        steps.append(('Market data auth (AAPL snapshot)', True, 'HTTP 200, SIP feed allowed.'))
+        feed_ok = True
+    elif code in (401, 403):
+        c2, b2, e2 = _http_probe(_ALPACA_DATA + '/v2/stocks/AAPL/snapshot?feed=iex', h)
+        if c2 == 200:
+            steps.append(('Market data auth (AAPL snapshot)', True,
+                'HTTP ' + str(code) + ' on the default SIP feed but 200 on IEX -- '
+                'normal for the free plan. The app falls back to IEX automatically.'))
+            feed_ok = True
+        else:
+            steps.append(('Market data auth (AAPL snapshot)', False,
+                'HTTP ' + str(code) + ' on SIP and ' + str(c2) + ' on IEX. '
+                'A 401 means the key or secret is wrong (or swapped). A 403 on '
+                'both feeds means the key is valid but has no market data '
+                'entitlement. Detail: ' + (err or e2 or 'none')))
+            feed_ok = False
+    else:
+        steps.append(('Market data auth (AAPL snapshot)', False,
+            'HTTP ' + str(code) + '. ' + (err or 'No response.')))
+        feed_ok = False
+
+    if not feed_ok:
+        return steps
+
+    # 2. Trading host -- identifies paper vs live keys
+    live_code, live_b, _ = _http_probe(_ALPACA_TRADE + '/v2/account', h)
+    pap_code, pap_b, _   = _http_probe(_ALPACA_PAPER + '/v2/account', h)
+    if live_code == 200:
+        steps.append(('Account type', True, 'Live trading keys.'))
+    elif pap_code == 200:
+        steps.append(('Account type', True,
+            'Paper trading keys. Market data still works; the app queries both hosts.'))
+    else:
+        steps.append(('Account type', True,
+            'Data-only key (HTTP ' + str(live_code) + '/' + str(pap_code) +
+            ' on the trading hosts). Fine -- only company names come from there.'))
+
+    # 3. Daily bars for the requested symbol
+    start = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+    burl = (_ALPACA_DATA + '/v2/stocks/' + sym + '/bars?timeframe=1Day'
+            '&adjustment=all&limit=1000&start=' + start)
+    n_bars, used_feed, bcode = 0, None, None
+    for suffix, label in (('', 'SIP'), ('&feed=iex', 'IEX')):
+        c, b, e = _http_probe(burl + suffix, h)
+        bcode = c
+        if c == 200 and (b or {}).get('bars'):
+            n_bars, used_feed = len((b or {}).get('bars') or []), label
+            break
+    if n_bars:
+        steps.append((sym + ' daily bars', True,
+            str(n_bars) + ' bars via the ' + used_feed + ' feed.'))
+    else:
+        steps.append((sym + ' daily bars', False,
+            'HTTP ' + str(bcode) + ', no bars returned. A 404 means the symbol is '
+            'not in Alpaca coverage (it lists US equities and ETFs only -- no '
+            'OTC, no foreign listings, no mutual funds).'))
+
+    # 4. Corporate actions -- the dividend source
+    ca_start = (datetime.date.today() - datetime.timedelta(days=420)).isoformat()
+    ca_end   = (datetime.date.today() + datetime.timedelta(days=90)).isoformat()
+    c, b, e = _http_probe(_ALPACA_DATA + '/v1/corporate-actions?symbols=' + sym +
+                          '&types=cash_dividend&start=' + ca_start +
+                          '&end=' + ca_end + '&limit=200', h)
+    if c == 200:
+        cds = ((b or {}).get('corporate_actions') or {}).get('cash_dividends') or []
+        steps.append(('Cash dividend history', True,
+            str(len(cds)) + ' dividend records in the last 12 months plus any '
+            'announced upcoming ex-date.' if cds else
+            'Endpoint reachable, but no cash dividends on record for ' + sym + '.'))
+    else:
+        steps.append(('Cash dividend history', False,
+            'HTTP ' + str(c) + '. ' + (e or 'No response.')))
+
+    # 5. What the full pipeline actually produced
+    try:
+        a_info, a_hist, a_divs = _fetch_alpaca(sym, _creds_fp())
+        got = sorted(k for k in a_info if not k.startswith('_'))
+        steps.append(('Fields Alpaca supplied for ' + sym, bool(got or len(a_hist)),
+            ('Fields: ' + ', '.join(got) if got else 'No fields') +
+            ' | history rows: ' + str(len(a_hist)) +
+            ' | dividend rows: ' + str(len(a_divs))))
+    except Exception as ex:
+        steps.append(('Fields Alpaca supplied for ' + sym, False, str(ex)[:200]))
+
+    return steps
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym, live=False):
     sym = sym.upper().strip()
@@ -865,17 +1067,19 @@ def fetch_stock_analysis(sym, live=False):
         if frag:
             providers_ok.append(provider)
 
-    if live:
-        # 1. Alpaca -- key-authenticated, so no shared-IP throttling
-        if _alpaca_headers():
-            providers_tried.append('alpaca')
-            a_info, a_hist, a_divs = _fetch_alpaca(sym)
-            absorb('alpaca', a_info)
-            if not a_hist.empty:
-                hist, hist_source = a_hist, 'alpaca'
-            if len(a_divs):
-                divs = a_divs
+    # 1. Alpaca runs on EVERY lookup, not just after Refresh. It authenticates
+    #    by key, so it is fast and immune to the shared-IP throttling that makes
+    #    the other live sources unreliable -- there is no reason to gate it.
+    if _alpaca_headers():
+        providers_tried.append('alpaca')
+        a_info, a_hist, a_divs = _fetch_alpaca(sym, _creds_fp())
+        absorb('alpaca', a_info)
+        if not a_hist.empty:
+            hist, hist_source = a_hist, 'alpaca'
+        if len(a_divs):
+            divs = a_divs
 
+    if live:
         # 2. yfinance -- broadest fundamentals
         providers_tried.append('yfinance')
         y_info, y_hist, y_divs, y_ok = _fetch_yfinance(sym)
@@ -893,13 +1097,13 @@ def fetch_stock_analysis(sym, live=False):
             if not len(divs) and len(y_divs):
                 divs = y_divs
 
-        # 3/4. Keyed fundamentals providers
-        if _secret('FMP_API_KEY'):
-            providers_tried.append('fmp')
-            absorb('fmp', _fetch_fmp(sym))
-        if _secret('FINNHUB_API_KEY'):
-            providers_tried.append('finnhub')
-            absorb('finnhub', _fetch_finnhub(sym))
+    # 3/4. Keyed fundamentals providers -- also key-authenticated, always on
+    if _secret('FMP_API_KEY'):
+        providers_tried.append('fmp')
+        absorb('fmp', _fetch_fmp(sym))
+    if _secret('FINNHUB_API_KEY'):
+        providers_tried.append('finnhub')
+        absorb('finnhub', _fetch_finnhub(sym))
 
     # 5. Nightly scan dump
     if rec:
@@ -939,7 +1143,7 @@ def fetch_stock_analysis(sym, live=False):
             providers_ok.append('stooq')
 
     # 7. Derive everything computable from what we already have
-    bench = _alpaca_benchmark() if (live and _alpaca_headers()) else None
+    bench = _alpaca_benchmark(_creds_fp()) if _alpaca_headers() else None
     info = _derive_fields(info, hist, divs, sources, bench)
 
     # 8. Claude web search -- last resort, only for what is still empty and
@@ -1477,24 +1681,49 @@ with tab_az:
         'Finnhub (metrics, analyst targets)': bool(_secret('FINNHUB_API_KEY')),
         'Claude web search (last resort)': bool(_secret('ANTHROPIC_API_KEY')),
     }
-    if not all(_keys.values()):
-        with st.expander('Raise data coverage -- ' + str(sum(_keys.values()))
-                         + ' of 4 sources connected'):
-            for _label, _on in _keys.items():
-                st.markdown(('- **Connected** -- ' if _on else '- Not set -- ') + _label)
-            st.markdown(
-                'Add keys under the 3-dot menu -> Settings -> Secrets:\n'
-                '```\n'
-                'APCA_API_KEY_ID = "..."\n'
-                'APCA_API_SECRET_KEY = "..."\n'
-                'FMP_API_KEY = "..."\n'
-                'FINNHUB_API_KEY = "..."\n'
-                'ANTHROPIC_API_KEY = "sk-ant-..."\n'
-                '```\n'
-                'Alpaca and Finnhub have free tiers and are the biggest wins: '
-                'both authenticate by key, so neither is affected by the shared-IP '
-                'rate limiting that blocks Yahoo Finance on Streamlit Cloud.'
-            )
+    _alp_on = _keys['Alpaca (price, bars, dividends)']
+    with st.expander(('Data sources -- ' + str(sum(_keys.values()))
+                      + ' of 4 connected') + ('' if _alp_on else '  (Alpaca NOT detected)'),
+                     expanded=not _alp_on):
+        _dcol1, _dcol2 = st.columns([1, 2])
+        with _dcol1:
+            _diag_sym = st.text_input('Test symbol', value='AAPL', key='alp_diag_sym')
+            _run_diag = st.button('Verify Alpaca connection', key='alp_diag_btn')
+        with _dcol2:
+            st.caption('Runs a live end-to-end check: credentials, market-data '
+                       'auth, feed entitlement, account type, daily bars and the '
+                       'dividend feed. Nothing is written and no key is displayed.')
+        if _run_diag:
+            with st.spinner('Testing Alpaca...'):
+                _steps = _alpaca_diagnose((_diag_sym or 'AAPL').upper().strip())
+            for _label, _ok, _detail in _steps:
+                st.markdown(('**PASS** -- ' if _ok else '**FAIL** -- ') + _label)
+                st.caption(_detail)
+            if all(s[1] for s in _steps):
+                st.success('Alpaca is working. If fields are still blank, they are '
+                           'fundamentals Alpaca does not carry -- add FMP_API_KEY or '
+                           'FINNHUB_API_KEY for ratios, margins and analyst targets.')
+            else:
+                st.warning('Fix the failing step above, then press Refresh in the '
+                           'sidebar to clear cached results.')
+        st.markdown('---')
+        for _label, _on in _keys.items():
+            st.markdown(('- **Connected** -- ' if _on else '- Not set -- ') + _label)
+        st.markdown(
+            'Add keys under the 3-dot menu -> Settings -> Secrets. Note that '
+            'secrets.toml uses `=` and quoted values, and a key pasted with a '
+            'trailing space or line break will fail auth:\n'
+            '```\n'
+            'APCA_API_KEY_ID = "PK..."\n'
+            'APCA_API_SECRET_KEY = "..."\n'
+            'FMP_API_KEY = "..."\n'
+            'FINNHUB_API_KEY = "..."\n'
+            'ANTHROPIC_API_KEY = "sk-ant-..."\n'
+            '```\n'
+            'Alpaca and Finnhub have free tiers and are the biggest wins: both '
+            'authenticate by key, so neither is affected by the shared-IP rate '
+            'limiting that blocks Yahoo Finance on Streamlit Cloud.'
+        )
     az1, az2 = st.columns([2,3])
     with az1:
         az_ticker = st.text_input('Ticker symbol', placeholder='e.g. ET, WPM, DOC', key='az_ticker')
