@@ -475,6 +475,23 @@ def _secret(name):
                 return v
     return ''
 
+def _tz_naive(obj):
+    # Providers disagree on timezones: yfinance returns tz-aware dividend
+    # dates (America/New_York), Alpaca returns naive ones. Comparing a naive
+    # DatetimeIndex against an aware Timestamp raises TypeError on pandas 3.x,
+    # so everything is flattened to naive at a single choke point.
+    try:
+        if obj is None or len(obj) == 0:
+            return obj
+        idx = obj.index
+        if getattr(idx, 'tz', None) is not None:
+            obj = obj.copy()
+            obj.index = idx.tz_convert(None) if hasattr(idx, 'tz_convert') \
+                else idx.tz_localize(None)
+    except Exception:
+        pass
+    return obj
+
 def _creds_fp():
     # Included in cache keys so editing a secret invalidates cached failures
     # instead of serving an empty result until the TTL expires.
@@ -859,10 +876,7 @@ def _derive_fields(info, hist, divs, sources, benchmark=None):
     # Dividend rate from the actual payment stream
     if divs is not None and len(divs) and info.get('trailingAnnualDividendRate') is None:
         try:
-            idx = divs.index
-            if getattr(idx, 'tz', None) is not None:
-                divs = divs.copy()
-                divs.index = idx.tz_convert(None)
+            divs = _tz_naive(divs)
             cutoff = pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=1)
             recent = divs[divs.index >= cutoff]
             if len(recent):
@@ -1077,7 +1091,7 @@ def fetch_stock_analysis(sym, live=False):
         if not a_hist.empty:
             hist, hist_source = a_hist, 'alpaca'
         if len(a_divs):
-            divs = a_divs
+            divs = _tz_naive(a_divs)
 
     if live:
         # 2. yfinance -- broadest fundamentals
@@ -1095,7 +1109,7 @@ def fetch_stock_analysis(sym, live=False):
             if hist.empty and not y_hist.empty:
                 hist, hist_source = y_hist, 'yfinance'
             if not len(divs) and len(y_divs):
-                divs = y_divs
+                divs = _tz_naive(y_divs)
 
     # 3/4. Keyed fundamentals providers -- also key-authenticated, always on
     if _secret('FMP_API_KEY'):
@@ -1175,7 +1189,7 @@ def fetch_stock_analysis(sym, live=False):
         })
 
     if not info.get('currentPrice'):
-        return {}, pd.DataFrame(), divs, (
+        return {}, pd.DataFrame(), _tz_naive(divs), (
             sym + ' not found in any source. Check the ticker symbol.'), {}
 
     missing = [f for f in _YF_FIELDS if info.get(f) is None]
@@ -1204,7 +1218,7 @@ def fetch_stock_analysis(sym, live=False):
         'scan_fields':  sources.get('scan', []),
         'claude_fields': sources.get('claude', []),
     }
-    return info, hist, divs, None, source_summary
+    return info, hist, _tz_naive(divs), None, source_summary
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_claude_live(sym, missing_fields):
@@ -1803,8 +1817,12 @@ with tab_az:
             # Frequency priority: counted actual payments > scan field > default
             _scan_freq = ai.get('dividendFrequency') or ''
             if not ad.empty:
-                oyr = pd.Timestamp.now(tz='UTC') - pd.DateOffset(years=1)
-                _recent = ad[ad.index >= oyr]; n = len(_recent)
+                ad = _tz_naive(ad)
+                oyr = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
+                try:
+                    _recent = ad[ad.index >= oyr]; n = len(_recent)
+                except TypeError:
+                    n = len(ad)
                 if n >= 10:  pays_yr=12; freq2='Monthly'
                 elif n >= 3: pays_yr=4;  freq2='Quarterly'
                 elif n == 2: pays_yr=2;  freq2='Semi-Annual'
