@@ -136,6 +136,107 @@ def tag(v, good, ok, fmt='{:.1f}', sfx=''):
     if v >= ok:   return '<span class="tag-ok">'   + s + '</span>'
     return '<span class="tag-bad">' + s + '</span>'
 
+# ══ Dividend / date math helpers ═══════════════════════════════════════════
+# yfinance changed dividendYield from decimal (0.0314) to percent (3.14) in
+# 2025. trailingAnnualDividendYield is still decimal. Normalize both to decimal.
+def _norm_yield(v):
+    try: v = float(v)
+    except (TypeError, ValueError): return None
+    if v <= 0: return None
+    if v > 1.0: v = v / 100.0          # value was percent-scaled
+    return v if 0 < v <= 0.60 else None
+
+# Scan stores growth as a decimal already (0.124 = 12.4%). Some feeds send
+# percent (12.4). Disambiguate by magnitude -- >150% growth is vanishingly rare.
+def _norm_growth(v):
+    try: v = float(v)
+    except (TypeError, ValueError): return None
+    if v == 0: return None
+    return v / 100.0 if abs(v) > 1.5 else v
+
+def _pct_to_dec(v):
+    try: v = float(v)
+    except (TypeError, ValueError): return None
+    return v / 100.0 if v else None
+
+# Yield the UI shows must equal Div/Share divided by Price, or users see a
+# contradiction. Prefer that; fall back to the reported yield field.
+def _resolve_yield(info, price):
+    try: rate = float(info.get('trailingAnnualDividendRate') or info.get('dividendRate') or 0)
+    except (TypeError, ValueError): rate = 0.0
+    from_rate = (rate / price) if (rate > 0 and price and price > 0) else None
+    reported = (_norm_yield(info.get('trailingAnnualDividendYield'))
+                or _norm_yield(info.get('dividendYield')))
+    if from_rate and 0 < from_rate <= 0.60:
+        return from_rate, reported
+    return reported, reported
+
+def _epoch_to_date(ts):
+    try: ts = float(ts)
+    except (TypeError, ValueError): return None
+    if ts < 1e9: return None
+    try:
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date()
+    except Exception:
+        return None
+
+# ── NYSE trading calendar (settlement is T+1 since May 2024, so the last day
+# ── to buy and still receive the dividend is the prior TRADING day) ─────────
+def _easter(y):
+    a=y%19; b=y//100; c=y%100; d=b//4; e=b%4; f=(b+8)//25; g=(b-f+1)//3
+    h=(19*a+b-d-g+15)%30; i=c//4; k=c%4; l=(32+2*e+2*i-h-k)%7
+    m=(a+11*h+22*l)//451
+    return datetime.date(y, (h+l-7*m+114)//31, ((h+l-7*m+114)%31)+1)
+
+def _nth_weekday(y, month, weekday, n):
+    d = datetime.date(y, month, 1)
+    return d + datetime.timedelta(days=(weekday - d.weekday()) % 7 + 7*(n-1))
+
+def _last_weekday(y, month, weekday):
+    nxt = datetime.date(y+1,1,1) if month == 12 else datetime.date(y, month+1, 1)
+    d = nxt - datetime.timedelta(days=1)
+    while d.weekday() != weekday: d -= datetime.timedelta(days=1)
+    return d
+
+_HOL_CACHE = {}
+def _market_holidays(y):
+    if y in _HOL_CACHE: return _HOL_CACHE[y]
+    def obs(d):
+        if d.weekday() == 5: return d - datetime.timedelta(days=1)
+        if d.weekday() == 6: return d + datetime.timedelta(days=1)
+        return d
+    hs = {
+        obs(datetime.date(y,1,1)),                        # New Year
+        _nth_weekday(y,1,0,3),                            # MLK
+        _nth_weekday(y,2,0,3),                            # Presidents
+        _easter(y) - datetime.timedelta(days=2),          # Good Friday
+        _last_weekday(y,5,0),                             # Memorial
+        obs(datetime.date(y,6,19)),                       # Juneteenth
+        obs(datetime.date(y,7,4)),                        # Independence
+        _nth_weekday(y,9,0,1),                            # Labor
+        _nth_weekday(y,11,3,4),                           # Thanksgiving
+        obs(datetime.date(y,12,25)),                      # Christmas
+    }
+    _HOL_CACHE[y] = hs
+    return hs
+
+def _prev_trading_day(d):
+    if d is None: return None
+    d = d - datetime.timedelta(days=1)
+    for _ in range(10):
+        if d.weekday() < 5 and d not in _market_holidays(d.year):
+            return d
+        d -= datetime.timedelta(days=1)
+    return d
+
+def _freq_to_pays(freq_label):
+    f = (freq_label or '').lower()
+    if 'month' in f: return 12
+    if 'semi'  in f: return 2
+    if 'annual' in f: return 1
+    if 'quarter' in f: return 4
+    return 4
+
 def tip(label, text):
     safe = text.replace("'", '&#39;').replace('"', '&quot;')
     # Use <details>/<summary> -- works in Streamlit's HTML sandbox
@@ -184,7 +285,7 @@ def _parse_ex_date(ex_ts):
     try:
         ts = float(ex_ts)
         if ts > 1e9:
-            return datetime.datetime.utcfromtimestamp(ts).date()
+            return _epoch_to_date(ts)
     except (TypeError, ValueError):
         pass
     return None
@@ -237,7 +338,7 @@ def fetch_ex_dates_live(tickers_tuple):
             info = yf.Ticker(tk).info
             ex_ts = info.get('exDividendDate')
             if ex_ts and isinstance(ex_ts, (int, float)) and float(ex_ts) > 1e9:
-                result[tk] = datetime.datetime.utcfromtimestamp(float(ex_ts)).date()
+                result[tk] = _epoch_to_date(ex_ts)
             else: result[tk] = None
         except Exception: result[tk] = None
         prog.progress((i + 1) / len(tickers), text='Fetching ex-dates... ' + str(i+1) + '/' + str(len(tickers)))
@@ -413,10 +514,10 @@ def fetch_stock_analysis(sym, live=False):
             'shortPercentOfFloat':        (rec.get('ShortPctFloatRaw') or 0) / 100
                                           if rec.get('ShortPctFloatRaw') else None,
             'shortRatio':                 rec.get('DaysToCover'),
-            'revenueGrowth':              (rec.get('RevenueGrowth') or 0) / 100
-                                          if rec.get('RevenueGrowth') else None,
-            'earningsGrowth':             (rec.get('EarningsGrowth') or 0) / 100
-                                          if rec.get('EarningsGrowth') else None,
+            # Scan already stores these as decimals (0.124 = 12.4%).
+            # The old code divided by 100 again -- 100x understated.
+            'revenueGrowth':              _norm_growth(rec.get('RevenueGrowth')),
+            'earningsGrowth':             _norm_growth(rec.get('EarningsGrowth')),
         }
         fields_to_fill = list(missing) if live else list(_YF_FIELDS)
         for field in fields_to_fill:
@@ -426,6 +527,10 @@ def fetch_stock_analysis(sym, live=False):
                 sources['scan'].append(field)
                 if live:
                     missing = [f for f in missing if f != field]
+        # Payment frequency is known by the scan -- carry it through so the
+        # analyzer/calculator don't fall back to assuming "Quarterly".
+        if rec.get('DividendFrequency'):
+            info['dividendFrequency'] = rec['DividendFrequency']
 
     # ── Claude web search only in live mode ───────────────────────────────
     if live and missing and not info.get('currentPrice'):
@@ -560,7 +665,7 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         hdr_buy = '<th>Buy Before</th><th>Ex-Date</th><th>Countdown</th>'
     tbl = ('<div class="tbl-wrap"><table class="stbl"><thead><tr>'
         '<th>Ticker</th><th>Sector</th><th>Yield</th><th>Div/Share</th>'
-        '<th>Monthly/Share</th><th>Payout</th><th>Frequency</th>'
+        '<th title="Annual dividend divided by 12 -- a monthly equivalent, not necessarily an actual monthly payment">Monthly/Share</th><th>Payout</th><th>Frequency</th>'
         '<th>Price</th>' + hdr_buy +
         '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
     st.markdown(tbl, unsafe_allow_html=True)
@@ -632,7 +737,7 @@ with st.sidebar:
     st.caption('v' + APP_VERSION)
 
 st.markdown('<div class="main-title">Dividend Capture Calendar</div>', unsafe_allow_html=True)
-st.markdown('<div class="main-sub">buy 24h before ex-date | highest yield first | magicpro33/stock</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-sub">buy 1 trading day before ex-date | highest yield first | magicpro33/stock</div>', unsafe_allow_html=True)
 
 with st.spinner('Loading scan data...'):
     scan_result = load_scan_data()
@@ -687,8 +792,9 @@ if not has_ex_dates:
 else:
     src_label = 'scan data + live ex-dates' if live_mode else 'scan data'
     badge_cls = 'src-ok'
-df['buy_date'] = df['ex_date'].apply(
-    lambda d: (safe_date(d) - datetime.timedelta(days=1)) if safe_date(d) else None)
+# Last day you can buy and still be on the books: previous TRADING day
+# (T+1 settlement). A calendar -1 day lands on weekends/holidays.
+df['buy_date'] = df['ex_date'].apply(lambda d: _prev_trading_day(safe_date(d)))
 
 cutoff = today + datetime.timedelta(days=days_ahead)
 # Pure Python dates only -- pandas datetime comparisons break on Python 3.14
@@ -747,6 +853,24 @@ with tab_cal:
     render_calendar(df_cal, st.session_state.cy, st.session_state.cm)
     st.markdown('<br>', unsafe_allow_html=True)
 
+    with st.expander('How dividend capture actually works -- read before trading'):
+        st.markdown(
+            '- **The price drops on the ex-date.** On the ex-dividend morning a stock '
+            'typically opens lower by roughly the dividend amount. The dividend is not '
+            'free money -- it is a transfer from share price to cash.\n'
+            '- **You must own it before the ex-date.** With T+1 settlement the last day '
+            'to buy is the previous trading day, which is the Buy Before column here.\n'
+            '- **Taxes decide whether capture is profitable.** A dividend is only '
+            '*qualified* (lower tax rate) if you hold the shares more than 60 days '
+            'during the 121-day window around the ex-date. Buy-and-sell-immediately '
+            'capture produces ordinary-income dividends plus short-term capital '
+            'gains or losses.\n'
+            '- **Yields above roughly 12% deserve scrutiny.** They often signal a '
+            'closed-end fund returning capital, a distribution about to be cut, or a '
+            'price that has already collapsed.\n'
+            '- Trading costs, bid-ask spread, and price drift usually exceed the '
+            'edge on a pure capture trade.'
+        )
     st.markdown('<div class="section-hdr">Upcoming Buy Signals &mdash; Ranked by Yield</div>', unsafe_allow_html=True)
     if df_cal.empty:
         if df.empty:
@@ -798,14 +922,15 @@ with tab_calc:
                 if le or not li:
                     st.error('Could not fetch ' + sym + '. Check ticker.')
                 else:
-                    ry = li.get('trailingAnnualDividendYield') or li.get('dividendYield') or 0
-                    if ry > 0.50: ry = 0
+                    _lpx = float(li.get('currentPrice') or li.get('regularMarketPrice') or 0)
                     rr = float(li.get('trailingAnnualDividendRate') or li.get('dividendRate') or 0)
+                    ry, _ = _resolve_yield(li, _lpx)
+                    _lfreq = li.get('dividendFrequency') or 'Quarterly (assumed)'
                     calc_info = {'ticker': sym,
-                        'price': float(li.get('currentPrice') or li.get('regularMarketPrice') or 0),
-                        'yield_pct': round(ry * 100, 2), 'div_rate': rr,
+                        'price': _lpx,
+                        'yield_pct': round((ry or 0) * 100, 2), 'div_rate': rr,
                         'monthly_pay': round(rr / 12, 4) if rr else None,
-                        'frequency': 'Quarterly (est)',
+                        'frequency': _lfreq,
                         'payout': round((li.get('payoutRatio') or 0) * 100, 1) or None,
                         'sector': li.get('sector') or 'Unknown'}
             else:
@@ -830,11 +955,10 @@ with tab_calc:
             annd = shrs * dr
             mthd = annd / 12
             wkd  = annd / 52
-            fl   = calc_info['frequency'].lower()
-            if 'month' in fl:  spay, slbl = annd/12,  'Per monthly payment'
-            elif 'semi'  in fl: spay, slbl = annd/2,   'Per semi-annual payment'
-            elif 'annual' in fl and 'semi' not in fl: spay, slbl = annd, 'Per annual payment'
-            else: spay, slbl = annd/4, 'Per quarterly payment'
+            _n   = _freq_to_pays(calc_info['frequency'])
+            spay = annd / _n
+            slbl = {12:'Per monthly payment', 4:'Per quarterly payment',
+                    2:'Per semi-annual payment', 1:'Per annual payment'}[_n]
             st.markdown(
                 '<div class="calc-result">'
                 '<div class="calc-result-row"><span class="calc-label">Shares purchased</span>'
@@ -916,16 +1040,22 @@ with tab_az:
             fwpe  = ai.get('forwardPE')
             pb    = ai.get('priceToBook')
             ps    = ai.get('priceToSalesTrailing12Months')
-            ry    = ai.get('trailingAnnualDividendYield') or ai.get('dividendYield') or 0
-            if ry > 0.50: ry = 0
-            dy    = round(ry * 100, 2)
             dr    = float(ai.get('trailingAnnualDividendRate') or ai.get('dividendRate') or 0)
+            # Yield is derived from rate/price so it always agrees with the
+            # Div/Share figure shown below it. _resolve_yield also repairs
+            # yfinance's percent-vs-decimal inconsistency.
+            ry, _reported_y = _resolve_yield(ai, px)
+            dy    = round((ry or 0) * 100, 2)
+            _y_mismatch = (ry and _reported_y and abs(ry - _reported_y) > 0.005)
+            # EPS-based payout ratio is not meaningful for REITs (use FFO/AFFO),
+            # closed-end funds (distributions come from NAV/ROC) or MLPs (DCF).
             pout  = ai.get('payoutRatio')
+            _pass_thru = sec in ('Real Estate', 'Financial Services', 'Energy')
+            _payout_flag = ' *' if (_pass_thru and pout and pout > 0.9) else ''
             ex_ts = ai.get('exDividendDate')
             ex_dt = None
             if ex_ts:
-                try: ex_dt = datetime.datetime.utcfromtimestamp(float(ex_ts)).date()
-                except Exception: pass
+                ex_dt = _epoch_to_date(ex_ts)
             hi52  = ai.get('fiftyTwoWeekHigh') or 0
             lo52  = ai.get('fiftyTwoWeekLow') or 0
             rng   = ((px - lo52)/(hi52 - lo52)*100) if (hi52 and lo52 and hi52 != lo52) else None
@@ -947,14 +1077,20 @@ with tab_az:
             cr    = ai.get('currentRatio')
             aus   = ((am - px) / px * 100) if (am and px > 0) else None
             mp2   = dr / 12 if dr else 0
-            pays_yr = 4; freq2 = 'Quarterly'
+            # Frequency priority: counted actual payments > scan field > default
+            _scan_freq = ai.get('dividendFrequency') or ''
             if not ad.empty:
                 oyr = pd.Timestamp.now(tz='UTC') - pd.DateOffset(years=1)
-                rec = ad[ad.index >= oyr]; n = len(rec)
+                _recent = ad[ad.index >= oyr]; n = len(_recent)
                 if n >= 10:  pays_yr=12; freq2='Monthly'
                 elif n >= 3: pays_yr=4;  freq2='Quarterly'
                 elif n == 2: pays_yr=2;  freq2='Semi-Annual'
                 elif n == 1: pays_yr=1;  freq2='Annual'
+                else:        pays_yr=4;  freq2='Quarterly'
+            elif _scan_freq and _scan_freq != '--':
+                freq2 = _scan_freq; pays_yr = _freq_to_pays(_scan_freq)
+            else:
+                pays_yr = 4; freq2 = 'Quarterly (assumed)'
             rsi_v=ma50_v=ma200_v=macd_v=macd_s=vol_avg=vol_td=obv_tr=None
             pct1d=pct5d=pct1m=pct3m=None
             if not ah.empty and len(ah) >= 26:
@@ -1026,6 +1162,23 @@ with tab_az:
                 unsafe_allow_html=True)
             if pills:
                 st.markdown('<div style="margin:6px 0 14px">' + ''.join(pills) + '</div>', unsafe_allow_html=True)
+            _notes = []
+            if _y_mismatch:
+                _notes.append('Yield shown is Div/Share divided by Price ('
+                    + '{:.2f}'.format(dy) + '%). The data feed reports '
+                    + '{:.2f}'.format((_reported_y or 0) * 100)
+                    + '% -- the gap usually means the feed mixes a forward rate '
+                      'with a trailing yield, or a special dividend is included.')
+            if _payout_flag:
+                _notes.append('* Payout ratio above 100% is normal for this sector. '
+                    'REITs distribute from FFO, closed-end funds from NAV and return '
+                    'of capital, MLPs from distributable cash flow -- none of which '
+                    'are earnings per share, so the EPS-based ratio overstates risk.')
+            if freq2.endswith('(assumed)'):
+                _notes.append('Payment frequency was not reported, so quarterly is '
+                    'assumed. Per-payment amounts below are estimates.')
+            for _n_ in _notes:
+                st.caption(_n_)
 
             # ── Data source readout ─────────────────────────────────────
             def _src_badge(label, count, total, color, bg):
@@ -1174,7 +1327,7 @@ with tab_az:
                     mrow('Ex-Dividend Date',
                         'Ex-Dividend Date (also called Ex-Date). The cutoff date set by the company. You must own the stock BEFORE this date to qualify for the upcoming dividend payment. If you buy ON or AFTER the ex-date, you miss that payment. The stock price typically drops by approximately the dividend amount on this date as the value of that payment leaves the stock.',
                         ex_dt.strftime('%b %d, %Y') if ex_dt else '--'),
-                    mrow('Payout Ratio',
+                    mrow('Payout Ratio' + _payout_flag,
                         'Payout Ratio = Dividend Payout Ratio. What percentage of the company&apos;s net earnings (EPS) is paid out as dividends. Under 60% is generally sustainable -- the company keeps plenty of earnings to reinvest and grow. 60-80% is a yellow flag. Over 100% means the company is paying MORE in dividends than it earns -- this is unsustainable and a dividend cut is likely.',
                         tag((pout or 0)*100,80,100,'{:.0f}','%') if pout else '--'),
                 ]
