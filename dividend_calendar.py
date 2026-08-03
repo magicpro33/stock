@@ -386,7 +386,21 @@ def _hist_to_df(hist_dict):
     except Exception:
         return pd.DataFrame()
 
-# Fields the analyzer uses -- used to detect what is missing after yfinance
+# ══ Data providers ═════════════════════════════════════════════════════════
+# Field-level waterfall. Each provider fills only the fields still empty, so a
+# single flaky source never blanks the page. Provenance is tracked per field.
+#
+# Optional keys in Streamlit secrets (Settings -> Secrets). All are optional;
+# every one you add raises the fill rate:
+#   APCA_API_KEY_ID / APCA_API_SECRET_KEY   Alpaca  - price, bars, dividends
+#   FMP_API_KEY                             Financial Modeling Prep - ratios
+#   FINNHUB_API_KEY                         Finnhub - metrics, analyst targets
+#   ANTHROPIC_API_KEY                       Claude web search - last resort
+
+_ALPACA_DATA = 'https://data.alpaca.markets'
+_ALPACA_TRADE = 'https://api.alpaca.markets'
+
+# Every field the analyzer renders.
 _YF_FIELDS = [
     'longName', 'sector', 'industry',
     'currentPrice', 'marketCap',
@@ -404,20 +418,589 @@ _YF_FIELDS = [
     'numberOfAnalystOpinions', 'recommendationKey',
 ]
 
+# Fields that genuinely do not exist for funds/ETFs/trusts. Reporting these as
+# "missing" would be dishonest -- an ETF has no return on equity.
+_EQUITY_ONLY = {
+    'trailingPE', 'forwardPE', 'priceToBook', 'priceToSalesTrailing12Months',
+    'profitMargins', 'operatingMargins', 'returnOnEquity', 'returnOnAssets',
+    'debtToEquity', 'currentRatio', 'revenueGrowth', 'earningsGrowth',
+    'payoutRatio', 'targetMeanPrice', 'targetLowPrice', 'targetHighPrice',
+    'numberOfAnalystOpinions', 'recommendationKey',
+}
+
+def _secret(name):
+    try:
+        return st.secrets.get(name, '') or ''
+    except Exception:
+        return ''
+
+def _http_json(url, headers=None, timeout=12):
+    import urllib.request as ur, ssl
+    req = ur.Request(url, headers=headers or {'User-Agent': 'Mozilla/5.0'})
+    with ur.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+def _fnum(v):
+    # Coerce to float, rejecting None/''/NaN/inf so a bad value never
+    # masquerades as a real one and blocks a later provider from filling it.
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):
+        return None
+    return v
+
+def _put(info, sources, provider, field, value):
+    # Fill a field only if still empty. Returns True when it was filled.
+    if value is None or info.get(field) is not None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    info[field] = value
+    sources.setdefault(provider, []).append(field)
+    return True
+
+# ── Provider 1: Alpaca ─────────────────────────────────────────────────────
+def _alpaca_headers():
+    kid, sec = _secret('APCA_API_KEY_ID'), _secret('APCA_API_SECRET_KEY')
+    if not kid or not sec:
+        return None
+    return {'APCA-API-KEY-ID': kid, 'APCA-API-SECRET-KEY': sec,
+            'User-Agent': 'Mozilla/5.0'}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _fetch_alpaca(sym):
+    # Returns (info_fragment, hist_df, dividends_series).
+    # Alpaca is the most reliable source for price and bars from cloud IPs --
+    # it authenticates by key, so there is no shared-IP rate limiting.
+    h = _alpaca_headers()
+    out, hist, divs = {}, pd.DataFrame(), pd.Series(dtype=float)
+    if not h:
+        return out, hist, divs
+    # Asset name / class
+    try:
+        a = _http_json(_ALPACA_TRADE + '/v2/assets/' + sym, h)
+        if a.get('name'):
+            out['longName'] = a['name']
+        out['_asset_class'] = a.get('class') or ''
+    except Exception:
+        pass
+    # Latest snapshot -> current price
+    try:
+        s = _http_json(_ALPACA_DATA + '/v2/stocks/' + sym + '/snapshot', h)
+        px = (((s.get('latestTrade') or {}).get('p'))
+              or ((s.get('dailyBar') or {}).get('c'))
+              or ((s.get('prevDailyBar') or {}).get('c')))
+        if _fnum(px):
+            out['currentPrice'] = _fnum(px)
+    except Exception:
+        pass
+    # Daily bars -> 1y history
+    try:
+        start = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+        url = (_ALPACA_DATA + '/v2/stocks/' + sym + '/bars?timeframe=1Day'
+               '&adjustment=all&limit=1000&start=' + start)
+        j = None
+        for suffix in ('', '&feed=iex'):
+            try:
+                j = _http_json(url + suffix, h)
+                if j.get('bars'):
+                    break
+            except Exception:
+                j = None
+        bars = (j or {}).get('bars') or []
+        if bars:
+            hist = pd.DataFrame({
+                'Open':   [_fnum(b.get('o')) for b in bars],
+                'High':   [_fnum(b.get('h')) for b in bars],
+                'Low':    [_fnum(b.get('l')) for b in bars],
+                'Close':  [_fnum(b.get('c')) for b in bars],
+                'Volume': [_fnum(b.get('v')) for b in bars],
+            }, index=pd.to_datetime([b.get('t') for b in bars], utc=True, errors='coerce'))
+            hist = hist.dropna(subset=['Close'])
+            hist.index = hist.index.tz_localize(None)
+    except Exception:
+        hist = pd.DataFrame()
+    # Cash dividends -> rate, ex-date, payment history
+    try:
+        start = (datetime.date.today() - datetime.timedelta(days=420)).isoformat()
+        end   = (datetime.date.today() + datetime.timedelta(days=90)).isoformat()
+        j = _http_json(_ALPACA_DATA + '/v1/corporate-actions?symbols=' + sym +
+                       '&types=cash_dividend&start=' + start + '&end=' + end +
+                       '&limit=200', h)
+        cds = ((j.get('corporate_actions') or {}).get('cash_dividends')) or []
+        rows = []
+        for c in cds:
+            amt = _fnum(c.get('rate'))
+            d = c.get('ex_date') or c.get('process_date')
+            if amt and d:
+                rows.append((pd.to_datetime(d, errors='coerce'), amt))
+        rows = [r for r in rows if pd.notna(r[0])]
+        if rows:
+            rows.sort(key=lambda r: r[0])
+            divs = pd.Series([r[1] for r in rows],
+                             index=pd.DatetimeIndex([r[0] for r in rows]))
+            today_ts = pd.Timestamp(datetime.date.today())
+            # Next upcoming ex-date if Alpaca has announced one
+            future = [r[0] for r in rows if r[0] >= today_ts]
+            if future:
+                out['exDividendDate'] = int(future[0].timestamp())
+            # Trailing 12-month cash total = the annual rate
+            past12 = [r[1] for r in rows
+                      if today_ts - pd.DateOffset(years=1) <= r[0] <= today_ts]
+            if past12:
+                out['trailingAnnualDividendRate'] = round(sum(past12), 4)
+    except Exception:
+        pass
+    return out, hist, divs
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _alpaca_benchmark():
+    # SPY daily closes, used to derive beta when no provider reports one.
+    h = _alpaca_headers()
+    if not h:
+        return pd.Series(dtype=float)
+    try:
+        start = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+        url = (_ALPACA_DATA + '/v2/stocks/SPY/bars?timeframe=1Day'
+               '&adjustment=all&limit=1000&start=' + start)
+        j = None
+        for suffix in ('', '&feed=iex'):
+            try:
+                j = _http_json(url + suffix, h)
+                if j.get('bars'):
+                    break
+            except Exception:
+                j = None
+        bars = (j or {}).get('bars') or []
+        if not bars:
+            return pd.Series(dtype=float)
+        s = pd.Series([_fnum(b.get('c')) for b in bars],
+                      index=pd.to_datetime([b.get('t') for b in bars],
+                                           utc=True, errors='coerce'))
+        s.index = s.index.tz_localize(None)
+        return s.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+# ── Provider 2: yfinance ───────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_yfinance(sym):
-    # Step 1: try yfinance directly (works when not rate-limited)
     try:
         import yfinance as yf
-        t    = yf.Ticker(sym)
+        t = yf.Ticker(sym)
         info = t.info or {}
         if info.get('currentPrice') or info.get('regularMarketPrice'):
-            hist = t.history(period='1y')
-            divs = t.dividends
-            return info, hist, divs, True   # True = success
+            try:
+                hist = t.history(period='1y')
+            except Exception:
+                hist = pd.DataFrame()
+            try:
+                divs = t.dividends
+            except Exception:
+                divs = pd.Series(dtype=float)
+            return info, hist, divs, True
     except Exception:
         pass
     return {}, pd.DataFrame(), pd.Series(dtype=float), False
+
+# ── Provider 3: Financial Modeling Prep (optional key) ─────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_fmp(sym):
+    key = _secret('FMP_API_KEY')
+    out = {}
+    if not key:
+        return out
+    base = 'https://financialmodelingprep.com/api/v3/'
+    try:
+        p = _http_json(base + 'profile/' + sym + '?apikey=' + key)
+        p = p[0] if isinstance(p, list) and p else {}
+        for src_k, dst_k in [('companyName','longName'), ('sector','sector'),
+                             ('industry','industry')]:
+            if p.get(src_k):
+                out[dst_k] = p[src_k]
+        for src_k, dst_k in [('price','currentPrice'), ('mktCap','marketCap'),
+                             ('beta','beta'), ('lastDiv','trailingAnnualDividendRate')]:
+            if _fnum(p.get(src_k)):
+                out[dst_k] = _fnum(p[src_k])
+    except Exception:
+        pass
+    try:
+        r = _http_json(base + 'ratios-ttm/' + sym + '?apikey=' + key)
+        r = r[0] if isinstance(r, list) and r else {}
+        pairs = [
+            ('peRatioTTM','trailingPE'), ('priceToBookRatioTTM','priceToBook'),
+            ('priceToSalesRatioTTM','priceToSalesTrailing12Months'),
+            ('netProfitMarginTTM','profitMargins'),
+            ('operatingProfitMarginTTM','operatingMargins'),
+            ('returnOnEquityTTM','returnOnEquity'),
+            ('returnOnAssetsTTM','returnOnAssets'),
+            ('debtEquityRatioTTM','debtToEquity'),
+            ('currentRatioTTM','currentRatio'),
+            ('payoutRatioTTM','payoutRatio'),
+            ('dividendYielTTM','trailingAnnualDividendYield'),
+        ]
+        for src_k, dst_k in pairs:
+            v = _fnum(r.get(src_k))
+            if v is not None:
+                out[dst_k] = v
+    except Exception:
+        pass
+    return out
+
+# ── Provider 4: Finnhub (optional key) ─────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_finnhub(sym):
+    key = _secret('FINNHUB_API_KEY')
+    out = {}
+    if not key:
+        return out
+    base = 'https://finnhub.io/api/v1/'
+    try:
+        j = _http_json(base + 'stock/metric?symbol=' + sym + '&metric=all&token=' + key)
+        m = j.get('metric') or {}
+        pairs = [
+            ('52WeekHigh','fiftyTwoWeekHigh'), ('52WeekLow','fiftyTwoWeekLow'),
+            ('beta','beta'), ('peTTM','trailingPE'), ('pbAnnual','priceToBook'),
+            ('psTTM','priceToSalesTrailing12Months'),
+            ('netProfitMarginTTM','profitMargins'),
+            ('operatingMarginTTM','operatingMargins'),
+            ('roeTTM','returnOnEquity'), ('roaTTM','returnOnAssets'),
+            ('totalDebt/totalEquityAnnual','debtToEquity'),
+            ('currentRatioAnnual','currentRatio'),
+            ('revenueGrowthTTMYoy','revenueGrowth'),
+            ('epsGrowthTTMYoy','earningsGrowth'),
+            ('dividendYieldIndicatedAnnual','trailingAnnualDividendYield'),
+            ('payoutRatioTTM','payoutRatio'),
+        ]
+        for src_k, dst_k in pairs:
+            v = _fnum(m.get(src_k))
+            if v is None:
+                continue
+            # Finnhub reports margins/ROE/growth in percent, not decimal
+            if dst_k in ('profitMargins','operatingMargins','returnOnEquity',
+                         'returnOnAssets','revenueGrowth','earningsGrowth',
+                         'payoutRatio'):
+                v = v / 100.0
+            if dst_k == 'trailingAnnualDividendYield':
+                v = _norm_yield(v)
+            if v is not None:
+                out[dst_k] = v
+    except Exception:
+        pass
+    try:
+        j = _http_json(base + 'stock/price-target?symbol=' + sym + '&token=' + key)
+        for src_k, dst_k in [('targetMean','targetMeanPrice'),
+                             ('targetLow','targetLowPrice'),
+                             ('targetHigh','targetHighPrice')]:
+            if _fnum(j.get(src_k)):
+                out[dst_k] = _fnum(j[src_k])
+    except Exception:
+        pass
+    try:
+        j = _http_json(base + 'stock/recommendation?symbol=' + sym + '&token=' + key)
+        r = j[0] if isinstance(j, list) and j else {}
+        sb, b = int(r.get('strongBuy') or 0), int(r.get('buy') or 0)
+        h_, s_, ss = (int(r.get('hold') or 0), int(r.get('sell') or 0),
+                      int(r.get('strongSell') or 0))
+        n = sb + b + h_ + s_ + ss
+        if n:
+            out['numberOfAnalystOpinions'] = n
+            score = (sb*1 + b*2 + h_*3 + s_*4 + ss*5) / n
+            out['recommendationKey'] = ('strong_buy' if score <= 1.5 else
+                                        'buy' if score <= 2.5 else
+                                        'hold' if score <= 3.5 else
+                                        'sell' if score <= 4.5 else 'strong_sell')
+    except Exception:
+        pass
+    return out
+
+# ── Provider 5: Stooq (no key, EOD history fallback) ───────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_stooq_hist(sym):
+    # Free end-of-day OHLCV. Last-resort price history when every keyed
+    # provider is unavailable.
+    try:
+        import urllib.request as ur, ssl, csv, io as _io
+        url = 'https://stooq.com/q/d/l/?s=' + sym.lower() + '.us&i=d'
+        req = ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with ur.urlopen(req, timeout=12,
+                        context=ssl.create_default_context()) as r:
+            txt = r.read().decode('utf-8', 'ignore')
+        rows = list(csv.DictReader(_io.StringIO(txt)))
+        if not rows or 'Close' not in (rows[0] or {}):
+            return pd.DataFrame()
+        rows = rows[-260:]
+        df = pd.DataFrame({
+            'Open':   [_fnum(r.get('Open')) for r in rows],
+            'High':   [_fnum(r.get('High')) for r in rows],
+            'Low':    [_fnum(r.get('Low')) for r in rows],
+            'Close':  [_fnum(r.get('Close')) for r in rows],
+            'Volume': [_fnum(r.get('Volume')) for r in rows],
+        }, index=pd.to_datetime([r.get('Date') for r in rows], errors='coerce'))
+        return df.dropna(subset=['Close'])
+    except Exception:
+        return pd.DataFrame()
+
+# ── Derivation layer ───────────────────────────────────────────────────────
+def _derive_fields(info, hist, divs, sources, benchmark=None):
+    # Compute whatever can be computed from data already in hand. This is what
+    # turns a half-empty page into a full one without another network call.
+    close = hist['Close'].dropna() if (not hist.empty and 'Close' in hist) else None
+
+    if close is not None and len(close) > 1:
+        _put(info, sources, 'derived', 'currentPrice', _fnum(close.iloc[-1]))
+        win = close.iloc[-252:] if len(close) >= 252 else close
+        hi = hist['High'].dropna().iloc[-252:] if 'High' in hist else win
+        lo = hist['Low'].dropna().iloc[-252:] if 'Low' in hist else win
+        _put(info, sources, 'derived', 'fiftyTwoWeekHigh',
+             _fnum(max(hi.max(), win.max())))
+        _put(info, sources, 'derived', 'fiftyTwoWeekLow',
+             _fnum(min(lo.min(), win.min())))
+        # Beta vs SPY, 1-year daily returns (vendors often use 5-year monthly,
+        # so this can differ from a published figure -- it is labelled derived)
+        if info.get('beta') is None and benchmark is not None and len(benchmark) > 30:
+            try:
+                a = close.pct_change().dropna()
+                b = benchmark.pct_change().dropna()
+                j = pd.concat([a, b], axis=1, join='inner').dropna()
+                if len(j) > 60:
+                    var = float(j.iloc[:, 1].var())
+                    # Guard against a degenerate benchmark series: near-zero
+                    # variance makes the ratio explode into nonsense.
+                    if var > 1e-8:
+                        b_ = float(j.cov().iloc[0, 1]) / var
+                        # Real-world equity betas essentially never sit outside
+                        # this band; anything beyond it is a data artifact.
+                        if -4.0 <= b_ <= 4.0:
+                            _put(info, sources, 'derived', 'beta', round(b_, 3))
+            except Exception:
+                pass
+
+    px = _fnum(info.get('currentPrice'))
+
+    # Dividend rate from the actual payment stream
+    if divs is not None and len(divs) and info.get('trailingAnnualDividendRate') is None:
+        try:
+            idx = divs.index
+            if getattr(idx, 'tz', None) is not None:
+                divs = divs.copy()
+                divs.index = idx.tz_convert(None)
+            cutoff = pd.Timestamp(datetime.date.today()) - pd.DateOffset(years=1)
+            recent = divs[divs.index >= cutoff]
+            if len(recent):
+                _put(info, sources, 'derived', 'trailingAnnualDividendRate',
+                     round(float(recent.sum()), 4))
+        except Exception:
+            pass
+
+    rate = _fnum(info.get('trailingAnnualDividendRate'))
+    if rate and px and px > 0:
+        _put(info, sources, 'derived', 'trailingAnnualDividendYield',
+             round(rate / px, 6))
+
+    # Valuation ratios from raw statement figures when the ratio is absent
+    eps  = _fnum(info.get('trailingEps'))
+    feps = _fnum(info.get('forwardEps'))
+    bvps = _fnum(info.get('bookValue'))
+    shares = _fnum(info.get('sharesOutstanding')) or _fnum(info.get('impliedSharesOutstanding'))
+    rev  = _fnum(info.get('totalRevenue'))
+    ni   = _fnum(info.get('netIncomeToCommon'))
+
+    if px and shares:
+        _put(info, sources, 'derived', 'marketCap', round(px * shares))
+    if px and eps and eps > 0:
+        _put(info, sources, 'derived', 'trailingPE', round(px / eps, 2))
+    if px and feps and feps > 0:
+        _put(info, sources, 'derived', 'forwardPE', round(px / feps, 2))
+    if px and bvps and bvps > 0:
+        _put(info, sources, 'derived', 'priceToBook', round(px / bvps, 2))
+    mc = _fnum(info.get('marketCap'))
+    if mc and rev and rev > 0:
+        _put(info, sources, 'derived', 'priceToSalesTrailing12Months',
+             round(mc / rev, 2))
+    if ni is not None and rev:
+        _put(info, sources, 'derived', 'profitMargins', round(ni / rev, 4))
+    if rate and eps and eps > 0:
+        _put(info, sources, 'derived', 'payoutRatio', round(rate / eps, 4))
+
+    # Short interest ratios
+    ss  = _fnum(info.get('sharesShort'))
+    flt = _fnum(info.get('floatShares'))
+    adv = _fnum(info.get('averageVolume10days')) or _fnum(info.get('averageVolume'))
+    if ss and flt and flt > 0:
+        _put(info, sources, 'derived', 'shortPercentOfFloat', round(ss / flt, 4))
+    if ss and adv and adv > 0:
+        _put(info, sources, 'derived', 'shortRatio', round(ss / adv, 2))
+
+    # Most recent past ex-date, when no upcoming one was announced
+    if info.get('exDividendDate') is None and divs is not None and len(divs):
+        try:
+            _put(info, sources, 'derived', 'exDividendDate',
+                 int(pd.Timestamp(divs.index[-1]).timestamp()))
+        except Exception:
+            pass
+    return info
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_stock_analysis(sym, live=False):
+    sym = sym.upper().strip()
+    scan_dict = _load_scan_dict()
+    rec = scan_dict.get(sym, {})
+
+    info, sources = {}, {}
+    hist = pd.DataFrame()
+    divs = pd.Series(dtype=float)
+    hist_source = 'none'
+    providers_tried, providers_ok = [], []
+
+    def absorb(provider, frag):
+        for k, v in (frag or {}).items():
+            if k.startswith('_'):
+                info.setdefault(k, v)
+                continue
+            if k in _YF_FIELDS:
+                _put(info, sources, provider, k, v)
+        if frag:
+            providers_ok.append(provider)
+
+    if live:
+        # 1. Alpaca -- key-authenticated, so no shared-IP throttling
+        if _alpaca_headers():
+            providers_tried.append('alpaca')
+            a_info, a_hist, a_divs = _fetch_alpaca(sym)
+            absorb('alpaca', a_info)
+            if not a_hist.empty:
+                hist, hist_source = a_hist, 'alpaca'
+            if len(a_divs):
+                divs = a_divs
+
+        # 2. yfinance -- broadest fundamentals
+        providers_tried.append('yfinance')
+        y_info, y_hist, y_divs, y_ok = _fetch_yfinance(sym)
+        if y_ok:
+            absorb('yfinance', y_info)
+            # Keep raw statement figures for the derivation layer
+            for k in ('trailingEps', 'forwardEps', 'bookValue', 'sharesOutstanding',
+                      'impliedSharesOutstanding', 'totalRevenue', 'netIncomeToCommon',
+                      'sharesShort', 'floatShares', 'averageVolume10days',
+                      'averageVolume', 'quoteType'):
+                if y_info.get(k) is not None:
+                    info.setdefault(k, y_info[k])
+            if hist.empty and not y_hist.empty:
+                hist, hist_source = y_hist, 'yfinance'
+            if not len(divs) and len(y_divs):
+                divs = y_divs
+
+        # 3/4. Keyed fundamentals providers
+        if _secret('FMP_API_KEY'):
+            providers_tried.append('fmp')
+            absorb('fmp', _fetch_fmp(sym))
+        if _secret('FINNHUB_API_KEY'):
+            providers_tried.append('finnhub')
+            absorb('finnhub', _fetch_finnhub(sym))
+
+    # 5. Nightly scan dump
+    if rec:
+        scan_map = {
+            'longName':                   rec.get('Ticker', sym),
+            'sector':                     rec.get('Sector'),
+            'industry':                   rec.get('Sector'),
+            'currentPrice':               _fnum(rec.get('Price')),
+            'marketCap':                  _fnum(rec.get('MarketCap')),
+            'trailingPE':                 _fnum(rec.get('P/E')),
+            'fiftyTwoWeekHigh':           _fnum(rec.get('RangeHigh')),
+            'fiftyTwoWeekLow':            _fnum(rec.get('RangeLow')),
+            'trailingAnnualDividendYield': _pct_to_dec(rec.get('DividendYieldPct')),
+            'trailingAnnualDividendRate': _fnum(rec.get('DividendRate')),
+            'payoutRatio':                _pct_to_dec(rec.get('DividendPayoutRatio')),
+            'exDividendDate':             rec.get('ExDividendDate'),
+            'shortPercentOfFloat':        _pct_to_dec(rec.get('ShortPctFloatRaw')),
+            'shortRatio':                 _fnum(rec.get('DaysToCover')),
+            'revenueGrowth':              _norm_growth(rec.get('RevenueGrowth')),
+            'earningsGrowth':             _norm_growth(rec.get('EarningsGrowth')),
+        }
+        for field, val in scan_map.items():
+            _put(info, sources, 'scan', field, val)
+        if rec.get('DividendFrequency'):
+            info.setdefault('dividendFrequency', rec['DividendFrequency'])
+        if hist.empty:
+            sh = _hist_to_df(rec.get('_hist'))
+            if not sh.empty:
+                hist, hist_source = sh, 'scan'
+
+    # 6. Stooq -- free EOD history when nothing else supplied bars
+    if live and hist.empty:
+        providers_tried.append('stooq')
+        s_hist = _fetch_stooq_hist(sym)
+        if not s_hist.empty:
+            hist, hist_source = s_hist, 'stooq'
+            providers_ok.append('stooq')
+
+    # 7. Derive everything computable from what we already have
+    bench = _alpaca_benchmark() if (live and _alpaca_headers()) else None
+    info = _derive_fields(info, hist, divs, sources, bench)
+
+    # 8. Claude web search -- last resort, only for what is still empty and
+    #    only for fields that actually exist for this security type
+    is_fund = str(info.get('quoteType') or info.get('_asset_class') or '').upper() in (
+        'ETF', 'MUTUALFUND', 'FUND', 'INDEX')
+    still = [f for f in _YF_FIELDS
+             if info.get(f) is None and not (is_fund and f in _EQUITY_ONLY)]
+    if live and still and _secret('ANTHROPIC_API_KEY'):
+        providers_tried.append('claude')
+        for k, v in (_fetch_claude_live(sym, still) or {}).items():
+            if k in _YF_FIELDS:
+                _put(info, sources, 'claude', k, v)
+        # Derive again -- Claude may have supplied an input that unlocks a ratio
+        info = _derive_fields(info, hist, divs, sources, bench)
+
+    # Screener signals always come from the scan (pre-computed, most accurate)
+    if rec:
+        info.update({
+            '_rsi_score':     rec.get('RSI'),
+            '_macd_score':    rec.get('MACD'),
+            '_obv_score':     rec.get('OBV'),
+            '_gc_score':      rec.get('GoldenCross'),
+            '_ma50_val':      rec.get('MA50'),
+            '_mfi_score':     rec.get('MFI'),
+            '_piotroski':     rec.get('Piotroski'),
+            '_range_pos':     rec.get('RangePct'),
+            '_short_squeeze': rec.get('ShortSqueeze'),
+        })
+
+    if not info.get('currentPrice'):
+        return {}, pd.DataFrame(), divs, (
+            sym + ' not found in any source. Check the ticker symbol.'), {}
+
+    missing = [f for f in _YF_FIELDS if info.get(f) is None]
+    na_type = [f for f in missing if is_fund and f in _EQUITY_ONLY]
+    truly   = [f for f in missing if f not in na_type]
+    applicable = len(_YF_FIELDS) - len(na_type)
+
+    source_summary = {
+        'by_provider':  {k: len(v) for k, v in sources.items() if v},
+        'field_source': {f: p for p, fl in sources.items() for f in fl},
+        'hist_source':  hist_source,
+        'scan_in_repo': bool(rec),
+        'is_fund':      is_fund,
+        'applicable':   applicable,
+        'filled':       applicable - len(truly),
+        'na_fields':    na_type,
+        'none_fields':  truly,
+        'providers_tried': providers_tried,
+        'providers_ok':    sorted(set(providers_ok)),
+        # legacy keys used elsewhere in the app
+        'yf_ok':        'yfinance' in providers_ok,
+        'yf_count':     len(sources.get('yfinance', [])),
+        'scan_count':   len(sources.get('scan', [])),
+        'claude_count': len(sources.get('claude', [])),
+        'none_count':   len(truly),
+        'scan_fields':  sources.get('scan', []),
+        'claude_fields': sources.get('claude', []),
+    }
+    return info, hist, divs, None, source_summary
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_claude_live(sym, missing_fields):
@@ -482,128 +1065,6 @@ def _fetch_claude_live(sym, missing_fields):
         return data
     except Exception:
         return {}
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_stock_analysis(sym, live=False):
-    sym = sym.upper().strip()
-    divs = pd.Series(dtype=float)
-    scan_dict = _load_scan_dict()
-    rec = scan_dict.get(sym, {})
-
-    # Track where each piece of data came from
-    sources = {'yfinance': [], 'scan': [], 'claude': [], 'none': []}
-    info = {}
-    hist = pd.DataFrame()
-
-    if live:
-        # ── Step 1: Try yfinance for live data (Refresh / explicit live mode) ──
-        yf_info, hist, yf_divs, yf_ok = _fetch_yfinance(sym)
-        if yf_ok:
-            info = dict(yf_info)
-            if not yf_divs.empty:
-                divs = yf_divs
-            sources['yfinance'] = [f for f in _YF_FIELDS if info.get(f) is not None]
-        missing = [f for f in _YF_FIELDS if not info.get(f)]
-    else:
-        yf_ok = False
-        missing = list(_YF_FIELDS)
-
-    # ── Fill from nightly scan dump ─────────────────────────────────────
-    if rec:
-        scan_map = {
-            'longName':                   rec.get('Ticker', sym),
-            'sector':                     rec.get('Sector'),
-            'industry':                   rec.get('Sector'),
-            'currentPrice':               rec.get('Price'),
-            'marketCap':                  rec.get('MarketCap'),
-            'trailingPE':                 rec.get('P/E'),
-            'fiftyTwoWeekHigh':           rec.get('RangeHigh'),
-            'fiftyTwoWeekLow':            rec.get('RangeLow'),
-            'trailingAnnualDividendYield':(rec.get('DividendYieldPct') or 0) / 100
-                                          if rec.get('DividendYieldPct') else None,
-            'trailingAnnualDividendRate': rec.get('DividendRate'),
-            'payoutRatio':                (rec.get('DividendPayoutRatio') or 0) / 100
-                                          if rec.get('DividendPayoutRatio') else None,
-            'exDividendDate':             rec.get('ExDividendDate'),
-            'shortPercentOfFloat':        (rec.get('ShortPctFloatRaw') or 0) / 100
-                                          if rec.get('ShortPctFloatRaw') else None,
-            'shortRatio':                 rec.get('DaysToCover'),
-            # Scan already stores these as decimals (0.124 = 12.4%).
-            # The old code divided by 100 again -- 100x understated.
-            'revenueGrowth':              _norm_growth(rec.get('RevenueGrowth')),
-            'earningsGrowth':             _norm_growth(rec.get('EarningsGrowth')),
-        }
-        fields_to_fill = list(missing) if live else list(_YF_FIELDS)
-        for field in fields_to_fill:
-            val = scan_map.get(field)
-            if val is not None and not info.get(field):
-                info[field] = val
-                sources['scan'].append(field)
-                if live:
-                    missing = [f for f in missing if f != field]
-        # Payment frequency is known by the scan -- carry it through so the
-        # analyzer/calculator don't fall back to assuming "Quarterly".
-        if rec.get('DividendFrequency'):
-            info['dividendFrequency'] = rec['DividendFrequency']
-
-    # ── Claude web search only in live mode ───────────────────────────────
-    if live and missing and not info.get('currentPrice'):
-        claude_data = _fetch_claude_live(sym, _YF_FIELDS)
-        for k, v in claude_data.items():
-            if v is not None and not info.get(k):
-                info[k] = v
-                sources['claude'].append(k)
-                missing = [f for f in missing if f != k]
-    elif live and missing:
-        claude_data = _fetch_claude_live(sym, missing)
-        for k, v in claude_data.items():
-            if v is not None and not info.get(k):
-                info[k] = v
-                sources['claude'].append(k)
-                missing = [f for f in missing if f != k]
-
-    # Track anything still unavailable
-    sources['none'] = [f for f in _YF_FIELDS if not info.get(f)]
-
-    # ── Price history: use yfinance if we got it, else scan _hist ─────────
-    hist_source = 'yfinance' if not hist.empty else 'none'
-    if hist.empty and rec:
-        hist = _hist_to_df(rec.get('_hist'))
-        if not hist.empty:
-            hist_source = 'scan'
-
-    # ── Screener signal scores from scan (always override -- most accurate) 
-    if rec:
-        info.update({
-            '_rsi_score':    rec.get('RSI'),
-            '_macd_score':   rec.get('MACD'),
-            '_obv_score':    rec.get('OBV'),
-            '_gc_score':     rec.get('GoldenCross'),
-            '_ma50_val':     rec.get('MA50'),
-            '_mfi_score':    rec.get('MFI'),
-            '_piotroski':    rec.get('Piotroski'),
-            '_range_pos':    rec.get('RangePct'),
-            '_short_squeeze':rec.get('ShortSqueeze'),
-        })
-
-    if not info:
-        return {}, pd.DataFrame(), divs, (
-            sym + ' not found. Check ticker is correct (e.g. IONQ, AAPL, ET).'), {}
-
-    # Build human-readable source summary
-    source_summary = {
-        'yf_ok':       yf_ok,
-        'yf_count':    len(sources['yfinance']),
-        'scan_count':  len(sources['scan']),
-        'claude_count':len(sources['claude']),
-        'none_count':  len(sources['none']),
-        'hist_source': hist_source,
-        'scan_in_repo': bool(rec),
-        'scan_fields': sources['scan'],
-        'claude_fields': sources['claude'],
-        'none_fields': sources['none'],
-    }
-    return info, hist, divs, None, source_summary
 
 def _calc_info_from_scan_row(row):
     return {
@@ -1009,16 +1470,31 @@ with tab_az:
     if not live_mode:
         st.caption('Using scan data only. Click **Refresh** in the sidebar for live Yahoo/Claude data.')
     # Show setup tip if no API key configured
-    _has_key = bool(st.secrets.get('ANTHROPIC_API_KEY', ''))
-    if not _has_key:
-        st.info(
-            'For live fundamental data (P/B, P/S, Beta, Margins, Analyst targets), '
-            'add your Anthropic API key to Streamlit secrets:\n'
-            '1. Click the 3-dot menu (top right) -> Settings -> Secrets\n'
-            '2. Add: ANTHROPIC_API_KEY = "sk-ant-..."\n'
-            'Without it, the analyzer still works using your scan data '
-            'for price history, technicals, and dividend metrics.'
-        )
+    _keys = {
+        'Alpaca (price, bars, dividends)': bool(_secret('APCA_API_KEY_ID') and
+                                                _secret('APCA_API_SECRET_KEY')),
+        'Financial Modeling Prep (ratios)': bool(_secret('FMP_API_KEY')),
+        'Finnhub (metrics, analyst targets)': bool(_secret('FINNHUB_API_KEY')),
+        'Claude web search (last resort)': bool(_secret('ANTHROPIC_API_KEY')),
+    }
+    if not all(_keys.values()):
+        with st.expander('Raise data coverage -- ' + str(sum(_keys.values()))
+                         + ' of 4 sources connected'):
+            for _label, _on in _keys.items():
+                st.markdown(('- **Connected** -- ' if _on else '- Not set -- ') + _label)
+            st.markdown(
+                'Add keys under the 3-dot menu -> Settings -> Secrets:\n'
+                '```\n'
+                'APCA_API_KEY_ID = "..."\n'
+                'APCA_API_SECRET_KEY = "..."\n'
+                'FMP_API_KEY = "..."\n'
+                'FINNHUB_API_KEY = "..."\n'
+                'ANTHROPIC_API_KEY = "sk-ant-..."\n'
+                '```\n'
+                'Alpaca and Finnhub have free tiers and are the biggest wins: '
+                'both authenticate by key, so neither is affected by the shared-IP '
+                'rate limiting that blocks Yahoo Finance on Streamlit Cloud.'
+            )
     az1, az2 = st.columns([2,3])
     with az1:
         az_ticker = st.text_input('Ticker symbol', placeholder='e.g. ET, WPM, DOC', key='az_ticker')
@@ -1199,42 +1675,65 @@ with tab_az:
                 st.caption(_n_)
 
             # ── Data source readout ─────────────────────────────────────
-            def _src_badge(label, count, total, color, bg):
-                if count == 0: return ''
-                pct = int(count / total * 100) if total else 0
+            _PROV = [
+                ('alpaca',   'Alpaca',      '#22d3a6'),
+                ('yfinance', 'Yahoo',       '#4ac4ff'),
+                ('fmp',      'FMP',         '#ff9f4a'),
+                ('finnhub',  'Finnhub',     '#7ee081'),
+                ('scan',     'Nightly Scan','#ffe066'),
+                ('derived',  'Computed',    '#9ecbff'),
+                ('claude',   'Claude Web',  '#b388ff'),
+            ]
+            def _src_badge(label, count, color):
+                if not count: return ''
                 return (
                     '<span style="display:inline-flex;align-items:center;gap:5px;'
-                    'background:' + bg + ';border:1px solid ' + color + ';'
+                    'background:rgba(255,255,255,0.05);border:1px solid ' + color + ';'
                     'border-radius:5px;padding:3px 10px;font-size:0.72rem;'
-                    'font-family:DM Mono,monospace;color:' + color + ';margin-right:6px">'
-                    + label + ' ' + str(count) + ' fields (' + str(pct) + '%)</span>'
+                    'font-family:DM Mono,monospace;color:' + color + ';'
+                    'margin:0 6px 4px 0">' + label + ' ' + str(count) + '</span>'
                 )
-            _total = len(_YF_FIELDS)
-            _yfc   = _src.get('yf_count', 0)
-            _sc    = _src.get('scan_count', 0)
-            _cc    = _src.get('claude_count', 0)
-            _nc    = _src.get('none_count', 0)
+            _byp   = _src.get('by_provider', {}) or {}
+            _appl  = _src.get('applicable', len(_YF_FIELDS)) or len(_YF_FIELDS)
+            _fill  = _src.get('filled', 0)
+            _navs  = _src.get('na_fields', []) or []
+            _gone  = _src.get('none_fields', []) or []
             _hs    = _src.get('hist_source', 'unknown')
-            _hist_label = {'yfinance': 'Yahoo Finance', 'scan': 'Nightly Scan', 'none': 'unavailable'}.get(_hs, _hs)
-            _badges = (
-                _src_badge('Yahoo Finance', _yfc, _total, '#4ac4ff', 'rgba(74,196,255,0.08)') +
-                _src_badge('Nightly Scan', _sc, _total, '#ffe066', 'rgba(255,224,102,0.08)') +
-                _src_badge('Claude Web Search', _cc, _total, '#b388ff', 'rgba(179,136,255,0.08)') +
-                (_src_badge('Unavailable', _nc, _total, '#ff6666', 'rgba(255,102,102,0.08)') if _nc > 0 else '')
-            )
-            _price_chart_note = 'Price chart: ' + _hist_label
-            _scan_note = ' | In nightly scan: Yes' if _src.get('scan_in_repo') else ' | Not in nightly scan'
+            _hist_label = {'alpaca':'Alpaca', 'yfinance':'Yahoo Finance',
+                           'scan':'Nightly Scan', 'stooq':'Stooq',
+                           'none':'unavailable'}.get(_hs, _hs)
+            _badges = ''.join(_src_badge(lbl, _byp.get(k, 0), col)
+                              for k, lbl, col in _PROV)
+            if _gone:
+                _badges += _src_badge('Not found', len(_gone), '#ff6666')
+            _pct = int(_fill / _appl * 100) if _appl else 0
+            _bar_col = '#22d3a6' if _pct >= 90 else ('#ffe066' if _pct >= 70 else '#ff9f4a')
             if _src:
                 st.markdown(
-                    '<div style="margin:4px 0 12px">'
+                    '<div style="margin:4px 0 6px">'
                     '<span style="font-size:0.65rem;color:#666;text-transform:uppercase;'
-                    'letter-spacing:0.1em;font-family:DM Mono,monospace">Data sources: </span>'
-                    + _badges +
+                    'letter-spacing:0.1em;font-family:DM Mono,monospace">Field coverage </span>'
+                    '<span style="font-family:DM Mono,monospace;font-size:0.78rem;color:'
+                    + _bar_col + ';font-weight:600">' + str(_fill) + '/' + str(_appl)
+                    + ' (' + str(_pct) + '%)</span>'
                     '<span style="font-size:0.68rem;color:#666;font-family:DM Mono,monospace">'
-                    ' | ' + _price_chart_note + _scan_note + '</span>'
-                    '</div>',
+                    '  |  Price chart: ' + _hist_label
+                    + ('  |  In nightly scan' if _src.get('scan_in_repo')
+                       else '  |  Not in nightly scan') + '</span></div>'
+                    '<div style="margin:0 0 10px">' + _badges + '</div>',
                     unsafe_allow_html=True
                 )
+                if _navs:
+                    st.caption('Not applicable to this security type ('
+                        + str(len(_navs)) + ' fields): ' + ', '.join(_navs[:8])
+                        + ('...' if len(_navs) > 8 else '')
+                        + '. Funds and ETFs have no earnings, equity or analyst coverage.')
+                if _gone:
+                    st.caption('No source returned: ' + ', '.join(_gone[:8])
+                        + ('...' if len(_gone) > 8 else '')
+                        + '. Adding API keys in Settings -> Secrets raises coverage '
+                          '(APCA_API_KEY_ID + APCA_API_SECRET_KEY, FMP_API_KEY, '
+                          'FINNHUB_API_KEY, ANTHROPIC_API_KEY).')
             st.markdown('---')
             colA, colB, colC = st.columns(3)
 
