@@ -601,35 +601,98 @@ def calculate_gross_margin(fin) -> float | None:
         return None
 
 
+def _invested_capital(bal, i=0):
+    """Invested capital with a fallback ladder.
+
+    Banks, insurers and other financials publish an UNCLASSIFIED balance sheet:
+    there is no "Total Current Liabilities" line at all. The old formula
+    required it, so ~77% of Financial Services names returned None for ROIC
+    (a quarter of the whole universe). Ladder, best first:
+      1. Assets - Current Liabilities - Cash   (classic, non-financials)
+      2. Total Debt + Total Equity             (capital actually employed —
+                                                works for ANY balance sheet)
+      3. Total Assets - Total Liabilities + Total Debt
+    """
+    def g(*labels):
+        s = _get_bal_value(bal, *labels)
+        if s is None or i >= len(s):
+            return None
+        v = s.iloc[i]
+        return None if pd.isna(v) else float(v)
+
+    assets = g("Total Assets", "TotalAssets")
+    cur_li = g("Total Current Liabilities", "TotalCurrentLiabilities",
+               "Current Liabilities", "CurrentLiabilities")
+    cash = g("Cash And Cash Equivalents",
+             "Cash Cash Equivalents And Short Term Investments",
+             "CashAndCashEquivalents", "Cash") or 0.0
+
+    # 1. classic
+    if assets is not None and cur_li is not None:
+        ic = assets - cur_li - cash
+        if ic and not pd.isna(ic):
+            return ic
+
+    # 2. debt + equity — the definition that works for financials
+    equity = g("Total Equity Gross Minority Interest", "Stockholders Equity",
+               "Total Stockholder Equity", "StockholdersEquity",
+               "Common Stock Equity")
+    debt = g("Total Debt", "TotalDebt")
+    if debt is None:
+        ld = g("Long Term Debt", "LongTermDebt") or 0.0
+        sd = g("Current Debt", "Short Long Term Debt", "CurrentDebt",
+               "Short Term Debt") or 0.0
+        debt = (ld + sd) if (ld or sd) else None
+    if equity is not None:
+        ic = equity + (debt or 0.0)
+        if ic and not pd.isna(ic) and ic > 0:
+            return ic
+
+    # 3. assets - total liabilities + debt
+    tot_li = g("Total Liabilities Net Minority Interest", "Total Liabilities",
+               "TotalLiabilities")
+    if assets is not None and tot_li is not None:
+        ic = assets - tot_li + (debt or 0.0)
+        if ic and not pd.isna(ic) and ic > 0:
+            return ic
+    return None
+
+
 def calculate_roic(fin, bal):
     try:
-        ebit_s = _get_fin_value(fin, "EBIT","Ebit","Operating Income","OperatingIncome","EBITDA","Ebitda")
-        if ebit_s is None: return None
-        assets = _get_bal_value(bal, "Total Assets","TotalAssets")
-        liab   = _get_bal_value(bal, "Total Current Liabilities","TotalCurrentLiabilities","Current Liabilities","CurrentLiabilities")
-        if assets is None or liab is None: return None
-        cash_s = _get_bal_value(bal, "Cash And Cash Equivalents","Cash Cash Equivalents And Short Term Investments","CashAndCashEquivalents","Cash")
-        cash   = cash_s.iloc[0] if cash_s is not None else 0
-        ic     = assets.iloc[0] - liab.iloc[0] - cash
-        if pd.isna(ic) or ic == 0: return None
-        roic   = ebit_s.iloc[0] * 0.79 / ic
+        ebit_s = _get_fin_value(fin, "EBIT","Ebit","Operating Income","OperatingIncome",
+                                "Operating Revenue","EBITDA","Ebitda")
+        if ebit_s is None:
+            # financials often report Pretax Income but no Operating Income
+            ebit_s = _get_fin_value(fin, "Pretax Income", "Income Before Tax",
+                                    "PretaxIncome", "Net Income")
+        if ebit_s is None or len(ebit_s) == 0: return None
+        ic = _invested_capital(bal, 0)
+        if ic is None or ic == 0: return None
+        ebit = ebit_s.iloc[0]
+        if pd.isna(ebit): return None
+        roic = float(ebit) * 0.79 / ic
         return None if pd.isna(roic) else roic
     except Exception:
         return None
 
 
 def calculate_roic_trend(fin, bal):
+    """Year-over-year change in ROIC, using the same invested-capital ladder
+    so financials get a trend too (previously None for ~77% of them)."""
     try:
-        ebit_s = _get_fin_value(fin, "EBIT","Ebit","Operating Income","OperatingIncome","EBITDA","Ebitda")
+        ebit_s = _get_fin_value(fin, "EBIT","Ebit","Operating Income","OperatingIncome",
+                                "EBITDA","Ebitda")
+        if ebit_s is None:
+            ebit_s = _get_fin_value(fin, "Pretax Income", "Income Before Tax",
+                                    "PretaxIncome", "Net Income")
         if ebit_s is None or len(ebit_s) < 2: return None
-        assets = _get_bal_value(bal, "Total Assets","TotalAssets")
-        liab   = _get_bal_value(bal, "Total Current Liabilities","TotalCurrentLiabilities","Current Liabilities","CurrentLiabilities")
-        if assets is None or liab is None or len(assets) < 2 or len(liab) < 2: return None
         def roic_at(i):
-            ic = assets.iloc[i] - liab.iloc[i]
-            if pd.isna(ic) or ic == 0: return None
-            v  = ebit_s.iloc[i] / ic
-            return None if pd.isna(v) else v
+            ic = _invested_capital(bal, i)
+            if ic is None or ic == 0 or i >= len(ebit_s): return None
+            v = ebit_s.iloc[i]
+            if pd.isna(v): return None
+            return float(v) / ic
         r0, r1 = roic_at(0), roic_at(1)
         return (r0 - r1) if (r0 is not None and r1 is not None) else None
     except Exception:
