@@ -1,22 +1,22 @@
 {
-  "as_of": "2026-08-07",
+  "as_of": "2026-08-10",
   "flow_lookback": 21,
   "top_sectors": [
-    "Financial Services",
+    "Energy",
     "Basic Materials",
-    "Industrials"
+    "Healthcare"
   ],
   "sector_flows": {
-    "Financial Services": 0.0955,
-    "Basic Materials": 0.0932,
-    "Industrials": 0.0621,
-    "Healthcare": 0.0594,
-    "Energy": 0.054,
-    "Technology": 0.0231,
-    "Consumer Cyclical": 0.011,
-    "Real Estate": 0.0045,
-    "Consumer Defensive": -0.0061,
-    "Communication Services": -0.018,
-    "Utilities": -0.1297
+    "Energy": 0.1258,
+    "Basic Materials": 0.0998,
+    "Healthcare": 0.0799,
+    "Financial Services": 0.0686,
+    "Industrials": 0.0298,
+    "Consumer Defensive": 0.0217,
+    "Communication Services": -0.0006,
+    "Consumer Cyclical": -0.0105,
+    "Technology": -0.0163,
+    "Real Estate": -0.0269,
+    "Utilities": -0.1355
   }
 }
