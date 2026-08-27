@@ -1,9 +1,9 @@
 {
-  "scanned_at_utc": "2026-08-26 08:57 UTC",
-  "scanned_at_display": "2026-08-26 08:57 AM UTC",
-  "elapsed_minutes": 66.6,
+  "scanned_at_utc": "2026-08-27 19:23 UTC",
+  "scanned_at_display": "2026-08-27 07:23 PM UTC",
+  "elapsed_minutes": 72.4,
   "total_tickers": 5788,
-  "valid_results": 5742,
+  "valid_results": 5760,
   "exchanges": {
     "sp500": 501,
     "nyse": 2405,
