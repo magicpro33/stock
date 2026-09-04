@@ -7,16 +7,16 @@
     "Basic Materials"
   ],
   "sector_flows": {
-    "Energy": 0.196,
-    "Healthcare": 0.1637,
-    "Basic Materials": 0.1599,
-    "Consumer Defensive": 0.0503,
-    "Technology": -0.007,
-    "Financial Services": -0.0087,
-    "Utilities": -0.069,
-    "Communication Services": -0.072,
-    "Consumer Cyclical": -0.0924,
-    "Real Estate": -0.0976,
-    "Industrials": -0.1691
+    "Energy": 0.1702,
+    "Healthcare": 0.1464,
+    "Basic Materials": 0.133,
+    "Financial Services": 0.0219,
+    "Technology": 0.0166,
+    "Consumer Defensive": 0.0132,
+    "Utilities": -0.0353,
+    "Communication Services": -0.0489,
+    "Consumer Cyclical": -0.0572,
+    "Real Estate": -0.0739,
+    "Industrials": -0.1384
   }
 }
