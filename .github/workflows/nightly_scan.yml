@@ -1,6 +1,6 @@
 # .github/workflows/nightly_scan.yml
 #
-# Runs nightly_scan.py every night at 2:00 AM Eastern Time (07:00 UTC).
+# Runs nightly_scan.py after the US close (22:30 UTC = 6:30pm EDT / 5:30pm EST).
 # Saves the output to the data/ folder and commits it back to the repo.
 # The Streamlit app reads from data/stock_data.json.gz on startup.
 #
@@ -10,8 +10,16 @@ name: Nightly Stock Scan
 
 on:
   schedule:
-    # 07:00 UTC = 02:00 AM EST (03:00 AM EDT during daylight saving)
-    - cron: "0 7 * * 1-5"   # weekdays only — markets are closed on weekends
+    # 22:30 UTC — AFTER the US close, so the run captures the SAME day's data.
+    #   EDT: close 20:00 UTC -> this runs 2h30m later (6:30pm ET)
+    #   EST: close 21:00 UTC -> this runs 1h30m later (5:30pm ET)
+    #
+    # WHY THIS CHANGED: the old "0 7 * * 1-5" fired at 07:00 UTC — 3am ET,
+    # BEFORE the market opened that day. Friday's 07:00 run therefore captured
+    # THURSDAY's close, and with weekdays-only there was no Saturday run, so
+    # Friday's close did not land until Monday morning. The app was showing
+    # data up to two sessions stale all weekend.
+    - cron: "30 22 * * 1-5"   # weekdays only — markets are closed on weekends
 
   workflow_dispatch:          # allows manual trigger from GitHub Actions UI
     inputs:

@@ -11,7 +11,7 @@ on:
     workflows: ["Nightly Stock Scan"]
     types: [completed]
   schedule:
-    - cron: "30 8 * * 1-5"   # 08:30 UTC weekdays, ~90 min after Nightly Stock Scan (07:00 UTC) as a fallback
+    - cron: "30 23 * * 1-5"  # 23:30 UTC weekdays, ~60 min after the Nightly Stock Scan (22:30 UTC)
   workflow_dispatch: {}        # manual "Run workflow" button
 
 permissions:

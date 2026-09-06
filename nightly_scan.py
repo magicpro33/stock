@@ -11,8 +11,17 @@
 #   python nightly_scan.py
 #
 # Output:
-#   data/stock_data.json.gz   — all results, one dict per ticker
+#   data/stock_data.json.gz   — all results, one dict per ticker (the app reads this)
 #   data/scan_meta.json       — timestamp, counts, status per exchange
+#   data/fundamentals.parquet — flat one-row-per-ticker table, no history payload
+#   data/fundamentals.csv     — same, for anything that cannot read parquet
+#   data/prices.parquet       — tidy long OHLCV (ticker, date, o/h/l/c/v)
+#
+# Each record now also carries "_analyzer": the yfinance profile fields the
+# Money Weather Stock Lookup tab renders (name, industry, beta, margins, ROE,
+# analyst targets, 52w range, quarterly EPS history). Those come from `info`
+# and the statements this scan ALREADY downloads, so caching them adds no API
+# calls and lets the app render a full analysis without a live yfinance hit.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -1055,9 +1064,79 @@ def process_ticker(args):
                     "volume": hist["Volume"].fillna(0).astype("int64").tolist(),
                 }
 
+            # ── ANALYZER PACK ────────────────────────────────────────
+            # Everything the Money Weather "Stock Lookup" tab renders. It used
+            # to fetch these live from yfinance on every lookup, which is slow
+            # and rate-limited. `info`, `fin`, `bal` and `cf` are ALREADY
+            # loaded above for the scoring, so caching them costs no extra API
+            # calls — the app can then render a full analysis offline and only
+            # hit the live feeds for an up-to-the-minute price.
+            def _num(x):
+                try:
+                    f = float(x)
+                    return f if np.isfinite(f) else None
+                except (TypeError, ValueError):
+                    return None
+
+            analyzer = {
+                "shortName":     info.get("shortName") or info.get("longName"),
+                "industry":      info.get("industry"),
+                "beta":          _num(info.get("beta")),
+                "forwardPE":     _num(info.get("forwardPE")),
+                "priceToBook":   _num(info.get("priceToBook")),
+                "priceToSales":  _num(info.get("priceToSalesTrailing12Months")),
+                "fiftyTwoWeekHigh": _num(info.get("fiftyTwoWeekHigh")),
+                "fiftyTwoWeekLow":  _num(info.get("fiftyTwoWeekLow")),
+                "profitMargins":    _num(info.get("profitMargins")),
+                "operatingMargins": _num(info.get("operatingMargins")),
+                "grossMargins":     _num(info.get("grossMargins")),
+                "returnOnEquity":   _num(info.get("returnOnEquity")),
+                "returnOnAssets":   _num(info.get("returnOnAssets")),
+                "debtToEquity":     _num(info.get("debtToEquity")),
+                "currentRatio":     _num(info.get("currentRatio")),
+                "quickRatio":       _num(info.get("quickRatio")),
+                "freeCashflow":     _num(info.get("freeCashflow")),
+                "operatingCashflow": _num(info.get("operatingCashflow")),
+                "totalRevenue":     _num(info.get("totalRevenue")),
+                "targetMeanPrice":  _num(info.get("targetMeanPrice")),
+                "targetLowPrice":   _num(info.get("targetLowPrice")),
+                "targetHighPrice":  _num(info.get("targetHighPrice")),
+                "numberOfAnalystOpinions": _num(info.get("numberOfAnalystOpinions")),
+                "recommendationKey": info.get("recommendationKey"),
+                "sharesOutstanding": _num(info.get("sharesOutstanding")),
+                "floatShares":       _num(info.get("floatShares")),
+                "epsTrailingTwelveMonths": _num(info.get("trailingEps")),
+                "epsForward":        _num(info.get("forwardEps")),
+                "grossMarginCalc":   gross_margin,
+            }
+            # quarterly EPS history — the analyzer's beat/miss chart
+            try:
+                eh = getattr(stock, "earnings_history", None)
+                if eh is not None and hasattr(eh, "empty") and not eh.empty:
+                    cmap = {c.lower(): c for c in eh.columns}
+                    ac, ec = cmap.get("epsactual"), cmap.get("epsestimate")
+                    sc = cmap.get("surprisepercent")
+                    rows_eps = []
+                    for idx_, row_ in eh.tail(8).iterrows():
+                        try:
+                            q = pd.to_datetime(idx_, errors="coerce")
+                            ql = q.strftime("%b %Y") if pd.notna(q) else str(idx_)
+                        except Exception:
+                            ql = str(idx_)
+                        rows_eps.append({
+                            "quarter":  ql,
+                            "actual":   _num(row_.get(ac)) if ac else None,
+                            "estimate": _num(row_.get(ec)) if ec else None,
+                            "surprise": _num(row_.get(sc)) if sc else None,
+                        })
+                    analyzer["eps_history"] = rows_eps
+            except Exception:
+                pass
+
             return {
                 "Ticker":         t,
                 "Sector":         info.get("sector", "Unknown"),
+                "_analyzer":      analyzer,
                 "Price":          price,
                 "MarketCap":      info.get("marketCap"),
                 "P/E":            info.get("trailingPE"),
@@ -1227,6 +1306,66 @@ def main():
         json.dump(all_results, f, default=str)
 
     log.info(f"  Saved: {DATA_FILE}  ({os.path.getsize(DATA_FILE) / 1024:.0f} KB compressed)")
+
+    # ── Reusable exports for OTHER projects ──────────────────────────
+    # stock_data.json.gz is one big nested blob: every consumer has to gunzip
+    # it, parse ~5,700 records and strip out the embedded price history just to
+    # read a P/E. These two files are the flat, boring version — load them with
+    # one pandas call, no JSON walking, no history payload.
+    #
+    #   fundamentals.parquet / .csv  one row per ticker, every scalar field,
+    #                                price history and the analyzer pack removed
+    #   prices.parquet               tidy long OHLCV (ticker, date, o/h/l/c/v)
+    #
+    # Anything downstream — the data-centre infrastructure work, notebooks, a
+    # different app — can read these directly and never touch the raw dump.
+    try:
+        flat = []
+        for r in all_results:
+            row = {k: v for k, v in r.items()
+                   if k not in ("_hist", "_analyzer") and not isinstance(v, (dict, list))}
+            a = r.get("_analyzer") or {}
+            for k, v in a.items():
+                if k != "eps_history" and not isinstance(v, (dict, list)):
+                    row[f"an_{k}"] = v
+            flat.append(row)
+        fdf = pd.DataFrame(flat)
+        fund_pq = os.path.join(OUTPUT_DIR, "fundamentals.parquet")
+        fund_csv = os.path.join(OUTPUT_DIR, "fundamentals.csv")
+        try:
+            fdf.to_parquet(fund_pq, index=False)
+            log.info(f"  Saved: {fund_pq}  ({os.path.getsize(fund_pq)/1024:.0f} KB, "
+                     f"{len(fdf)} rows x {fdf.shape[1]} cols)")
+        except Exception as _pe:
+            log.warning(f"  parquet export skipped ({_pe}) — CSV still written")
+        fdf.to_csv(fund_csv, index=False)
+        log.info(f"  Saved: {fund_csv}  ({os.path.getsize(fund_csv)/1024:.0f} KB)")
+    except Exception as e:
+        log.warning(f"  fundamentals export failed: {e}")
+
+    try:
+        px_rows = []
+        for r in all_results:
+            h = r.get("_hist") or {}
+            d = h.get("dates") or []
+            if not d:
+                continue
+            t = r.get("Ticker")
+            for i, dt_ in enumerate(d):
+                px_rows.append((t, dt_, h["open"][i], h["high"][i],
+                                h["low"][i], h["close"][i], h["volume"][i]))
+        if px_rows:
+            pdf = pd.DataFrame(px_rows, columns=["ticker", "date", "open", "high",
+                                                 "low", "close", "volume"])
+            px_pq = os.path.join(OUTPUT_DIR, "prices.parquet")
+            try:
+                pdf.to_parquet(px_pq, index=False)
+                log.info(f"  Saved: {px_pq}  ({os.path.getsize(px_pq)/1024/1024:.1f} MB, "
+                         f"{len(pdf):,} bars)")
+            except Exception as _pe:
+                log.warning(f"  prices parquet skipped ({_pe})")
+    except Exception as e:
+        log.warning(f"  prices export failed: {e}")
 
     # ── Dated archive copy (for rollback if a bad scan runs) ─────────
     archive_data = os.path.join(OUTPUT_DIR, f"stock_data_{date_tag}.json.gz")
