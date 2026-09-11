@@ -19,6 +19,12 @@ on:
     # THURSDAY's close, and with weekdays-only there was no Saturday run, so
     # Friday's close did not land until Monday morning. The app was showing
     # data up to two sessions stale all weekend.
+    #
+    # NOTE ON TIMING: GitHub delays scheduled workflows under load — the
+    # 2026-09-10 run started ~00:17 UTC instead of 22:30 UTC and took 86
+    # minutes. That is normal and harmless (the close is already final by
+    # then), but it means the run can finish on the NEXT UTC day. If you ever
+    # need a guaranteed same-day finish, trigger it manually.
     - cron: "30 22 * * 1-5"   # weekdays only — markets are closed on weekends
 
   workflow_dispatch:          # allows manual trigger from GitHub Actions UI
@@ -53,7 +59,9 @@ jobs:
           # lxml is needed by pandas.read_html for S&P 500 Wikipedia table
           # Install separately first so failures are visible
           pip install lxml html5lib
-          pip install yfinance pandas numpy requests
+          # pyarrow is required for the .parquet exports; without it
+          # nightly_scan.py logs a warning and writes CSV only.
+          pip install yfinance pandas numpy requests pyarrow
 
       # ── 4. Create data directory if it doesn't exist ─────────────────────
       - name: Ensure data directory exists
@@ -73,7 +81,16 @@ jobs:
             # Fetch latest remote state so we can rebase cleanly
             git fetch origin main
             git reset --soft origin/main
+            # Commit the flat exports too. nightly_scan.py writes
+            # fundamentals.parquet/.csv and prices.parquet for downstream
+            # projects, but they were never staged — so they were rebuilt
+            # every night and thrown away. `git add -f` because data/ may be
+            # gitignored, and the || true keeps the step alive if an optional
+            # export is missing (parquet needs pyarrow, see the install step).
             git add data/stock_data.json.gz data/scan_meta.json
+            git add -f data/fundamentals.csv 2>/dev/null || true
+            git add -f data/fundamentals.parquet 2>/dev/null || true
+            git add -f data/prices.parquet 2>/dev/null || true
             # Only commit if there are staged changes
             git diff --staged --quiet || git commit -m "chore: nightly scan $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push origin main
@@ -94,5 +111,8 @@ jobs:
           path: |
             data/stock_data.json.gz
             data/scan_meta.json
+            data/fundamentals.csv
+            data/fundamentals.parquet
+            data/prices.parquet
           retention-days: 7
           if-no-files-found: warn
