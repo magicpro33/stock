@@ -71,6 +71,9 @@ jobs:
       - name: Run nightly scan
         run: python nightly_scan.py
         timeout-minutes: 210
+        env:
+          AV_API_KEY: ${{ secrets.AV_API_KEY }}
+          YF_DISABLE_CURL_CFFI: "1"
 
       # ── 6. Commit only if output files were actually produced ─────────────
       - name: Commit data files

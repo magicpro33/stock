@@ -10,12 +10,13 @@
 # 2) pandas<3 — pandas 3.0 defaults to arrow-backed strings, which routes
 #    every string column through the crashing pyarrow path and also changes
 #    copy-on-write semantics this app was not written for.
+# 3) streamlit>=1.40 — app uses width="stretch" (added ~1.40)
 #
 # curl_cffi (yfinance's HTTP backend) is additionally disabled at runtime via
 # YF_DISABLE_CURL_CFFI=1 at the top of app.py — curl_cffi 0.15.x has its own
-# segfault-class bugs (upstream #677). Same proven fix as IGNITION. pip will
-# still install it as a yfinance dependency; it is simply never imported.
-streamlit>=1.32
+# segfault-class bugs (upstream #677). pip will still install it as a
+# yfinance dependency; it is simply never imported.
+streamlit>=1.40,<2
 yfinance==1.5.1
 pandas>=2.0,<3.0
 pyarrow<25
@@ -24,3 +25,4 @@ openpyxl>=3.1
 requests>=2.31
 lxml>=4.9
 plotly>=5.18
+tzdata>=2024.1

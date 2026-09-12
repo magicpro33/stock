@@ -5,6 +5,9 @@
 # RUN:
 #   streamlit run app.py
 # -----------------------------------
+from __future__ import annotations
+import os
+os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")  # curl_cffi 0.15.x segfault guard
 
 import io
 import sys
@@ -20,6 +23,10 @@ from openpyxl.utils import get_column_letter
 from pathlib import Path
 import yfinance as yf
 import html as _html_mod
+
+def _esc(s) -> str:
+    """Escape untrusted Yahoo / dump text before unsafe_allow_html."""
+    return _html_mod.escape("" if s is None else str(s), quote=True)
 import plotly.graph_objects as _go_mod
 from plotly.subplots import make_subplots as _mksub_mod
 try:
@@ -84,10 +91,17 @@ def _inject_theme_css() -> None:
 _inject_theme_css()
 
 
-def _clickable_logo(width: int = 200) -> None:
+@st.cache_data
+def _logo_b64() -> str:
     if not LOGO_PATH.is_file():
+        return ""
+    return base64.b64encode(LOGO_PATH.read_bytes()).decode()
+
+
+def _clickable_logo(width: int = 200) -> None:
+    encoded = _logo_b64()
+    if not encoded:
         return
-    encoded = base64.b64encode(LOGO_PATH.read_bytes()).decode()
     st.markdown(
         f'<a href="{CREATOR_URL}" target="_blank" rel="noopener noreferrer">'
         f'<img src="data:image/png;base64,{encoded}" width="{width}" '
@@ -1151,11 +1165,15 @@ import os as _os
 _DATA_FILE = _pathlib.Path(__file__).parent / "data" / "stock_data.json.gz"
 _META_FILE = _pathlib.Path(__file__).parent / "data" / "scan_meta.json"
 
+_DEFAULT_GITHUB_REPO = "magicpro33/stock"
+
+
 def _get_github_repo() -> str:
+    """Repo that hosts data/stock_data.json.gz. Secrets override the default."""
     try:
-        return st.secrets.get("GITHUB_REPO", "")
+        return st.secrets.get("GITHUB_REPO", "") or _DEFAULT_GITHUB_REPO
     except Exception:
-        return _os.environ.get("GITHUB_REPO", "")
+        return _os.environ.get("GITHUB_REPO", "") or _DEFAULT_GITHUB_REPO
 
 
 def _get_av_key() -> str:
@@ -1221,7 +1239,7 @@ def load_precomputed_data(cache_key: str = "") -> tuple:
     if repo:
         try:
             url  = f"https://raw.githubusercontent.com/{repo}/main/data/stock_data.json.gz"
-            resp = requests.get(url, timeout=60)   # allow CDN cache
+            resp = requests.get(url, timeout=120)   # allow CDN cache
             if resp.status_code == 200:
                 results = _strip_hist(
                     _json.loads(gzip.decompress(resp.content).decode("utf-8"))
@@ -2040,13 +2058,13 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             <div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;'>
               <div>
                 <div style='font-size:1.6em;font-weight:700;color:#e8f4fd;letter-spacing:-0.5px;'>
-                  {name}
+                  {_esc(name)}
                   <span style='font-size:0.6em;font-weight:500;color:#5b9bd5;
                   background:#0d2137;padding:3px 10px;border-radius:6px;margin-left:10px;
-                  vertical-align:middle;'>{sticker}</span>
+                  vertical-align:middle;'>{_esc(sticker)}</span>
                 </div>
                 <div style='font-size:0.88em;color:#7fb3d3;margin-top:4px;'>
-                  {sector}{" · " + industry if industry else ""}
+                  {_esc(sector)}{" · " + _esc(industry) if industry else ""}
                 </div>
                 {f"<div style='font-size:0.78em;color:#4a7fa0;margin-top:2px;'>📅 {fetched_at}</div>" if fetched_at else ""}
               </div>
@@ -2158,13 +2176,13 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
         def irow(label, value, tip=None):
             # tip renders as a small ℹ tooltip after the label
-            tip_html = (f" <span title='{tip}' style='cursor:help;color:#888;"
+            tip_html = (f" <span title='{_esc(tip)}' style='cursor:help;color:#888;"
                         f"font-size:0.85em;'>ℹ️</span>") if tip else ""
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;"
                 f"padding:6px 0;border-bottom:1px solid #2a2a2a;'>"
-                f"<span style='color:#aaa;'>{label}{tip_html}</span>"
-                f"<span style='font-weight:600;'>{value}</span></div>",
+                f"<span style='color:#aaa;'>{_esc(label)}{tip_html}</span>"
+                f"<span style='font-weight:600;'>{_esc(value)}</span></div>",
                 unsafe_allow_html=True)
 
         # ── Metric cards — ignition scanner style ────────────────────
@@ -2268,7 +2286,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             + "".join([
                 f"<div style='background:#0a1929;border-radius:8px;padding:6px 12px;"
                 f"border:1px solid #1e3a5f;text-align:center;min-width:90px;'>"
-                f"<div style='font-size:0.7em;color:#4a7fa0;'>{METRICS[k]["label"]}</div>"
+                f"<div style='font-size:0.7em;color:#4a7fa0;'>{METRICS[k]['label']}</div>"
                 f"<div style='font-size:0.95em;font-weight:600;color:{_score_color(raw.get(k))};'>"
                 f"{_fv(k,raw.get(k))}</div></div>"
                 for k in selected[:8]
@@ -2550,7 +2568,10 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 irow("Overall Risk", str(info.get("overallRisk","N/A")),
                      "Overall governance risk score 1–10. Combines audit, board, compensation and shareholder rights scores")
             st.markdown("#### Business Summary")
-            st.markdown(f"<div style='color:#ccc;line-height:1.6'>{info.get('longBusinessSummary','N/A')}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='color:#ccc;line-height:1.6'>"
+                f"{_esc(info.get('longBusinessSummary') or 'N/A')}</div>",
+                unsafe_allow_html=True)
 
         with ft[1]:
             st.markdown("### 💰 Valuation")

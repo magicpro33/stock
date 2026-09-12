@@ -25,6 +25,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
+os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")
 import sys
 import gzip
 import json
@@ -1080,6 +1081,14 @@ def process_ticker(args):
 
             analyzer = {
                 "shortName":     info.get("shortName") or info.get("longName"),
+                "longName":      info.get("longName"),
+                "longBusinessSummary": info.get("longBusinessSummary"),
+                "website":       info.get("website"),
+                "fullTimeEmployees": _num(info.get("fullTimeEmployees")),
+                "city":          info.get("city"),
+                "state":         info.get("state"),
+                "country":       info.get("country"),
+                "exchange":      info.get("exchange"),
                 "industry":      info.get("industry"),
                 "beta":          _num(info.get("beta")),
                 "forwardPE":     _num(info.get("forwardPE")),
