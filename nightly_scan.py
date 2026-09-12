@@ -1125,6 +1125,23 @@ def process_ticker(args):
                 "epsForward":        _num(info.get("forwardEps")),
                 "grossMarginCalc":   gross_margin,
             }
+            # Official first print when Yahoo has it; else first bar we stored.
+            _ft = None
+            for _fk in ("firstTradeDateEpochUtc", "firstTradeDateMilliseconds"):
+                _fv = info.get(_fk)
+                if _fv:
+                    try:
+                        _sec = float(_fv)
+                        if _sec > 1e12:
+                            _sec /= 1000.0
+                        if _sec > 0:
+                            _ft = datetime.fromtimestamp(_sec, tz=timezone.utc).strftime("%Y-%m-%d")
+                            break
+                    except (TypeError, ValueError, OSError, OverflowError):
+                        pass
+            if not _ft and hist_cache.get("dates"):
+                _ft = hist_cache["dates"][0]
+            analyzer["firstTradeDate"] = _ft
             # quarterly EPS history — the analyzer's beat/miss chart
             try:
                 eh = getattr(stock, "earnings_history", None)
@@ -1191,6 +1208,7 @@ def process_ticker(args):
                 "CleanSetupScore":     clean_setup,
                 "GrossMargin":         gross_margin,
                 "ExDividendDate":      info.get("exDividendDate"),
+                "FirstTradeDate":      _ft,
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
