@@ -2174,6 +2174,18 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             try:    return f"{float(val):,.{d}f}" if val is not None else "N/A"
             except: return "N/A"
 
+        def _finite(val, default=0.0):
+            """Yahoo sends NaN for missing fields; int(nan) crashes the page."""
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                return default
+            return f if np.isfinite(f) else default
+
+        def _bar_blocks(score, n=20):
+            filled = int(round(max(0.0, min(1.0, _finite(score, 0.0))) * n))
+            return filled, "█" * filled + "░" * (n - filled)
+
         def irow(label, value, tip=None):
             # tip renders as a small ℹ tooltip after the label
             tip_html = (f" <span title='{_esc(tip)}' style='cursor:help;color:#888;"
@@ -2190,6 +2202,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
         def _score_color(val):
             """Return color for a 0-1 score value."""
+            val = _finite(val, default=None)
             if val is None: return "#555"
             if val >= 0.8:  return "#26c485"
             if val >= 0.5:  return "#f5a623"
@@ -2197,14 +2210,13 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
         def _arc_svg(score, size=64):
             """SVG semicircle arc gauge matching ignition scanner style."""
-            if score is None: score = 0
-            score = max(0.0, min(1.0, float(score)))
+            score = max(0.0, min(1.0, _finite(score, 0.0)))
             col   = _score_color(score)
             # Arc parameters
             cx, cy, r = size/2, size/2, size/2 - 6
             circ      = 2 * 3.14159 * r
             dash      = circ * score
-            pct_txt   = f"{int(score*100)}"
+            pct_txt   = f"{int(round(score*100))}"
             return (
                 f"<svg width='{size}' height='{size}' viewBox='0 0 {size} {size}'>"
                 f"<circle cx='{cx}' cy='{cy}' r='{r}' fill='none' stroke='#1e3a5f' stroke-width='6'/>"
@@ -2220,8 +2232,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
 
         def _bar_html(score, col):
             """Gradient progress bar."""
-            if score is None: score = 0
-            pct = int(max(0, min(100, float(score) * 100)))
+            pct = int(round(max(0.0, min(100.0, _finite(score, 0.0) * 100))))
             return (
                 f"<div style='height:4px;background:#1e3a5f;border-radius:2px;margin-top:8px;'>"
                 f"<div style='height:4px;width:{pct}%;border-radius:2px;"
@@ -2398,8 +2409,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                      "Above 60% = strong squeeze setup. Above 80% = extreme."
             )
             # Visual squeeze meter
-            _bar_filled = int((_ssq or 0) * 20)
-            _bar = "█" * _bar_filled + "░" * (20 - _bar_filled)
+            _bar_filled, _bar = _bar_blocks(_ssq)
             if _ssq and _ssq >= 0.7:
                 st.error(f"🔥 **High Squeeze Risk** [{_bar}] {_squeeze_pct} — heavy short interest with squeeze conditions present")
             elif _ssq and _ssq >= 0.4:
@@ -2453,8 +2463,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 help="5-year average dividend yield — shows whether current yield is high relative to history"
             )
             # Dividend quality bar
-            _dbar_filled = int(_div_score * 20)
-            _dbar = "█" * _dbar_filled + "░" * (20 - _dbar_filled)
+            _dbar_filled, _dbar = _bar_blocks(_div_score)
             _dbar_pct = f"{_div_score*100:.0f}%"
             if _div_score >= 0.7:
                 st.success(f"💰 **High Quality Dividend** [{_dbar}] {_dbar_pct} — high yield, sustainable payout, frequent payments")
@@ -2486,6 +2495,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             mid  = (rh + rl) / 2
             rp   = round((rh - rl) / mid * 100, 2) if mid > 0 else None
             rpos = round((win.iloc[-1] - rl) / (rh - rl), 4) if (rh - rl) > 0 else 0.5
+            rpos = _finite(rpos, 0.5)
             rc1, rc2, rc3, rc4 = st.columns(4)
             rc1.metric("Range High", f"${rh:,.2f}",
                        help=f"The highest closing price over the last {range_days} trading days. "
@@ -2507,7 +2517,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                             "50% = exactly at the midpoint. "
                             "100% = at the range high (at resistance — potential sell zone). "
                             "Stocks near the low end of a tight range can signal accumulation before a breakout.")
-            bar = "█" * int(rpos*20) + "░" * (20 - int(rpos*20))
+            _, bar = _bar_blocks(rpos)
             pos_lbl = "Near Support 🟢" if rpos < 0.25 else ("Near Resistance 🔴" if rpos > 0.75 else "Mid-Range 🟡")
             st.markdown(
                 f"<div style='font-family:monospace;font-size:1.1em;margin:10px 0;'>"
@@ -2548,7 +2558,8 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 irow("Sector",       info.get("sector","N/A"),     "GICS sector classification — broad industry group the company belongs to")
                 irow("Industry",     info.get("industry","N/A"),   "Specific industry within the sector")
                 irow("Country",      info.get("country","N/A"),    "Country where the company is headquartered")
-                irow("Employees",    f"{info.get('fullTimeEmployees'):,}" if info.get("fullTimeEmployees") else "N/A",
+                _emps = _finite(info.get("fullTimeEmployees"), default=None)
+                irow("Employees",    f"{int(_emps):,}" if _emps is not None else "N/A",
                      "Total number of full-time employees")
                 irow("Website",      info.get("website","N/A"))
             with c2:
