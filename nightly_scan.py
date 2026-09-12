@@ -1042,6 +1042,13 @@ def process_ticker(args):
                 except Exception:
                     pass
 
+            # yfinance often appends a session stub after the close:
+            # Volume is filled, Open/High/Low/Close are NaN. If we keep
+            # that bar, Money Weather's last date is an empty day, it
+            # forward-fills yesterday's close, and every sector prints 0%.
+            if not hist.empty and "Close" in hist.columns:
+                hist = hist.loc[pd.to_numeric(hist["Close"], errors="coerce").notna()]
+
             vol_signals  = get_volume_signals(hist, mfi_period)
             tech_signals = calculate_technical_signals(hist)
             range_data   = calculate_price_range(hist, range_days)
