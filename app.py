@@ -121,7 +121,9 @@ with _header_title:
         "ETFs, funds, and index products excluded."
     )
 
-tab_screener, tab_analyze = st.tabs(["📊 Screener", "🔍 Analyze a Stock"])
+tab_screener, tab_analyze, tab_storm = st.tabs(
+    ["📊 Screener", "🔍 Analyze a Stock", "⚡ Storm Watch"]
+)
 
 # ───────────────────────────────────────────────────────────────
 # METRIC CONFIG  — name, default weight, full description
@@ -4680,3 +4682,7 @@ with tab_analyze:
             mfi_period = st.session_state.get("slider_mfi_period", 14),
             key_prefix = "analyze",
         )
+
+with tab_storm:
+    from storm_watch_tab import render_storm_watch_tab
+    render_storm_watch_tab()
