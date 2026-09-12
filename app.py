@@ -2186,6 +2186,11 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             filled = int(round(max(0.0, min(1.0, _finite(score, 0.0))) * n))
             return filled, "█" * filled + "░" * (n - filled)
 
+        def _signal_shown(val):
+            """Hide N/A and exact-zero cards — they add noise, not a reading."""
+            v = _finite(val, default=None)
+            return v is not None and v != 0
+
         def irow(label, value, tip=None):
             # tip renders as a small ℹ tooltip after the label
             tip_html = (f" <span title='{_esc(tip)}' style='cursor:help;color:#888;"
@@ -2275,6 +2280,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             if mfi >= 20: return "📉 Selling",      "#f59e0b"
             return         "🧊 Oversold",           "#60a5fa"
         _mfi_lbl, _mfi_col = _mfi_label(_mfi_raw)
+        _shown = [k for k in selected if _signal_shown(raw.get(k))]
 
         # ── Composite score banner ──────────────────────────────────
         st.markdown(
@@ -2289,7 +2295,7 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
             f"{_composite:.3f}"
             f"</div>"
             f"<div style='font-size:0.8em;color:#4a7fa0;margin-top:4px;'>"
-            f"{len(selected)} metrics active · "
+            f"{len(_shown)} of {len(selected)} metrics with a reading · "
             f"{'Strong setup' if _composite >= 0.7 else ('Moderate' if _composite >= 0.4 else 'Weak setup')}"
             f"</div>"
             f"</div>"
@@ -2300,20 +2306,21 @@ def render_stock_analysis(info, hist_1y, fin_stmt, bal_stmt, cf_stmt,
                 f"<div style='font-size:0.7em;color:#4a7fa0;'>{METRICS[k]['label']}</div>"
                 f"<div style='font-size:0.95em;font-weight:600;color:{_score_color(raw.get(k))};'>"
                 f"{_fv(k,raw.get(k))}</div></div>"
-                for k in selected[:8]
+                for k in _shown[:8]
             ])
             + f"</div></div>",
             unsafe_allow_html=True
         )
 
         # ── Metric cards grid ───────────────────────────────────────
-        st.markdown(
-            "<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
-            "letter-spacing:.08em;margin:16px 0 12px;'>Signal Breakdown</div>",
-            unsafe_allow_html=True
-        )
-        cols = st.columns(3)
-        for i, key in enumerate(selected):
+        if _shown:
+            st.markdown(
+                "<div style='font-size:0.75em;color:#4a7fa0;text-transform:uppercase;"
+                "letter-spacing:.08em;margin:16px 0 12px;'>Signal Breakdown</div>",
+                unsafe_allow_html=True
+            )
+            cols = st.columns(3)
+        for i, key in enumerate(_shown):
             cfg = METRICS[key]
             val = raw.get(key)
             col_hex = _score_color(val)
