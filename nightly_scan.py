@@ -36,6 +36,7 @@ import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yfinance as yf
@@ -78,6 +79,226 @@ ETF_KEYWORDS = [
     "fidelity select", "global x", "ark ", "pimco",
     "debenture", "warrant",
 ]
+
+
+# ── Session / history helpers ─────────────────────────────────────────────────
+
+def _last_completed_session(now=None) -> str:
+    """Most recent US equity session that should already have a close.
+
+    Before ~5pm ET, today's bar may not exist yet. Weekends roll to Friday.
+    Holidays are not modelled — a later coverage check reports how many
+    names actually printed the planned session.
+    """
+    try:
+        now = now or pd.Timestamp.now(tz="America/New_York")
+        if getattr(now, "tzinfo", None) is not None:
+            now = now.tz_convert("America/New_York")
+    except Exception:
+        now = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=4)
+    hour = int(now.hour)
+    d = pd.Timestamp(year=int(now.year), month=int(now.month), day=int(now.day))
+    if hour < 17:
+        d -= pd.Timedelta(days=1)
+    while int(d.dayofweek) >= 5:
+        d -= pd.Timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _normalize_hist(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten columns, drop the volume-only last stub, tz-naive dates."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        chosen = None
+        for lvl in range(out.columns.nlevels):
+            vals = {str(v).lower().replace(" ", "") for v in out.columns.get_level_values(lvl)}
+            if "close" in vals or "adjclose" in vals:
+                out.columns = out.columns.get_level_values(lvl)
+                chosen = lvl
+                break
+        if chosen is None:
+            out.columns = out.columns.get_level_values(-1)
+    colmap = {}
+    for c in out.columns:
+        cl = str(c).lower().replace(" ", "")
+        if cl in ("open", "high", "low", "close", "volume", "dividends"):
+            colmap[c] = "Dividends" if cl == "dividends" else cl.title()
+    if colmap:
+        out = out.rename(columns=colmap)
+        out = out.loc[:, ~out.columns.duplicated(keep="first")]
+    if "Close" not in out.columns:
+        for c in list(out.columns):
+            if str(c).lower().replace(" ", "") == "adjclose":
+                out = out.rename(columns={c: "Close"})
+                break
+    if "Close" not in out.columns:
+        return pd.DataFrame()
+    out.index = pd.to_datetime(out.index)
+    try:
+        if getattr(out.index, "tz", None) is not None:
+            out.index = out.index.tz_convert("America/New_York").tz_localize(None)
+    except Exception:
+        try:
+            out.index = out.index.tz_localize(None)
+        except Exception:
+            pass
+    out.index = pd.DatetimeIndex(out.index).normalize()
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    close = pd.to_numeric(out["Close"], errors="coerce")
+    # yfinance often appends a post-close stub: Volume filled, OHLC NaN.
+    # Keeping it makes the dump's last date an empty session.
+    return out.loc[close.notna()]
+
+
+def _hist_last(hist) -> str:
+    """Last YYYY-MM-DD in a history frame or `_hist` cache dict."""
+    if isinstance(hist, pd.DataFrame):
+        if hist.empty:
+            return ""
+        return pd.Timestamp(hist.index[-1]).strftime("%Y-%m-%d")
+    dates = (hist or {}).get("dates") or []
+    return str(dates[-1]) if dates else ""
+
+
+def _cache_from_df(hist: pd.DataFrame) -> dict:
+    h = _normalize_hist(hist)
+    if h.empty:
+        return {}
+    def _col(name):
+        if name not in h.columns:
+            return [None] * len(h)
+        s = pd.to_numeric(h[name], errors="coerce")
+        if name == "Volume":
+            return s.fillna(0).astype("int64").tolist()
+        return s.round(4).tolist()
+    return {
+        "dates":  h.index.strftime("%Y-%m-%d").tolist(),
+        "open":   _col("Open"),
+        "high":   _col("High"),
+        "low":    _col("Low"),
+        "close":  _col("Close"),
+        "volume": _col("Volume"),
+    }
+
+
+def _df_from_cache(cache: dict) -> pd.DataFrame:
+    d = (cache or {}).get("dates") or []
+    if not d:
+        return pd.DataFrame()
+    n = len(d)
+    def _pad(key):
+        vals = list((cache or {}).get(key) or [])
+        if len(vals) < n:
+            vals = vals + [None] * (n - len(vals))
+        return vals[:n]
+    df = pd.DataFrame({
+        "Open": _pad("open"), "High": _pad("high"), "Low": _pad("low"),
+        "Close": _pad("close"), "Volume": _pad("volume"),
+    }, index=pd.to_datetime(d))
+    return _normalize_hist(df)
+
+
+def _merge_hist(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
+    frames = [_normalize_hist(x) for x in (a, b)]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames)
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    return _normalize_hist(out)
+
+
+def _apply_hist_to_row(row: dict, hist: pd.DataFrame) -> None:
+    """Write spliced OHLCV back onto a scan row and refresh last-bar fields."""
+    h = _normalize_hist(hist)
+    if h.empty:
+        return
+    row["_hist"] = _cache_from_df(h)
+    try:
+        px = float(h["Close"].iloc[-1])
+        if np.isfinite(px) and px > 0:
+            row["Price"] = px
+            an = row.get("_analyzer")
+            if isinstance(an, dict):
+                an["currentPrice"] = round(px, 4)
+    except Exception:
+        pass
+    try:
+        vs = get_volume_signals(h, MFI_PERIOD)
+        ts = calculate_technical_signals(h)
+        rd = calculate_price_range(h, RANGE_DAYS)
+        row["MA50"] = (round(h["Close"].rolling(50).mean().iloc[-1], 2)
+                       if len(h) >= 50 else None)
+        row["OBV"] = vs["OBV"]
+        row["MFI"] = vs["MFI"]
+        row["PCV"] = vs["PCV"]
+        row["RSI"] = ts["RSI"]
+        row["MACD"] = ts["MACD"]
+        row["GoldenCross"] = ts["GoldenCross"]
+        row["MFISweetSpot"] = ts["MFISweetSpot"]
+        row["NoBearDiv"] = ts["NoBearDiv"]
+        row["MA50Proximity"] = ts["MA50Proximity"]
+        row["RangeHigh"] = rd["RangeHigh"]
+        row["RangeLow"] = rd["RangeLow"]
+        row["RangePct"] = rd["RangePct"]
+        row["RangePos"] = rd["RangePos"]
+        row["CleanSetupScore"] = calculate_clean_setup(h)
+    except Exception:
+        pass
+
+
+def _download_batch(tickers: list, start: str, end: str) -> dict:
+    """One yf.download for the batch. `end` is exclusive (yfinance convention)."""
+    out = {}
+    if not tickers:
+        return out
+    kwargs = dict(
+        tickers=" ".join(tickers), start=start, end=end, interval="1d",
+        actions=True, group_by="ticker", threads=False, progress=False,
+        auto_adjust=True,
+    )
+    dl = pd.DataFrame()
+    try:
+        dl = yf.download(**kwargs)
+    except Exception as e:
+        log.warning(f"  Batch download failed ({type(e).__name__}: {e})")
+        return out
+    if dl is None or getattr(dl, "empty", True):
+        return out
+    if isinstance(dl.columns, pd.MultiIndex) and dl.columns.nlevels >= 2:
+        lv0 = {str(v) for v in dl.columns.get_level_values(0)}
+        lv1 = {str(v) for v in dl.columns.get_level_values(1)}
+        ticker_level = 0 if any(t in lv0 for t in tickers) else (
+            1 if any(t in lv1 for t in tickers) else 0)
+        for t in tickers:
+            try:
+                frame = dl[t] if ticker_level == 0 else dl.xs(t, axis=1, level=1)
+            except Exception:
+                continue
+            h = _normalize_hist(frame)
+            if not h.empty:
+                out[t] = h
+    else:
+        h = _normalize_hist(dl)
+        if not h.empty:
+            out[tickers[0] if len(tickers) == 1 else tickers[0]] = h
+    return out
+
+
+def _load_prev_dump() -> dict:
+    """Ticker → last night's record, so a failed fetch does not delete a name."""
+    if not os.path.isfile(DATA_FILE):
+        return {}
+    try:
+        with gzip.open(DATA_FILE, "rt", encoding="utf-8") as f:
+            rows = json.load(f)
+        return {str(r.get("Ticker") or "").strip().upper(): r
+                for r in rows if r.get("Ticker")}
+    except Exception as e:
+        log.warning(f"  Previous dump unreadable: {e}")
+        return {}
 
 
 # ── Ticker loaders ────────────────────────────────────────────────────────────
@@ -191,22 +412,20 @@ def _fetch_exchange_tickers(exchange: str) -> list:
 def _clean_tickers(tickers: list) -> list:
     """
     Remove tickers that yfinance cannot look up:
-    - Preferred shares: contain $ (e.g. ABR$E → not supported by yfinance)
-    - Warrants: end in W or WS
-    - Rights: end in R  
-    - Units: end in U
-    - Test symbols: contain ^ or ~
-    These are all legitimate securities but useless for equity screening.
+    - Preferred shares: contain $ (e.g. ABR$E)
+    - Test / index symbols: contain ^ or ~
+    - NASDAQ 5th-letter series: 5+ character symbols ending W/R/U/WS
+      (warrant / right / unit). Do NOT drop 1-4 letter names — LOW
+      (Lowe's), CAR, AIR are real equities.
     """
     cleaned = []
     for t in tickers:
-        if "$" in t:          continue   # preferred share classes
-        if "^" in t:          continue   # index symbols
-        if "~" in t:          continue   # test symbols
-        if t.endswith("W"):   continue   # warrants
-        if t.endswith("WS"):  continue   # warrants (series)
-        if t.endswith("R"):   continue   # rights (most — some valid tickers end in R)
-        if t.endswith("U"):   continue   # units
+        if "$" in t or "^" in t or "~" in t:
+            continue
+        if t.endswith("WS"):
+            continue
+        if len(t) >= 5 and t.endswith(("W", "R", "U")):
+            continue
         cleaned.append(t)
     return cleaned
 
@@ -248,7 +467,7 @@ def load_all_tickers() -> dict:
             if cells:
                 # First cell is the ticker — strip HTML tags
                 raw = _re.sub(r'<[^>]+>', '', cells[0]).strip()
-                if raw and raw.isalpha() or ("-" in raw and raw.replace("-","").isalpha()):
+                if raw and (raw.isalpha() or ("-" in raw and raw.replace("-", "").isalpha())):
                     sp.append(raw.replace(".", "-"))
         if len(sp) >= 400:
             result["sp500"] = sp
@@ -987,28 +1206,42 @@ def process_ticker(args):
                 return None
 
             price = info.get("currentPrice") or info.get("regularMarketPrice")
-            if not price:
-                return None
 
             # Use batch-downloaded history when available (1 request per 30
             # tickers instead of 1 per ticker); fall back to per-ticker fetch.
-            hist = pre_hist if pre_hist is not None else pd.DataFrame()
+            hist = _normalize_hist(pre_hist) if pre_hist is not None else pd.DataFrame()
             if hist.empty or len(hist) < 30:
                 try:
-                    hist = stock.history(period="1y", actions=True)
+                    hist = _normalize_hist(stock.history(
+                        period="1y", actions=True, auto_adjust=True))
                     if hist.empty or len(hist) < 30:
-                        hist = stock.history(period="6mo", actions=True)
+                        hist = _normalize_hist(stock.history(
+                            period="6mo", actions=True, auto_adjust=True))
                 except Exception:
-                    hist = pd.DataFrame()
+                    hist = hist if isinstance(hist, pd.DataFrame) else pd.DataFrame()
+                try:
+                    recent = _normalize_hist(stock.history(
+                        period="10d", actions=True, auto_adjust=True))
+                    hist = _merge_hist(hist, recent)
+                except Exception:
+                    pass
 
             # AV fallback for missing history
             if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
                 try:
                     av_hist = av_fill_history(t, _av_key)
                     if not av_hist.empty:
-                        hist = av_hist
+                        hist = _normalize_hist(av_hist)
                 except Exception:
                     pass
+
+            if not price and not hist.empty:
+                try:
+                    price = float(hist["Close"].iloc[-1])
+                except Exception:
+                    price = None
+            if not price:
+                return None
 
             try:
                 fin = stock.financials
@@ -1046,8 +1279,7 @@ def process_ticker(args):
             # Volume is filled, Open/High/Low/Close are NaN. If we keep
             # that bar, Money Weather's last date is an empty day, it
             # forward-fills yesterday's close, and every sector prints 0%.
-            if not hist.empty and "Close" in hist.columns:
-                hist = hist.loc[pd.to_numeric(hist["Close"], errors="coerce").notna()]
+            hist = _normalize_hist(hist)
 
             vol_signals  = get_volume_signals(hist, mfi_period)
             tech_signals = calculate_technical_signals(hist)
@@ -1061,16 +1293,7 @@ def process_ticker(args):
                             if len(hist) >= 50 else None)
             owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
 
-            hist_cache = {}
-            if not hist.empty:
-                hist_cache = {
-                    "dates":  hist.index.strftime("%Y-%m-%d").tolist(),
-                    "open":   hist["Open"].round(4).tolist(),
-                    "high":   hist["High"].round(4).tolist(),
-                    "low":    hist["Low"].round(4).tolist(),
-                    "close":  hist["Close"].round(4).tolist(),
-                    "volume": hist["Volume"].fillna(0).astype("int64").tolist(),
-                }
+            hist_cache = _cache_from_df(hist)
 
             # ── ANALYZER PACK ────────────────────────────────────────
             # Everything the Money Weather "Stock Lookup" tab renders. It used
@@ -1096,7 +1319,11 @@ def process_ticker(args):
                 "state":         info.get("state"),
                 "country":       info.get("country"),
                 "exchange":      info.get("exchange"),
+                "sector":        info.get("sector"),
                 "industry":      info.get("industry"),
+                "currentPrice":  _num(price),
+                "trailingPE":    _num(info.get("trailingPE")),
+                "marketCap":     _num(info.get("marketCap")),
                 "beta":          _num(info.get("beta")),
                 "forwardPE":     _num(info.get("forwardPE")),
                 "priceToBook":   _num(info.get("priceToBook")),
@@ -1123,6 +1350,12 @@ def process_ticker(args):
                 "floatShares":       _num(info.get("floatShares")),
                 "epsTrailingTwelveMonths": _num(info.get("trailingEps")),
                 "epsForward":        _num(info.get("forwardEps")),
+                "shortPercentOfFloat": _num(info.get("shortPercentOfFloat")),
+                "shortRatio":        _num(info.get("shortRatio")),
+                "revenueGrowth":     _num(info.get("revenueGrowth")),
+                "earningsGrowth":    _num(info.get("earningsGrowth")),
+                "dividendRate":      _num(info.get("dividendRate")),
+                "dividendYield":     _num(info.get("dividendYield")),
                 "grossMarginCalc":   gross_margin,
             }
             # Official first print when Yahoo has it; else first bar we stored.
@@ -1259,6 +1492,16 @@ def main():
     for exch, tl in all_tickers.items():
         log.info(f"  {exch.upper()}: {len(tl)}")
 
+    planned = _last_completed_session()
+    hist_end = (pd.Timestamp(planned) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    hist_start = (pd.Timestamp(planned) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    log.info(f"Target session (last completed US close): {planned}  "
+             f"history window {hist_start} → {hist_end} (end exclusive)")
+    prev_dump = _load_prev_dump()
+    if prev_dump:
+        log.info(f"  Previous dump on disk: {len(prev_dump)} tickers "
+                 f"(failed names will be carried forward)")
+
     # ── 2. Scan all tickers in small batches with pauses ────────────
     # History is batch-downloaded (1 request per 30 tickers, dividends
     # included via actions=True). Per-ticker requests drop from ~6 to 4
@@ -1279,27 +1522,14 @@ def main():
         batch_num += 1
 
         # ── Batch history download: 1 HTTP request for the whole batch ──
-        # (vs 1 request per ticker). Dividends included via actions=True.
-        batch_hist = {}
-        try:
-            dl = yf.download(
-                tickers=" ".join(batch), period="1y", actions=True,
-                group_by="ticker", threads=False, progress=False,
-                auto_adjust=True,
-            )
-            if not dl.empty:
-                if isinstance(dl.columns, pd.MultiIndex):
-                    for t in batch:
-                        if t in dl.columns.get_level_values(0):
-                            h = dl[t].dropna(how="all")
-                            if not h.empty:
-                                batch_hist[t] = h
-                else:
-                    # single-ticker batch returns flat columns
-                    batch_hist[batch[0]] = dl.dropna(how="all")
-        except Exception as e:
-            log.warning(f"  Batch download failed ({type(e).__name__}) — "
-                        f"falling back to per-ticker history for this batch")
+        # Explicit start/end so the last completed session is included.
+        # period="1y" quietly omitted that bar for most names.
+        batch_hist = _download_batch(batch, hist_start, hist_end)
+        n_on_tgt = sum(1 for t, h in batch_hist.items()
+                       if _hist_last(h) >= planned)
+        if batch_num == 1 or batch_num % 10 == 0:
+            log.info(f"  Batch {batch_num} hist: {len(batch_hist)}/{len(batch)} frames, "
+                     f"{n_on_tgt} through {planned}")
 
         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
             futures = {
@@ -1310,7 +1540,7 @@ def main():
             for future in as_completed(futures):
                 t = futures[future]
                 try:
-                    result = future.result(timeout=45)
+                    result = future.result(timeout=120)
                 except Exception:
                     result = None
                 if result:
@@ -1328,6 +1558,102 @@ def main():
         # Pause between batches — lets Yahoo's rate limiter breathe
         if remaining:
             time.sleep(BATCH_PAUSE)
+
+    # ── 2b. Splice the last session onto names Yahoo omitted ─────────
+    # Batch period="1y" / incomplete last bars left ~85% of the universe
+    # a day behind. A short start/end refetch is cheap and is what the
+    # Money Weather date picker actually reads.
+    def _row_last(r):
+        return _hist_last(r.get("_hist"))
+
+    # Re-runs (and a previous dump that already had tonight's session)
+    # should not lose bars the batch download skipped.
+    if prev_dump:
+        n_merged = 0
+        for r in all_results:
+            t = str(r.get("Ticker") or "").strip().upper()
+            prev = prev_dump.get(t)
+            if not prev:
+                continue
+            merged = _merge_hist(
+                _df_from_cache(prev.get("_hist")),
+                _df_from_cache(r.get("_hist")),
+            )
+            if merged.empty or _hist_last(merged) == _row_last(r):
+                continue
+            _apply_hist_to_row(r, merged)
+            n_merged += 1
+        if n_merged:
+            log.info(f"  Merged previous-dump history into {n_merged} tickers")
+
+    stragglers = [r for r in all_results if (_row_last(r) or "") < planned]
+    if stragglers:
+        log.info(f"Refetching last bars for {len(stragglers)} tickers "
+                 f"missing {planned}...")
+        splice_start = (pd.Timestamp(planned) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        by_t = {r["Ticker"]: r for r in all_results}
+        names = [r["Ticker"] for r in stragglers]
+        spliced = 0
+        for i in range(0, len(names), BATCH_SIZE):
+            chunk = names[i:i + BATCH_SIZE]
+            fresh = _download_batch(chunk, splice_start, hist_end)
+            for t, hdf in fresh.items():
+                row = by_t.get(t)
+                if not row:
+                    continue
+                merged = _merge_hist(_df_from_cache(row.get("_hist")), hdf)
+                if _hist_last(merged) >= planned:
+                    _apply_hist_to_row(row, merged)
+                    spliced += 1
+            if i + BATCH_SIZE < len(names):
+                time.sleep(max(3, BATCH_PAUSE // 2))
+        log.info(f"  Spliced {planned} onto {spliced}/{len(stragglers)} stragglers")
+
+    still = [r for r in all_results if (_row_last(r) or "") < planned]
+    if still:
+        cap = min(250, len(still))
+        log.info(f"  Per-ticker 10d history for {cap} remaining stragglers...")
+        got = 0
+        for r in still[:cap]:
+            try:
+                h = _normalize_hist(
+                    yf.Ticker(r["Ticker"]).history(period="10d", actions=True,
+                                                   auto_adjust=True))
+                merged = _merge_hist(_df_from_cache(r.get("_hist")), h)
+                if _hist_last(merged) >= planned:
+                    _apply_hist_to_row(r, merged)
+                    got += 1
+            except Exception:
+                pass
+            time.sleep(0.12)
+        log.info(f"  Per-ticker recovered {got}/{cap}")
+
+    # Carry forward names that failed tonight so a rate-limit blip does
+    # not delete them from the published dump.
+    have = {str(r.get("Ticker") or "").strip().upper() for r in all_results}
+    carried = 0
+    for t, row in prev_dump.items():
+        if t and t not in have:
+            all_results.append(row)
+            have.add(t)
+            carried += 1
+    if carried:
+        log.info(f"  Carried forward {carried} tickers from the previous dump")
+
+    if not all_results and prev_dump:
+        log.error("Tonight's scan produced 0 rows — keeping previous dump")
+        all_results = list(prev_dump.values())
+        carried = len(all_results)
+
+    last_counts = Counter(_row_last(r) or "none" for r in all_results)
+    n_target = int(last_counts.get(planned, 0))
+    coverage = (n_target / len(all_results)) if all_results else 0.0
+    log.info(f"  Last-date coverage of {planned}: {n_target}/{len(all_results)} "
+             f"({coverage:.0%})")
+    log.info(f"  Last-date histogram: {dict(last_counts.most_common(6))}")
+    if coverage < 0.70:
+        log.warning(f"  LOW COVERAGE of {planned} — Yahoo likely lagged. "
+                    "Stormwatch will still prefer this date when enough names printed.")
 
     # ── 3. Save results ───────────────────────────────────────────────
     log.info(f"Saving {len(all_results)} results...")
@@ -1434,6 +1760,11 @@ def main():
         "elapsed_minutes": elapsed,
         "total_tickers":   len(unique_tickers),
         "valid_results":   len(all_results),
+        "target_session":  planned,
+        "target_coverage": round(coverage, 4),
+        "target_printed":  n_target,
+        "carried_forward": carried,
+        "last_date_counts": dict(last_counts.most_common(8)),
         "exchanges": {
             exch: len(tl) for exch, tl in all_tickers.items()
         },

@@ -75,6 +75,22 @@ jobs:
           AV_API_KEY: ${{ secrets.AV_API_KEY }}
           YF_DISABLE_CURL_CFFI: "1"
 
+      - name: Report last-session coverage
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          p = "data/scan_meta.json"
+          if not os.path.isfile(p):
+              print("no scan_meta.json")
+              raise SystemExit(0)
+          m = json.load(open(p))
+          for k in ("scanned_at_utc", "target_session", "target_coverage",
+                    "target_printed", "valid_results", "carried_forward",
+                    "last_date_counts"):
+              print(f"{k}: {m.get(k)}")
+          PY
+
       # ── 6. Commit only if output files were actually produced ─────────────
       - name: Commit data files
         run: |
