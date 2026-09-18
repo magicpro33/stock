@@ -7,16 +7,16 @@
     "Healthcare"
   ],
   "sector_flows": {
-    "Energy": 0.1009,
-    "Communication Services": 0.068,
-    "Healthcare": 0.0301,
-    "Technology": -0.0207,
-    "Basic Materials": -0.0405,
-    "Consumer Defensive": -0.0416,
-    "Financial Services": -0.0813,
-    "Consumer Cyclical": -0.1293,
-    "Utilities": -0.1501,
-    "Real Estate": -0.1573,
-    "Industrials": -0.1716
+    "Energy": 0.0972,
+    "Communication Services": 0.0622,
+    "Healthcare": 0.0279,
+    "Technology": -0.0183,
+    "Basic Materials": -0.0388,
+    "Consumer Defensive": -0.0421,
+    "Financial Services": -0.072,
+    "Consumer Cyclical": -0.1296,
+    "Utilities": -0.1498,
+    "Real Estate": -0.1538,
+    "Industrials": -0.1732
   }
 }
