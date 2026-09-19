@@ -11,6 +11,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import gzip, json, os, time, datetime, calendar as cal_module, numpy as np
+import base64
 
 st.set_page_config(page_title='Dividend Capture Calendar',
     page_icon=':moneybag:', layout='wide', initial_sidebar_state='expanded')
@@ -88,7 +89,28 @@ st.markdown(_CSS, unsafe_allow_html=True)
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'data', 'stock_data.json.gz')
 META_FILE = os.path.join(BASE_DIR, 'data', 'scan_meta.json')
-APP_VERSION = '2026-06-01b'  # bump when deploying -- verify in sidebar footer
+LOGO_PATH = os.path.join(BASE_DIR, 'assets', 'aiupscale_logo.png')
+CREATOR_URL = 'https://aiupscalellc.netlify.app/'
+APP_VERSION = '2026-09-18'  # bump when deploying -- verify in sidebar footer
+
+@st.cache_data
+def _logo_b64():
+    if not os.path.isfile(LOGO_PATH):
+        return ''
+    with open(LOGO_PATH, 'rb') as f:
+        return base64.b64encode(f.read()).decode()
+
+def _clickable_logo(width=180):
+    encoded = _logo_b64()
+    if not encoded:
+        return
+    st.markdown(
+        '<a href="' + CREATOR_URL + '" target="_blank" rel="noopener noreferrer">'
+        '<img src="data:image/png;base64,' + encoded + '" width="' + str(width) + '" '
+        'style="cursor:pointer;margin:4px 0 10px;" alt="AI Upscale">'
+        '</a>',
+        unsafe_allow_html=True,
+    )
 
 def safe_date(v):
     if v is None:
@@ -710,8 +732,8 @@ def render_calendar(df, year, month):
     st.markdown(''.join(parts), unsafe_allow_html=True)
 
 with st.sidebar:
+    _clickable_logo(width=200)
     st.markdown('### Dividend Calendar')
-    st.markdown('`magicpro33/stock`')
     st.markdown('---')
     min_yield  = st.slider('Min yield (%)',  0.0, 25.0, 0.0,  0.5, key='sb_min_yield')
     max_yield  = st.slider('Max yield (%)',  5.0, 50.0, 25.0, 1.0, key='sb_max_yield')
@@ -736,8 +758,12 @@ with st.sidebar:
         '- Analyzer tab for full stock deep-dive')
     st.caption('v' + APP_VERSION)
 
-st.markdown('<div class="main-title">Dividend Capture Calendar</div>', unsafe_allow_html=True)
-st.markdown('<div class="main-sub">buy 1 trading day before ex-date | highest yield first | magicpro33/stock</div>', unsafe_allow_html=True)
+_logo_col, _title_col = st.columns([1, 4])
+with _logo_col:
+    _clickable_logo(width=220)
+with _title_col:
+    st.markdown('<div class="main-title">Dividend Capture Calendar</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-sub">buy 1 trading day before ex-date | highest yield first</div>', unsafe_allow_html=True)
 
 with st.spinner('Loading scan data...'):
     scan_result = load_scan_data()
@@ -1403,6 +1429,6 @@ with tab_az:
 
 st.markdown(
     '<hr><p style="font-size:.7rem;color:#ccc;text-align:center">'
-    'github.com/magicpro33/stock | data updated nightly via GitHub Actions | '
-    'Not financial advice | Always verify ex-dates before trading'
+    '<a href="https://aiupscalellc.netlify.app/" target="_blank" rel="noopener noreferrer" style="color:#aaa;">AI Upscale</a>'
+    ' | data updated nightly | Not financial advice | Always verify ex-dates before trading'
     '</p>', unsafe_allow_html=True)
