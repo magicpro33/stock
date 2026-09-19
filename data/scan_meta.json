@@ -1,18 +1,18 @@
 {
-  "scanned_at_utc": "2026-09-18 15:04 UTC",
-  "scanned_at_display": "2026-09-18 03:04 PM UTC",
-  "elapsed_minutes": 95.2,
+  "scanned_at_utc": "2026-09-19 02:13 UTC",
+  "scanned_at_display": "2026-09-19 02:13 AM UTC",
+  "elapsed_minutes": 106.4,
   "total_tickers": 6270,
   "valid_results": 6245,
-  "target_session": "2026-09-17",
-  "target_coverage": 0.9915,
-  "target_printed": 6192,
-  "carried_forward": 0,
+  "target_session": "2026-09-18",
+  "target_coverage": 0.4926,
+  "target_printed": 3076,
+  "carried_forward": 38,
   "last_date_counts": {
-    "2026-09-17": 6192,
-    "2026-09-18": 50,
-    "2026-09-16": 2,
-    "2026-09-10": 1
+    "2026-09-17": 3167,
+    "2026-09-18": 3076,
+    "2026-09-10": 1,
+    "2026-09-16": 1
   },
   "exchanges": {
     "sp500": 501,
