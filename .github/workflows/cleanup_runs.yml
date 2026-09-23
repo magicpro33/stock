@@ -1,0 +1,70 @@
+# Delete old Actions runs so Nightly Stock Scan / Money Flow do not
+# pile up forever in the Actions tab. Artifacts already expire in 7 days
+# (see nightly_scan.yml); the run history itself does not.
+#
+# Manual: Actions → Cleanup old workflow runs → Run workflow.
+# Optional "days" input overrides the 14-day default.
+
+name: Cleanup old workflow runs
+
+on:
+  schedule:
+    - cron: "0 8 * * 0"   # Sunday 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Delete completed runs older than this many days"
+        required: false
+        default: "14"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    name: Delete old Actions runs
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DAYS: ${{ github.event.inputs.days || '14' }}
+      KEEP_MIN: "5"
+    steps:
+      - name: Delete completed runs older than ${{ github.event.inputs.days || '14' }} days
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d "${DAYS} days ago" +%s)
+          echo "Keeping the ${KEEP_MIN} newest completed runs per workflow."
+          echo "Deleting completed runs older than ${DAYS} days (before $(date -u -d "@${cutoff}" +%Y-%m-%d))."
+
+          delete_old() {
+            local wf="$1"
+            echo "::group::${wf}"
+            ids=$(gh run list --repo "${{ github.repository }}" \
+                    --workflow "$wf" --limit 200 \
+                    --json databaseId,createdAt,status \
+                    --jq --argjson keep "${KEEP_MIN}" --argjson cutoff "$cutoff" '
+                      [.[] | select(.status=="completed")]
+                      | .[$keep:]
+                      | .[]
+                      | select((.createdAt | fromdateiso8601) < $cutoff)
+                      | .databaseId
+                    ')
+            if [ -z "${ids}" ]; then
+              echo "Nothing to delete."
+              echo "::endgroup::"
+              return 0
+            fi
+            n=0
+            for id in ${ids}; do
+              gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${id}" \
+                && n=$((n+1)) && echo "deleted ${id}" \
+                || echo "skip ${id}"
+            done
+            echo "Deleted ${n} run(s)."
+            echo "::endgroup::"
+          }
+
+          delete_old "Nightly Stock Scan"
+          delete_old "Money Flow Engine"
+          delete_old "Cleanup old workflow runs"
