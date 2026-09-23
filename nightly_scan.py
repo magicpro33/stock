@@ -412,20 +412,25 @@ def _stamp_fin(row: dict, got_statements: bool, prev=None) -> None:
 
 
 def _field_completeness(rows, planned: str) -> float:
-    """Share of expected dump slots that are actually filled."""
-    keys = (
-        "MarketCap", "P/E", "RevenueGrowth", "EarningsGrowth", "Piotroski",
-        "GoldenCross", "ROIC", "DividendYieldPct", "DividendRate",
-        "ShortPctFloat", "DaysToCover", "ShortSqueeze", "CleanSetupScore",
-        "MFI", "OE_Yield", "PCV", "ROIC_Trend",
-    )
+    """Core completeness — same idea as Stormwatch's header meter.
+
+    Last print is scored against `planned` when at least 60% of names have
+    that date; otherwise against the majority last date. Optional fields
+    (P/E, dividend, short, ROIC) are not required.
+    """
+    keys = ("GoldenCross", "CleanSetupScore", "MFI", "PCV")
     if not rows:
         return 0.0
+    lasts = Counter(_hist_last(r) or "" for r in rows)
+    n_plan = int(lasts.get(planned, 0))
+    asof = planned if n_plan >= max(80, int(0.60 * len(rows))) else (
+        max(lasts, key=lasts.get) if lasts else planned)
     ok = 0.0
     slots = 0.0
     for r in rows:
         slots += 2 + len(keys)
-        if (_hist_last(r) or "") >= planned:
+        last = _hist_last(r) or ""
+        if last and last >= asof:
             ok += 1
         closes = ((r.get("_hist") or {}).get("close") or [])
         if closes and closes[-1] is not None:
@@ -438,6 +443,18 @@ def _field_completeness(rows, planned: str) -> float:
             if _has_num(r.get(k)):
                 ok += 1
     return round(ok / slots, 4) if slots else 0.0
+
+
+def _fill_known_absences(row: dict) -> None:
+    """Write 0 for 'does not apply' after a successful profile, not NaN."""
+    if not (_info_ok(row) or _has_num(row.get("MarketCap"))):
+        return
+    if not _has_num(row.get("DividendYieldPct")):
+        row["DividendYieldPct"] = 0.0
+    if not _has_num(row.get("DividendRate")):
+        row["DividendRate"] = 0.0
+    if not _has_num(row.get("ShortSqueeze")):
+        row["ShortSqueeze"] = 0.0
 
 
 # ── Ticker loaders ────────────────────────────────────────────────────────────
@@ -1720,7 +1737,9 @@ def main():
         log.info(f"  {exch.upper()}: {len(tl)}")
 
     planned = _last_completed_session()
-    hist_end = (pd.Timestamp(planned) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    # +2 days: Yahoo's exclusive `end` plus UTC/ET date skew otherwise
+    # drops the last US session for most names (2026-09-22 landed on 11%).
+    hist_end = (pd.Timestamp(planned) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     hist_start = (pd.Timestamp(planned) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
     log.info(f"Target session (last completed US close): {planned}  "
              f"history window {hist_start} → {hist_end} (end exclusive)")
@@ -1889,12 +1908,13 @@ def main():
     if stragglers:
         log.info(f"Refetching last bars for {len(stragglers)} tickers "
                  f"missing {planned}...")
-        splice_start = (pd.Timestamp(planned) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        splice_start = (pd.Timestamp(planned) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
         by_t = {r["Ticker"]: r for r in all_results}
         names = [r["Ticker"] for r in stragglers]
         spliced = 0
-        for i in range(0, len(names), BATCH_SIZE):
-            chunk = names[i:i + BATCH_SIZE]
+        splice_bs = 10
+        for i in range(0, len(names), splice_bs):
+            chunk = names[i:i + splice_bs]
             fresh = _download_batch(chunk, splice_start, hist_end)
             for t, hdf in fresh.items():
                 row = by_t.get(t)
@@ -1904,28 +1924,38 @@ def main():
                 if _hist_last(merged) >= planned:
                     _apply_hist_to_row(row, merged)
                     spliced += 1
-            if i + BATCH_SIZE < len(names):
-                time.sleep(max(3, BATCH_PAUSE // 2))
+            if i + splice_bs < len(names):
+                time.sleep(2)
         log.info(f"  Spliced {planned} onto {spliced}/{len(stragglers)} stragglers")
 
     still = [r for r in all_results if (_row_last(r) or "") < planned]
     if still:
-        cap = min(250, len(still))
-        log.info(f"  Per-ticker 10d history for {cap} remaining stragglers...")
+        log.info(f"  Per-ticker 5d history for {len(still)} remaining stragglers...")
         got = 0
-        for r in still[:cap]:
+        by_t = {r["Ticker"]: r for r in all_results}
+
+        def _recent_one(t):
             try:
-                h = _normalize_hist(
-                    yf.Ticker(r["Ticker"]).history(period="10d", actions=True,
-                                                   auto_adjust=True))
-                merged = _merge_hist(_df_from_cache(r.get("_hist")), h)
-                if _hist_last(merged) >= planned:
-                    _apply_hist_to_row(r, merged)
-                    got += 1
+                return t, _normalize_hist(
+                    yf.Ticker(t).history(period="5d", actions=True,
+                                         auto_adjust=True))
             except Exception:
-                pass
-            time.sleep(0.12)
-        log.info(f"  Per-ticker recovered {got}/{cap}")
+                return t, pd.DataFrame()
+
+        for i in range(0, len(still), BATCH_SIZE):
+            chunk = still[i:i + BATCH_SIZE]
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                for t, h in ex.map(_recent_one, [r["Ticker"] for r in chunk]):
+                    row = by_t.get(t)
+                    if row is None or h is None or getattr(h, "empty", True):
+                        continue
+                    merged = _merge_hist(_df_from_cache(row.get("_hist")), h)
+                    if _hist_last(merged) >= planned:
+                        _apply_hist_to_row(row, merged)
+                        got += 1
+            if i + BATCH_SIZE < len(still):
+                time.sleep(2)
+        log.info(f"  Per-ticker recovered {got}/{len(still)}")
 
     # Carry forward names that failed tonight so a rate-limit blip does
     # not delete them from the published dump.
@@ -1957,6 +1987,12 @@ def main():
                     "Stormwatch will still prefer this date when enough names printed.")
 
     # ── 3. Save results ───────────────────────────────────────────────
+    for r in all_results:
+        try:
+            _fill_known_absences(r)
+        except Exception:
+            pass
+
     log.info(f"Saving {len(all_results)} results...")
 
     date_tag = start_utc.strftime("%Y-%m-%d")
