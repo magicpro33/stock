@@ -27,12 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
       DAYS: ${{ github.event.inputs.days || '14' }}
       KEEP_MIN: "5"
     steps:
       - name: Delete completed runs older than ${{ github.event.inputs.days || '14' }} days
         run: |
-          set -euo pipefail
+          set -u
           cutoff=$(date -u -d "${DAYS} days ago" +%s)
           echo "Keeping the ${KEEP_MIN} newest completed runs per workflow."
           echo "Deleting completed runs older than ${DAYS} days (before $(date -u -d "@${cutoff}" +%Y-%m-%d))."
@@ -40,16 +41,19 @@ jobs:
           delete_old() {
             local wf="$1"
             echo "::group::${wf}"
-            ids=$(gh run list --repo "${{ github.repository }}" \
-                    --workflow "$wf" --limit 200 \
-                    --json databaseId,createdAt,status \
-                    --jq --argjson keep "${KEEP_MIN}" --argjson cutoff "$cutoff" '
-                      [.[] | select(.status=="completed")]
-                      | .[$keep:]
-                      | .[]
-                      | select((.createdAt | fromdateiso8601) < $cutoff)
-                      | .databaseId
-                    ')
+            if ! json=$(gh run list --repo "${REPO}" --workflow "$wf" --limit 200 \
+                          --json databaseId,createdAt,status 2>&1); then
+              echo "Could not list runs: ${json}"
+              echo "::endgroup::"
+              return 0
+            fi
+            ids=$(printf '%s' "$json" | jq -r --argjson keep "${KEEP_MIN}" --argjson cutoff "$cutoff" '
+              [.[] | select(.status=="completed")]
+              | .[$keep:]
+              | .[]
+              | select((.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff)
+              | .databaseId
+            ')
             if [ -z "${ids}" ]; then
               echo "Nothing to delete."
               echo "::endgroup::"
@@ -57,9 +61,12 @@ jobs:
             fi
             n=0
             for id in ${ids}; do
-              gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${id}" \
-                && n=$((n+1)) && echo "deleted ${id}" \
-                || echo "skip ${id}"
+              if gh api -X DELETE "repos/${REPO}/actions/runs/${id}"; then
+                n=$((n+1))
+                echo "deleted ${id}"
+              else
+                echo "skip ${id}"
+              fi
             done
             echo "Deleted ${n} run(s)."
             echo "::endgroup::"
