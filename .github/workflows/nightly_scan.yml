@@ -4,6 +4,11 @@
 # Saves the output to the data/ folder and commits it back to the repo.
 # The Streamlit app reads from data/stock_data.json.gz on startup.
 #
+# Incremental: nightly_scan.py loads last night's dump from this checkout
+# and only hits Yahoo for missing fields + the latest session. That is why
+# data/stock_data.json.gz must stay in the repo — without it every run
+# re-downloads the full universe and rate-limits leave the dump incomplete.
+#
 # To trigger manually: go to Actions → Nightly Stock Scan → Run workflow
 
 name: Nightly Stock Scan
@@ -87,6 +92,9 @@ jobs:
           m = json.load(open(p))
           for k in ("scanned_at_utc", "target_session", "target_coverage",
                     "target_printed", "valid_results", "carried_forward",
+                    "reused_as_is", "hist_only", "yahoo_backfill",
+                    "hist_incremental", "hist_full", "profile_holes",
+                    "statement_holes", "field_completeness",
                     "last_date_counts"):
               print(f"{k}: {m.get(k)}")
           PY

@@ -22,11 +22,18 @@
 # analyst targets, 52w range, quarterly EPS history). Those come from `info`
 # and the statements this scan ALREADY downloads, so caching them adds no API
 # calls and lets the app render a full analysis without a live yfinance hit.
+#
+# Incremental reuse: last night's data/stock_data.json.gz is the base. Names
+# that already have a good profile, financials, and history only spend
+# bandwidth on bars they are missing (usually just the latest session).
+# Yahoo rate-limits were leaving the dump ~50-80% complete because every
+# name re-downloaded a full year + info + 3 statements. Skip what we have.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
 os.environ.setdefault("YF_DISABLE_CURL_CFFI", "1")
 import sys
+import copy
 import gzip
 import json
 import time
@@ -299,6 +306,138 @@ def _load_prev_dump() -> dict:
     except Exception as e:
         log.warning(f"  Previous dump unreadable: {e}")
         return {}
+
+
+FIN_RETRY_MAX = 3
+_FIN_EVIDENCE = ("ROIC", "Piotroski", "GrossMargin", "OwnerEarnings", "ROIC_Trend")
+
+
+def _has_num(v) -> bool:
+    if v is None or v == "" or v == "None":
+        return False
+    try:
+        return bool(np.isfinite(float(v)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _row_copy(row: dict) -> dict:
+    """Copy a dump row without aliasing nested hist/analyzer."""
+    return copy.deepcopy(row)
+
+
+def _hist_ok(row, min_bars: int = 120) -> bool:
+    dates = ((row or {}).get("_hist") or {}).get("dates") or []
+    return len(dates) >= int(min_bars)
+
+
+def _info_ok(row) -> bool:
+    """Previous row already has a real Yahoo profile (not a rate-limit stub)."""
+    if not row:
+        return False
+    if row.get("_info_ok"):
+        return True
+    an = row.get("_analyzer") if isinstance(row.get("_analyzer"), dict) else {}
+    sector = str(row.get("Sector") or an.get("sector") or "").strip()
+    if not sector or sector.lower() in ("unknown", "none", "nan", ""):
+        return False
+    if not (an.get("shortName") or an.get("longName") or an.get("longBusinessSummary")):
+        return False
+    if not (_has_num(row.get("MarketCap")) or _has_num(an.get("marketCap"))):
+        return False
+    return True
+
+
+def _fin_ok(row) -> bool:
+    """Statements were pulled (or we already tried enough times)."""
+    if not row:
+        return False
+    if row.get("_fin_ok"):
+        return True
+    try:
+        if int(row.get("_fin_tries") or 0) >= FIN_RETRY_MAX:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return any(_has_num(row.get(k)) for k in _FIN_EVIDENCE)
+
+
+def _info_from_row(row: dict) -> dict:
+    """Rebuild a yfinance-like info dict from a cached dump row."""
+    an = row.get("_analyzer") if isinstance(row.get("_analyzer"), dict) else {}
+    return {
+        "quoteType": "EQUITY",
+        "symbol": row.get("Ticker"),
+        "shortName": an.get("shortName"),
+        "longName": an.get("longName"),
+        "longBusinessSummary": an.get("longBusinessSummary"),
+        "sector": row.get("Sector") or an.get("sector"),
+        "industry": an.get("industry"),
+        "currentPrice": row.get("Price") or an.get("currentPrice"),
+        "regularMarketPrice": row.get("Price") or an.get("currentPrice"),
+        "marketCap": row.get("MarketCap") or an.get("marketCap"),
+        "trailingPE": row.get("P/E") or an.get("trailingPE"),
+        "revenueGrowth": row.get("RevenueGrowth") or an.get("revenueGrowth"),
+        "earningsGrowth": row.get("EarningsGrowth") or an.get("earningsGrowth"),
+        "shortPercentOfFloat": row.get("ShortPctFloat") or an.get("shortPercentOfFloat"),
+        "shortRatio": row.get("DaysToCover") or an.get("shortRatio"),
+        "dividendRate": row.get("DividendRate") or an.get("dividendRate"),
+        "dividendYield": an.get("dividendYield"),
+        "payoutRatio": row.get("DividendPayoutRatio") or an.get("payoutRatio"),
+        "exDividendDate": row.get("ExDividendDate"),
+        "trailingAnnualDividendRate": an.get("dividendRate") or row.get("DividendRate"),
+        "trailingAnnualDividendYield": an.get("dividendYield"),
+    }
+
+
+def _stamp_info(row: dict, ok: bool) -> None:
+    if ok:
+        row["_info_ok"] = True
+
+
+def _stamp_fin(row: dict, got_statements: bool, prev=None) -> None:
+    tries = 0
+    try:
+        tries = int((prev or row).get("_fin_tries") or 0)
+    except (TypeError, ValueError):
+        tries = 0
+    if got_statements:
+        row["_fin_ok"] = True
+        row["_fin_tries"] = 0
+    else:
+        tries += 1
+        row["_fin_tries"] = tries
+        if tries >= FIN_RETRY_MAX:
+            row["_fin_ok"] = True
+
+
+def _field_completeness(rows, planned: str) -> float:
+    """Share of expected dump slots that are actually filled."""
+    keys = (
+        "MarketCap", "P/E", "RevenueGrowth", "EarningsGrowth", "Piotroski",
+        "GoldenCross", "ROIC", "DividendYieldPct", "DividendRate",
+        "ShortPctFloat", "DaysToCover", "ShortSqueeze", "CleanSetupScore",
+        "MFI", "OE_Yield", "PCV", "ROIC_Trend",
+    )
+    if not rows:
+        return 0.0
+    ok = 0.0
+    slots = 0.0
+    for r in rows:
+        slots += 2 + len(keys)
+        if (_hist_last(r) or "") >= planned:
+            ok += 1
+        closes = ((r.get("_hist") or {}).get("close") or [])
+        if closes and closes[-1] is not None:
+            try:
+                if np.isfinite(float(closes[-1])):
+                    ok += 1
+            except (TypeError, ValueError):
+                pass
+        for k in keys:
+            if _has_num(r.get(k)):
+                ok += 1
+    return round(ok / slots, 4) if slots else 0.0
 
 
 # ── Ticker loaders ────────────────────────────────────────────────────────────
@@ -1166,63 +1305,86 @@ def calculate_short_squeeze(info: dict) -> dict:
 
 def process_ticker(args):
     """
-    args = (ticker, mfi_period, range_days, prefetched_hist)
-    prefetched_hist: OHLCV(+Dividends) DataFrame from the batch yf.download,
-    or None — in which case we fall back to a per-ticker history fetch.
+    args = (ticker, mfi_period, range_days, prefetched_hist, prev_row)
+    prefetched_hist: OHLCV(+Dividends) from the batch yf.download (often just
+    the last two weeks when last night's dump already had a long history).
+    prev_row: last night's record — profile/financials are reused when present
+    so Yahoo bandwidth goes to missing fields and the latest session.
     """
-    t, mfi_period, range_days, pre_hist = args
+    t, mfi_period, range_days, pre_hist, prev_row = args
+    prev_row = prev_row if isinstance(prev_row, dict) else None
+    fetch_info = not _info_ok(prev_row)
+    fetch_fin = not _fin_ok(prev_row)
+    hist = _merge_hist(
+        _df_from_cache((prev_row or {}).get("_hist")),
+        pre_hist if isinstance(pre_hist, pd.DataFrame) else pd.DataFrame(),
+    )
+
+    # Nothing missing from Yahoo — splice new bars locally and stop.
+    if prev_row and not fetch_info and not fetch_fin:
+        row = _row_copy(prev_row)
+        if not hist.empty:
+            _apply_hist_to_row(row, hist)
+        return row
+
     # 3 attempts with increasing backoff — nightly job has time to spare.
     for attempt in range(3):
         try:
             if attempt > 0:
                 time.sleep(attempt * 5 + random.uniform(0, 3))
 
-            stock   = yf.Ticker(t)
+            need_stock = fetch_info or fetch_fin or hist.empty or len(hist) < 30
+            stock = yf.Ticker(t) if need_stock else None
             _av_key = _get_av_key() if _AV_AVAILABLE else ""
-            info    = stock.info or {}
+            info = {}
+            if fetch_info and stock is not None:
+                info = stock.info or {}
 
             # Valid info has quoteType/symbol; rate-limited stubs have 1-2 null keys
-            if not (info.get("quoteType") or info.get("symbol") or len(info) >= 10):
-                # Rate-limited — try Alpha Vantage before giving up
-                if _AV_AVAILABLE and _av_key:
+            if fetch_info:
+                if not (info.get("quoteType") or info.get("symbol") or len(info) >= 10):
+                    if _AV_AVAILABLE and _av_key:
+                        try:
+                            info = av_fill_info(t, info, _av_key)
+                        except Exception:
+                            pass
+                    if not info or len(info) < 5:
+                        if prev_row:
+                            info = _info_from_row(prev_row)
+                            fetch_info = False
+                        elif attempt < 2:
+                            time.sleep(10 + random.uniform(0, 5))
+                            continue
+                        else:
+                            return None
+
+                if fetch_info and _AV_AVAILABLE and _av_key and av_needs_fallback(info):
                     try:
                         info = av_fill_info(t, info, _av_key)
                     except Exception:
                         pass
-                if not info or len(info) < 5:
-                    if attempt < 2:
-                        time.sleep(10 + random.uniform(0, 5))
-                        continue
+
+                if fetch_info and is_etf_or_fund(info):
                     return None
-
-            # AV patch for unknown sector even when info is otherwise healthy
-            if _AV_AVAILABLE and _av_key and av_needs_fallback(info):
-                try:
-                    info = av_fill_info(t, info, _av_key)
-                except Exception:
-                    pass
-
-            if is_etf_or_fund(info):
-                return None
+            else:
+                info = _info_from_row(prev_row or {})
 
             price = info.get("currentPrice") or info.get("regularMarketPrice")
 
-            # Use batch-downloaded history when available (1 request per 30
-            # tickers instead of 1 per ticker); fall back to per-ticker fetch.
-            hist = _normalize_hist(pre_hist) if pre_hist is not None else pd.DataFrame()
-            if hist.empty or len(hist) < 30:
+            # Batch hist (already merged with last night) is enough for most
+            # names. Only hit Yahoo again when we still don't have 30 bars.
+            if (hist.empty or len(hist) < 30) and stock is not None:
                 try:
-                    hist = _normalize_hist(stock.history(
+                    hist = _merge_hist(hist, stock.history(
                         period="1y", actions=True, auto_adjust=True))
                     if hist.empty or len(hist) < 30:
-                        hist = _normalize_hist(stock.history(
+                        hist = _merge_hist(hist, stock.history(
                             period="6mo", actions=True, auto_adjust=True))
                 except Exception:
                     hist = hist if isinstance(hist, pd.DataFrame) else pd.DataFrame()
                 try:
-                    recent = _normalize_hist(stock.history(
+                    hist = _merge_hist(hist, stock.history(
                         period="10d", actions=True, auto_adjust=True))
-                    hist = _merge_hist(hist, recent)
                 except Exception:
                     pass
 
@@ -1230,8 +1392,8 @@ def process_ticker(args):
             if _AV_AVAILABLE and _av_key and av_needs_history_fallback(hist):
                 try:
                     av_hist = av_fill_history(t, _av_key)
-                    if not av_hist.empty:
-                        hist = _normalize_hist(av_hist)
+                    if av_hist is not None and not av_hist.empty:
+                        hist = _merge_hist(hist, av_hist)
                 except Exception:
                     pass
 
@@ -1241,39 +1403,51 @@ def process_ticker(args):
                 except Exception:
                     price = None
             if not price:
-                return None
+                if prev_row and _has_num(prev_row.get("Price")):
+                    price = prev_row.get("Price")
+                else:
+                    return None
 
-            try:
-                fin = stock.financials
-            except Exception:
-                fin = pd.DataFrame()
+            fin = bal = cf = pd.DataFrame()
+            got_statements = False
+            if fetch_fin and stock is not None:
+                try:
+                    fin = stock.financials
+                except Exception:
+                    fin = pd.DataFrame()
+                try:
+                    bal = stock.balance_sheet
+                except Exception:
+                    bal = pd.DataFrame()
+                try:
+                    cf = stock.cashflow
+                except Exception:
+                    cf = pd.DataFrame()
+                if _AV_AVAILABLE and _av_key and av_needs_financials_fallback(fin, bal, cf):
+                    try:
+                        av_fin, av_bal, av_cf = av_fill_financials(t, _av_key)
+                        if fin.empty and not av_fin.empty:   fin = av_fin
+                        if bal.empty and not av_bal.empty:   bal = av_bal
+                        if cf.empty  and not av_cf.empty:    cf  = av_cf
+                    except Exception:
+                        pass
+                got_statements = not (
+                    getattr(fin, "empty", True)
+                    and getattr(bal, "empty", True)
+                    and getattr(cf, "empty", True)
+                )
+
             # Dividends ride along in the history frame (actions=True) —
             # saves one HTTP request per ticker vs stock.dividends
             try:
                 if "Dividends" in hist.columns:
                     div_hist = hist["Dividends"][hist["Dividends"] > 0]
-                else:
+                elif fetch_info and stock is not None:
                     div_hist = stock.dividends
+                else:
+                    div_hist = pd.Series(dtype=float)
             except Exception:
                 div_hist = pd.Series(dtype=float)
-            try:
-                bal = stock.balance_sheet
-            except Exception:
-                bal = pd.DataFrame()
-            try:
-                cf = stock.cashflow
-            except Exception:
-                cf = pd.DataFrame()
-
-            # AV fallback for missing financials
-            if _AV_AVAILABLE and _av_key and av_needs_financials_fallback(fin, bal, cf):
-                try:
-                    av_fin, av_bal, av_cf = av_fill_financials(t, _av_key)
-                    if fin.empty and not av_fin.empty:   fin = av_fin
-                    if bal.empty and not av_bal.empty:   bal = av_bal
-                    if cf.empty  and not av_cf.empty:    cf  = av_cf
-                except Exception:
-                    pass
 
             # yfinance often appends a session stub after the close:
             # Volume is filled, Open/High/Low/Close are NaN. If we keep
@@ -1284,14 +1458,42 @@ def process_ticker(args):
             vol_signals  = get_volume_signals(hist, mfi_period)
             tech_signals = calculate_technical_signals(hist)
             range_data   = calculate_price_range(hist, range_days)
-            short_data   = calculate_short_squeeze(info)
-            div_data     = calculate_dividend_score(
-                info, div_hist if not div_hist.empty else None, price)
+            if fetch_info:
+                short_data = calculate_short_squeeze(info)
+                div_data = calculate_dividend_score(
+                    info, div_hist if not div_hist.empty else None, price)
+            else:
+                short_data = {
+                    "ShortPctFloat": (prev_row or {}).get("ShortPctFloat"),
+                    "ShortPctFloatRaw": (prev_row or {}).get("ShortPctFloatRaw"),
+                    "DaysToCover": (prev_row or {}).get("DaysToCover"),
+                    "ShortChange": (prev_row or {}).get("ShortChange"),
+                    "ShortSqueeze": (prev_row or {}).get("ShortSqueeze"),
+                }
+                div_data = {
+                    "DividendYieldPct": (prev_row or {}).get("DividendYieldPct"),
+                    "DividendRate": (prev_row or {}).get("DividendRate"),
+                    "PayoutRatio": (prev_row or {}).get("DividendPayoutRatio"),
+                    "DividendFrequency": (prev_row or {}).get("DividendFrequency"),
+                    "DividendScore": (prev_row or {}).get("DividendScore"),
+                    "DividendBasis": (prev_row or {}).get("DividendBasis"),
+                }
             clean_setup  = calculate_clean_setup(hist)
-            gross_margin = calculate_gross_margin(fin)
+            if fetch_fin:
+                gross_margin = calculate_gross_margin(fin)
+                owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
+                roic = calculate_roic(fin, bal)
+                roic_trend = calculate_roic_trend(fin, bal)
+                piotroski = calculate_piotroski(fin, bal, cf)
+            else:
+                gross_margin = (prev_row or {}).get("GrossMargin")
+                owner_earnings = (prev_row or {}).get("OwnerEarnings")
+                oe_yield = (prev_row or {}).get("OE_Yield")
+                roic = (prev_row or {}).get("ROIC")
+                roic_trend = (prev_row or {}).get("ROIC_Trend")
+                piotroski = (prev_row or {}).get("Piotroski")
             ma50         = (round(hist["Close"].rolling(50).mean().iloc[-1], 2)
                             if len(hist) >= 50 else None)
-            owner_earnings, oe_yield = get_owner_earnings(cf, fin, info)
 
             hist_cache = _cache_from_df(hist)
 
@@ -1309,55 +1511,61 @@ def process_ticker(args):
                 except (TypeError, ValueError):
                     return None
 
-            analyzer = {
-                "shortName":     info.get("shortName") or info.get("longName"),
-                "longName":      info.get("longName"),
-                "longBusinessSummary": info.get("longBusinessSummary"),
-                "website":       info.get("website"),
-                "fullTimeEmployees": _num(info.get("fullTimeEmployees")),
-                "city":          info.get("city"),
-                "state":         info.get("state"),
-                "country":       info.get("country"),
-                "exchange":      info.get("exchange"),
-                "sector":        info.get("sector"),
-                "industry":      info.get("industry"),
-                "currentPrice":  _num(price),
-                "trailingPE":    _num(info.get("trailingPE")),
-                "marketCap":     _num(info.get("marketCap")),
-                "beta":          _num(info.get("beta")),
-                "forwardPE":     _num(info.get("forwardPE")),
-                "priceToBook":   _num(info.get("priceToBook")),
-                "priceToSales":  _num(info.get("priceToSalesTrailing12Months")),
-                "fiftyTwoWeekHigh": _num(info.get("fiftyTwoWeekHigh")),
-                "fiftyTwoWeekLow":  _num(info.get("fiftyTwoWeekLow")),
-                "profitMargins":    _num(info.get("profitMargins")),
-                "operatingMargins": _num(info.get("operatingMargins")),
-                "grossMargins":     _num(info.get("grossMargins")),
-                "returnOnEquity":   _num(info.get("returnOnEquity")),
-                "returnOnAssets":   _num(info.get("returnOnAssets")),
-                "debtToEquity":     _num(info.get("debtToEquity")),
-                "currentRatio":     _num(info.get("currentRatio")),
-                "quickRatio":       _num(info.get("quickRatio")),
-                "freeCashflow":     _num(info.get("freeCashflow")),
-                "operatingCashflow": _num(info.get("operatingCashflow")),
-                "totalRevenue":     _num(info.get("totalRevenue")),
-                "targetMeanPrice":  _num(info.get("targetMeanPrice")),
-                "targetLowPrice":   _num(info.get("targetLowPrice")),
-                "targetHighPrice":  _num(info.get("targetHighPrice")),
-                "numberOfAnalystOpinions": _num(info.get("numberOfAnalystOpinions")),
-                "recommendationKey": info.get("recommendationKey"),
-                "sharesOutstanding": _num(info.get("sharesOutstanding")),
-                "floatShares":       _num(info.get("floatShares")),
-                "epsTrailingTwelveMonths": _num(info.get("trailingEps")),
-                "epsForward":        _num(info.get("forwardEps")),
-                "shortPercentOfFloat": _num(info.get("shortPercentOfFloat")),
-                "shortRatio":        _num(info.get("shortRatio")),
-                "revenueGrowth":     _num(info.get("revenueGrowth")),
-                "earningsGrowth":    _num(info.get("earningsGrowth")),
-                "dividendRate":      _num(info.get("dividendRate")),
-                "dividendYield":     _num(info.get("dividendYield")),
-                "grossMarginCalc":   gross_margin,
-            }
+            if fetch_info:
+                analyzer = {
+                    "shortName":     info.get("shortName") or info.get("longName"),
+                    "longName":      info.get("longName"),
+                    "longBusinessSummary": info.get("longBusinessSummary"),
+                    "website":       info.get("website"),
+                    "fullTimeEmployees": _num(info.get("fullTimeEmployees")),
+                    "city":          info.get("city"),
+                    "state":         info.get("state"),
+                    "country":       info.get("country"),
+                    "exchange":      info.get("exchange"),
+                    "sector":        info.get("sector"),
+                    "industry":      info.get("industry"),
+                    "currentPrice":  _num(price),
+                    "trailingPE":    _num(info.get("trailingPE")),
+                    "marketCap":     _num(info.get("marketCap")),
+                    "beta":          _num(info.get("beta")),
+                    "forwardPE":     _num(info.get("forwardPE")),
+                    "priceToBook":   _num(info.get("priceToBook")),
+                    "priceToSales":  _num(info.get("priceToSalesTrailing12Months")),
+                    "fiftyTwoWeekHigh": _num(info.get("fiftyTwoWeekHigh")),
+                    "fiftyTwoWeekLow":  _num(info.get("fiftyTwoWeekLow")),
+                    "profitMargins":    _num(info.get("profitMargins")),
+                    "operatingMargins": _num(info.get("operatingMargins")),
+                    "grossMargins":     _num(info.get("grossMargins")),
+                    "returnOnEquity":   _num(info.get("returnOnEquity")),
+                    "returnOnAssets":   _num(info.get("returnOnAssets")),
+                    "debtToEquity":     _num(info.get("debtToEquity")),
+                    "currentRatio":     _num(info.get("currentRatio")),
+                    "quickRatio":       _num(info.get("quickRatio")),
+                    "freeCashflow":     _num(info.get("freeCashflow")),
+                    "operatingCashflow": _num(info.get("operatingCashflow")),
+                    "totalRevenue":     _num(info.get("totalRevenue")),
+                    "targetMeanPrice":  _num(info.get("targetMeanPrice")),
+                    "targetLowPrice":   _num(info.get("targetLowPrice")),
+                    "targetHighPrice":  _num(info.get("targetHighPrice")),
+                    "numberOfAnalystOpinions": _num(info.get("numberOfAnalystOpinions")),
+                    "recommendationKey": info.get("recommendationKey"),
+                    "sharesOutstanding": _num(info.get("sharesOutstanding")),
+                    "floatShares":       _num(info.get("floatShares")),
+                    "epsTrailingTwelveMonths": _num(info.get("trailingEps")),
+                    "epsForward":        _num(info.get("forwardEps")),
+                    "shortPercentOfFloat": _num(info.get("shortPercentOfFloat")),
+                    "shortRatio":        _num(info.get("shortRatio")),
+                    "revenueGrowth":     _num(info.get("revenueGrowth")),
+                    "earningsGrowth":    _num(info.get("earningsGrowth")),
+                    "dividendRate":      _num(info.get("dividendRate")),
+                    "dividendYield":     _num(info.get("dividendYield")),
+                    "grossMarginCalc":   gross_margin,
+                }
+            else:
+                analyzer = dict((prev_row or {}).get("_analyzer") or {})
+                analyzer["currentPrice"] = _num(price)
+                if gross_margin is not None:
+                    analyzer["grossMarginCalc"] = gross_margin
             # Official first print when Yahoo has it; else first bar we stored.
             _ft = None
             for _fk in ("firstTradeDateEpochUtc", "firstTradeDateMilliseconds"):
@@ -1374,45 +1582,50 @@ def process_ticker(args):
                         pass
             if not _ft and hist_cache.get("dates"):
                 _ft = hist_cache["dates"][0]
+            if not _ft and prev_row:
+                _ft = prev_row.get("FirstTradeDate") or (analyzer.get("firstTradeDate"))
             analyzer["firstTradeDate"] = _ft
-            # quarterly EPS history — the analyzer's beat/miss chart
-            try:
-                eh = getattr(stock, "earnings_history", None)
-                if eh is not None and hasattr(eh, "empty") and not eh.empty:
-                    cmap = {c.lower(): c for c in eh.columns}
-                    ac, ec = cmap.get("epsactual"), cmap.get("epsestimate")
-                    sc = cmap.get("surprisepercent")
-                    rows_eps = []
-                    for idx_, row_ in eh.tail(8).iterrows():
-                        try:
-                            q = pd.to_datetime(idx_, errors="coerce")
-                            ql = q.strftime("%b %Y") if pd.notna(q) else str(idx_)
-                        except Exception:
-                            ql = str(idx_)
-                        rows_eps.append({
-                            "quarter":  ql,
-                            "actual":   _num(row_.get(ac)) if ac else None,
-                            "estimate": _num(row_.get(ec)) if ec else None,
-                            "surprise": _num(row_.get(sc)) if sc else None,
-                        })
-                    analyzer["eps_history"] = rows_eps
-            except Exception:
-                pass
+            # quarterly EPS history — only when we already paid for a live profile
+            if fetch_info and stock is not None:
+                try:
+                    eh = getattr(stock, "earnings_history", None)
+                    if eh is not None and hasattr(eh, "empty") and not eh.empty:
+                        cmap = {c.lower(): c for c in eh.columns}
+                        ac, ec = cmap.get("epsactual"), cmap.get("epsestimate")
+                        sc = cmap.get("surprisepercent")
+                        rows_eps = []
+                        for idx_, row_ in eh.tail(8).iterrows():
+                            try:
+                                q = pd.to_datetime(idx_, errors="coerce")
+                                ql = q.strftime("%b %Y") if pd.notna(q) else str(idx_)
+                            except Exception:
+                                ql = str(idx_)
+                            rows_eps.append({
+                                "quarter":  ql,
+                                "actual":   _num(row_.get(ac)) if ac else None,
+                                "estimate": _num(row_.get(ec)) if ec else None,
+                                "surprise": _num(row_.get(sc)) if sc else None,
+                            })
+                        analyzer["eps_history"] = rows_eps
+                except Exception:
+                    pass
 
-            return {
+            out = {
                 "Ticker":         t,
-                "Sector":         info.get("sector", "Unknown"),
+                "Sector":         (info.get("sector")
+                                   or (prev_row or {}).get("Sector")
+                                   or "Unknown"),
                 "_analyzer":      analyzer,
                 "Price":          price,
-                "MarketCap":      info.get("marketCap"),
-                "P/E":            info.get("trailingPE"),
+                "MarketCap":      info.get("marketCap") if fetch_info else (prev_row or {}).get("MarketCap"),
+                "P/E":            info.get("trailingPE") if fetch_info else (prev_row or {}).get("P/E"),
                 "OwnerEarnings":  owner_earnings,
                 "OE_Yield":       oe_yield,
-                "ROIC":           calculate_roic(fin, bal),
-                "ROIC_Trend":     calculate_roic_trend(fin, bal),
-                "RevenueGrowth":  info.get("revenueGrowth"),
-                "EarningsGrowth": info.get("earningsGrowth"),
-                "Piotroski":      calculate_piotroski(fin, bal, cf),
+                "ROIC":           roic,
+                "ROIC_Trend":     roic_trend,
+                "RevenueGrowth":  info.get("revenueGrowth") if fetch_info else (prev_row or {}).get("RevenueGrowth"),
+                "EarningsGrowth": info.get("earningsGrowth") if fetch_info else (prev_row or {}).get("EarningsGrowth"),
+                "Piotroski":      piotroski,
                 "MA50":           ma50,
                 "OBV":            vol_signals["OBV"],
                 "MFI":            vol_signals["MFI"],
@@ -1440,17 +1653,31 @@ def process_ticker(args):
                 "DividendBasis":        div_data.get("DividendBasis"),
                 "CleanSetupScore":     clean_setup,
                 "GrossMargin":         gross_margin,
-                "ExDividendDate":      info.get("exDividendDate"),
+                "ExDividendDate":      info.get("exDividendDate") if fetch_info else (prev_row or {}).get("ExDividendDate"),
                 "FirstTradeDate":      _ft,
                 "_hist":          hist_cache,
                 "_exchange":      "",
             }
+            if prev_row:
+                for _k, _v in prev_row.items():
+                    if _k not in out and _k not in ("_hist", "_analyzer"):
+                        out[_k] = _v
+            if fetch_info:
+                _stamp_info(out, True)
+            elif prev_row:
+                if prev_row.get("_info_ok"):
+                    out["_info_ok"] = True
+            if fetch_fin:
+                _stamp_fin(out, got_statements, prev_row)
+            elif prev_row:
+                if prev_row.get("_fin_ok"):
+                    out["_fin_ok"] = True
+                if prev_row.get("_fin_tries") is not None:
+                    out["_fin_tries"] = prev_row.get("_fin_tries")
+            return out
 
         except Exception as e:
-            # Network/fetch errors are worth retrying; anything that got past
-            # the fetches and blew up in computation will fail identically on
-            # retry — bail immediately instead of re-downloading 3×.
-            if attempt == 2 or "hist" in dir():
+            if attempt == 2:
                 log.debug(f"    {t}: {type(e).__name__}: {e}")
                 return None
             continue
@@ -1500,41 +1727,106 @@ def main():
     prev_dump = _load_prev_dump()
     if prev_dump:
         log.info(f"  Previous dump on disk: {len(prev_dump)} tickers "
-                 f"(failed names will be carried forward)")
+                 f"(reuse what is already complete; fetch only holes)")
 
-    # ── 2. Scan all tickers in small batches with pauses ────────────
-    # History is batch-downloaded (1 request per 30 tickers, dividends
-    # included via actions=True). Per-ticker requests drop from ~6 to 4
-    # (info + 3 financial statements) — ~12,000 fewer requests per night.
-    # At BATCH_SIZE=30, BATCH_PAUSE=8s, WORKERS=3 → ≈150 min, well inside
-    # the 210-minute timeout, with materially lower rate-limit exposure.
-    all_results  = []
-    done_count   = 0
-    remaining    = list(unique_tickers)
-    total        = len(unique_tickers)
-    batch_num    = 0
-    log.info(f"Starting download: {total} tickers · {WORKERS} workers · "
-             f"batches of {BATCH_SIZE} · {BATCH_PAUSE}s pause between batches")
+    # ── 2. Classify: skip Yahoo for fields last night already filled ──
+    # A name that already has profile + financials + the target session
+    # costs zero bandwidth. A name with a long history only downloads
+    # the last ~14 days. Profile/statements are fetched only when missing.
+    classified = {}
+    incremental_tickers = []
+    full_hist_tickers = []
+    fetch_tickers = []
+    n_reuse = n_hist_only = n_fetch = n_skip_hist = 0
+    n_need_info = n_need_fin = 0
+    for t in unique_tickers:
+        prev = prev_dump.get(t)
+        info_ok = _info_ok(prev)
+        fin_ok = _fin_ok(prev)
+        hist_ok = _hist_ok(prev)
+        on_tgt = bool(hist_ok and (_hist_last(prev) or "") >= planned)
+        if not info_ok:
+            n_need_info += 1
+        if not fin_ok:
+            n_need_fin += 1
+        if info_ok and fin_ok and on_tgt:
+            classified[t] = "reuse"
+            n_reuse += 1
+            n_skip_hist += 1
+        elif info_ok and fin_ok:
+            classified[t] = "hist"
+            n_hist_only += 1
+            incremental_tickers.append(t)
+        else:
+            classified[t] = "fetch"
+            n_fetch += 1
+            fetch_tickers.append(t)
+            if hist_ok:
+                incremental_tickers.append(t)
+            else:
+                full_hist_tickers.append(t)
 
+    log.info(f"  Reuse as-is (through {planned}, profile+financials ok): {n_reuse}")
+    log.info(f"  History splice only (profile+financials ok): {n_hist_only}")
+    log.info(f"  Need Yahoo profile and/or financials: {n_fetch} "
+             f"(profile holes {n_need_info}, statement holes {n_need_fin})")
+    log.info(f"  Hist downloads: {len(incremental_tickers)} recent / "
+             f"{len(full_hist_tickers)} full-year")
+
+    recent_start = (pd.Timestamp(planned) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    batch_hist = {}
+
+    def _hist_batches(names, start, end, label):
+        got = 0
+        for i in range(0, len(names), BATCH_SIZE):
+            chunk = names[i:i + BATCH_SIZE]
+            part = _download_batch(chunk, start, end)
+            batch_hist.update(part)
+            got += len(part)
+            if i + BATCH_SIZE < len(names):
+                time.sleep(BATCH_PAUSE)
+            if i == 0 or (i // BATCH_SIZE + 1) % 10 == 0:
+                log.info(f"  {label} hist {i + len(chunk)}/{len(names)} "
+                         f"({len(part)}/{len(chunk)} frames)")
+        return got
+
+    n_inc = _hist_batches(incremental_tickers, recent_start, hist_end, "recent")
+    n_full = _hist_batches(full_hist_tickers, hist_start, hist_end, "full")
+    log.info(f"  History frames: {n_inc} incremental + {n_full} full")
+
+    all_results = []
+    done_count = 0
+    total = len(unique_tickers)
+
+    for t in unique_tickers:
+        kind = classified.get(t)
+        prev = prev_dump.get(t)
+        if kind in ("reuse", "hist"):
+            row = _row_copy(prev)
+            hdf = batch_hist.get(t)
+            if hdf is not None and not getattr(hdf, "empty", True):
+                merged = _merge_hist(_df_from_cache(row.get("_hist")), hdf)
+                if not merged.empty:
+                    _apply_hist_to_row(row, merged)
+            row["_exchanges"] = list(ticker_to_exchanges.get(t, set()))
+            all_results.append(row)
+            done_count += 1
+
+    log.info(f"Starting Yahoo backfill: {len(fetch_tickers)} tickers · "
+             f"{WORKERS} workers · batches of {BATCH_SIZE}")
+    remaining = list(fetch_tickers)
+    batch_num = 0
+    fetch_done = 0
     while remaining:
-        batch      = remaining[:BATCH_SIZE]
-        remaining  = remaining[BATCH_SIZE:]
+        batch = remaining[:BATCH_SIZE]
+        remaining = remaining[BATCH_SIZE:]
         batch_num += 1
-
-        # ── Batch history download: 1 HTTP request for the whole batch ──
-        # Explicit start/end so the last completed session is included.
-        # period="1y" quietly omitted that bar for most names.
-        batch_hist = _download_batch(batch, hist_start, hist_end)
-        n_on_tgt = sum(1 for t, h in batch_hist.items()
-                       if _hist_last(h) >= planned)
-        if batch_num == 1 or batch_num % 10 == 0:
-            log.info(f"  Batch {batch_num} hist: {len(batch_hist)}/{len(batch)} frames, "
-                     f"{n_on_tgt} through {planned}")
-
         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
             futures = {
-                executor.submit(process_ticker,
-                                (t, MFI_PERIOD, RANGE_DAYS, batch_hist.get(t))): t
+                executor.submit(
+                    process_ticker,
+                    (t, MFI_PERIOD, RANGE_DAYS, batch_hist.get(t), prev_dump.get(t))
+                ): t
                 for t in batch
             }
             for future in as_completed(futures):
@@ -1546,16 +1838,23 @@ def main():
                 if result:
                     result["_exchanges"] = list(ticker_to_exchanges.get(t, set()))
                     all_results.append(result)
+                else:
+                    prev = prev_dump.get(t)
+                    if prev:
+                        row = _row_copy(prev)
+                        hdf = batch_hist.get(t)
+                        if hdf is not None and not getattr(hdf, "empty", True):
+                            merged = _merge_hist(_df_from_cache(row.get("_hist")), hdf)
+                            if not merged.empty:
+                                _apply_hist_to_row(row, merged)
+                        row["_exchanges"] = list(ticker_to_exchanges.get(t, set()))
+                        all_results.append(row)
+                fetch_done += 1
                 done_count += 1
-
-        # Log progress every 10 batches
         if batch_num % 10 == 0 or not remaining:
-            pct = int(done_count / total * 100)
-            pass_rate = len(all_results) / done_count if done_count else 0
-            log.info(f"  Batch {batch_num} · {done_count}/{total} ({pct}%) · "
-                     f"{len(all_results)} valid · pass rate {pass_rate:.0%}")
-
-        # Pause between batches — lets Yahoo's rate limiter breathe
+            pct = int(done_count / total * 100) if total else 100
+            log.info(f"  Backfill {batch_num} · {fetch_done}/{len(fetch_tickers)} "
+                     f"Yahoo · {done_count}/{total} ({pct}%)")
         if remaining:
             time.sleep(BATCH_PAUSE)
 
@@ -1648,8 +1947,10 @@ def main():
     last_counts = Counter(_row_last(r) or "none" for r in all_results)
     n_target = int(last_counts.get(planned, 0))
     coverage = (n_target / len(all_results)) if all_results else 0.0
+    completeness = _field_completeness(all_results, planned)
     log.info(f"  Last-date coverage of {planned}: {n_target}/{len(all_results)} "
              f"({coverage:.0%})")
+    log.info(f"  Field completeness: {completeness:.0%}")
     log.info(f"  Last-date histogram: {dict(last_counts.most_common(6))}")
     if coverage < 0.70:
         log.warning(f"  LOW COVERAGE of {planned} — Yahoo likely lagged. "
@@ -1764,6 +2065,14 @@ def main():
         "target_coverage": round(coverage, 4),
         "target_printed":  n_target,
         "carried_forward": carried,
+        "reused_as_is": n_reuse,
+        "hist_only": n_hist_only,
+        "yahoo_backfill": n_fetch,
+        "hist_incremental": len(incremental_tickers),
+        "hist_full": len(full_hist_tickers),
+        "profile_holes": n_need_info,
+        "statement_holes": n_need_fin,
+        "field_completeness": completeness,
         "last_date_counts": dict(last_counts.most_common(8)),
         "exchanges": {
             exch: len(tl) for exch, tl in all_tickers.items()
