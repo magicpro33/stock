@@ -185,6 +185,113 @@ def tag(v, good, ok, fmt='{:.1f}', sfx=''):
     if v >= ok:   return '<span class="tag-ok">'   + s + '</span>'
     return '<span class="tag-bad">' + s + '</span>'
 
+def _dividend_trend(divs):
+    """Compare the last 12 months of cash dividends with the 12 months before that."""
+    if not isinstance(divs, pd.Series) or divs.empty:
+        return None
+    try:
+        end = divs.index.max()
+        recent_cut = end - pd.DateOffset(years=1)
+        prior_cut = end - pd.DateOffset(years=2)
+        recent = float(divs[divs.index >= recent_cut].sum())
+        prior = float(divs[(divs.index >= prior_cut) & (divs.index < recent_cut)].sum())
+    except Exception:
+        return None
+    if prior <= 0 or recent <= 0:
+        return None
+    if recent < prior * 0.90:
+        return 'cut'
+    if recent > prior * 1.05:
+        return 'raised'
+    return 'flat'
+
+def _payout_sustainability(yield_pct, payout_pct=None, sector='', quote_type='', divs=None, pass_thru=False):
+    """Whether the cash dividend looks supportable.
+
+    payout_pct is a percent (60 means 60% of earnings), or None when unknown.
+    Funds, ETFs, and REITs are judged more loosely because their distributions
+    are not paid out of earnings per share.
+    """
+    try:
+        y = float(yield_pct or 0)
+    except (TypeError, ValueError):
+        y = 0.0
+    p = None
+    try:
+        if payout_pct is not None and not (isinstance(payout_pct, float) and pd.isna(payout_pct)):
+            p = float(payout_pct)
+            if p <= 0:
+                p = None
+    except (TypeError, ValueError):
+        p = None
+    qt = (quote_type or '').upper()
+    sec = (sector or '').lower()
+    fund_like = pass_thru or qt in ('ETF', 'MUTUALFUND', 'INDEX', 'INDEX FUND') or 'real estate' in sec or 'reit' in sec
+    trend = _dividend_trend(divs)
+    if y <= 0:
+        return {'label': 'No dividend', 'cls': 'tag-ok', 'reason': 'This name is not paying a cash dividend.'}
+
+    if p is None:
+        if y >= 12:
+            level = 'risk'
+        elif y >= 8:
+            level = 'watch'
+        else:
+            level = 'unknown'
+    elif fund_like:
+        if p <= 100 and y < 10:
+            level = 'ok'
+        elif p <= 150 and y < 12:
+            level = 'watch'
+        else:
+            level = 'risk'
+    elif p <= 60 and y < 12:
+        level = 'ok'
+    elif p <= 100:
+        level = 'watch'
+    else:
+        level = 'risk'
+
+    if trend == 'cut':
+        level = 'risk'
+    elif trend == 'raised' and level == 'watch' and (p is None or p <= 80) and y < 12:
+        level = 'ok'
+    if y >= 15 and level == 'ok':
+        level = 'watch'
+
+    labels = {
+        'ok': ('Sustainable', 'tag-good'),
+        'watch': ('Stretched', 'tag-ok'),
+        'risk': ('Not sustainable', 'tag-bad'),
+        'unknown': ('Unknown', 'tag-ok'),
+    }
+    label, cls = labels[level]
+    bits = []
+    if p is None:
+        bits.append('Earnings coverage was not reported, so this uses the yield alone.')
+    elif fund_like:
+        bits.append(
+            'Payout is {:.0f}% of earnings. Funds, ETFs, and REITs often distribute cash that is not earnings, so a ratio near or above 100% can still be normal.'.format(p)
+        )
+    else:
+        bits.append('Payout is {:.0f}% of earnings. Under 60% usually leaves room to keep the dividend. Over 100% means the company is paying more than it earns.'.format(p))
+    if y >= 12:
+        bits.append('A {:.1f}% yield is high enough that a cut is a real risk.'.format(y))
+    elif y >= 8:
+        bits.append('A {:.1f}% yield is elevated and worth checking against cash flow.'.format(y))
+    if trend == 'cut':
+        bits.append('Cash dividends over the last year are lower than the year before.')
+    elif trend == 'raised':
+        bits.append('Cash dividends over the last year are higher than the year before.')
+    elif trend == 'flat':
+        bits.append('The annual cash dividend is about the same as the prior year.')
+    if level == 'unknown':
+        bits.append('There is not enough coverage data to call this sustainable or not.')
+    return {'label': label, 'cls': cls, 'reason': ' '.join(bits)}
+
+def _sustain_badge(result):
+    return '<span class="' + result['cls'] + '">' + _esc(result['label']) + '</span>'
+
 # ══ Dividend / date math helpers ═══════════════════════════════════════════
 # yfinance changed dividendYield from decimal (0.0314) to percent (3.14) in
 # 2025. trailingAnnualDividendYield is still decimal. Normalize both to decimal.
@@ -891,6 +998,7 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         freq = str(row.get('frequency') or '--')
         mp_str = ('$' + '{:.4f}'.format(mp)) if mp else '--'
         pr_str = '{:.0f}%'.format(pr) if pr else '--'
+        sus = _payout_sustainability(row.get('yield_pct'), pr, sector=row.get('sector') or '')
         bd_str = bd.strftime('%b %d, %Y') if bd else '--'
         ex_str = ex.strftime('%b %d, %Y') if ex else '--'
         alert = ''
@@ -911,6 +1019,7 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
             '<td class="td-num">$' + '{:.4f}'.format(dr) + '</td>'
             '<td class="td-num">' + mp_str + '</td>'
             '<td class="td-num">' + pr_str + '</td>'
+            '<td>' + _sustain_badge(sus) + '</td>'
             '<td class="td-freq">' + _esc(freq) + '</td>'
             '<td class="td-num">$' + '{:.2f}'.format(px) + '</td>'
             + buy_cols +
@@ -920,7 +1029,8 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         hdr_buy = '<th>Buy Before</th><th>Ex-Date</th><th>Countdown</th>'
     tbl = ('<div class="tbl-wrap"><table class="stbl"><thead><tr>'
         '<th>Ticker</th><th>Sector</th><th>Yield</th><th>Div/Share</th>'
-        '<th title="Annual dividend divided by 12 -- a monthly equivalent, not necessarily an actual monthly payment">Monthly/Share</th><th>Payout</th><th>Frequency</th>'
+        '<th title="Annual dividend divided by 12 -- a monthly equivalent, not necessarily an actual monthly payment">Monthly/Share</th><th>Payout</th>'
+        '<th title="Whether the dividend looks supportable from earnings coverage, yield, and whether the cash payment was cut">Sustainable</th><th>Frequency</th>'
         '<th>Price</th>' + hdr_buy +
         '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
     st.markdown(tbl, unsafe_allow_html=True)
@@ -1270,10 +1380,14 @@ with tab_cal:
 
     st.markdown('<br>', unsafe_allow_html=True)
     with st.expander('Full dividend universe -- ' + str(len(df)) + ' stocks (' + str(len(df_all)) + ' total)'):
-        st.dataframe(df[['ticker','sector','yield_pct','div_rate','monthly_pay','payout','frequency','price','ex_date','buy_date']]
-            .rename(columns={'ticker':'Ticker','sector':'Sector','yield_pct':'Yield %',
+        _univ = df[['ticker','sector','yield_pct','div_rate','monthly_pay','payout','frequency','price','ex_date','buy_date']].copy()
+        _univ['sustain'] = _univ.apply(
+            lambda r: _payout_sustainability(r['yield_pct'], r['payout'], sector=r['sector'])['label'],
+            axis=1)
+        st.dataframe(_univ.rename(columns={'ticker':'Ticker','sector':'Sector','yield_pct':'Yield %',
                 'div_rate':'Div/Share','monthly_pay':'Monthly/Share','payout':'Payout %',
-                'frequency':'Frequency','price':'Price','ex_date':'Ex-Date','buy_date':'Buy Before'}),
+                'sustain':'Sustainable','frequency':'Frequency','price':'Price',
+                'ex_date':'Ex-Date','buy_date':'Buy Before'}),
             width='stretch', hide_index=True)
 
 with tab_calc:
@@ -1326,6 +1440,14 @@ with tab_calc:
             st.markdown('Annual yield: **' + str(calc_info['yield_pct']) + '%**  |  '
                 'Price: **$' + '{:.2f}'.format(calc_info['price']) + '**  |  '
                 'Frequency: **' + calc_info['frequency'] + '**')
+            _calc_sus = _payout_sustainability(
+                calc_info.get('yield_pct'), calc_info.get('payout'),
+                sector=calc_info.get('sector') or '')
+            st.markdown(
+                '<div style="margin-top:8px">' + _sustain_badge(_calc_sus) +
+                '<div style="margin-top:6px;font-size:.8rem;color:#444">' +
+                _esc(_calc_sus['reason']) + '</div></div>',
+                unsafe_allow_html=True)
             st.markdown('---')
             inv = st.number_input('Investment amount ($)', min_value=1.0,
                 max_value=10000000.0, value=1000.0, step=100.0, format='%.2f', key='calc_inv')
@@ -1675,6 +1797,17 @@ def _render_analysis(stored, invest_key='az_invest'):
                 tag((pout or 0)*100,80,100,'{:.0f}','%') if pout else '--'),
         ]
         st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(div_rows) + '</tbody></table>', unsafe_allow_html=True)
+        _sus = _payout_sustainability(
+            dy, (pout * 100 if pout else None),
+            sector=ai.get('sector') or '',
+            quote_type=ai.get('quoteType') or '',
+            divs=ad, pass_thru=_pass_thru)
+        st.markdown('<div class="az-section">Payout Sustainability</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="margin:8px 0 12px">' + _sustain_badge(_sus) +
+            '<div style="margin-top:6px;font-size:.8rem;color:#bbb;line-height:1.45">' +
+            _esc(_sus['reason']) + '</div></div>',
+            unsafe_allow_html=True)
 
         st.markdown('<div class="az-section">Valuation</div>', unsafe_allow_html=True)
         mcstr = ('$'+'{:.1f}B'.format(mcap/1e9) if mcap>=1e9 else '$'+'{:.0f}M'.format(mcap/1e6) if mcap>=1e6 else '--')
@@ -1815,10 +1948,13 @@ with tab_top:
         pill_cols = st.columns(6)
         for i, row in enumerate(top_rows):
             label = str(i + 1) + '  ' + row['ticker'] + '  ' + '{:.1f}%'.format(row['yield_pct'])
+            _pill_sus = _payout_sustainability(
+                row['yield_pct'], None, quote_type=row['kind'])
             tip_txt = (row['name'] + ' · ' + row['kind']
                 + ' · $' + '{:.2f}'.format(row['price'])
                 + ' · $' + '{:.2f}'.format(row['div_rate']) + '/share'
-                + ' · $' + '{:.0f}'.format(row['per_1000']) + ' income per $1,000')
+                + ' · $' + '{:.0f}'.format(row['per_1000']) + ' income per $1,000'
+                + ' · ' + _pill_sus['label'])
             with pill_cols[i % 6]:
                 if st.button(label, key='yp_' + row['ticker'],
                              type='primary' if row['ticker'] == picked else 'secondary',
