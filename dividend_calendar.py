@@ -87,9 +87,6 @@ _CSS = (
     '.tag-good{background:#e8f5e9;color:#1b5e20;padding:2px 8px;border-radius:100px;font-size:.68rem;font-weight:600}'
     '.tag-ok{background:#fff8e1;color:#e65100;padding:2px 8px;border-radius:100px;font-size:.68rem;font-weight:600}'
     '.tag-bad{background:#ffebee;color:#b71c1c;padding:2px 8px;border-radius:100px;font-size:.68rem;font-weight:600}'
-    'div[class*="st-key-yp_"] button{border-radius:999px !important;border:1px solid #3a3a3a !important;background:#161616 !important;color:#eee !important;font-family:\'DM Mono\',monospace !important;font-weight:600 !important;padding:8px 12px !important}'
-    'div[class*="st-key-yp_"] button:hover{border-color:#cc0000 !important;color:#fff !important}'
-    'div[class*="st-key-yp_"] button[kind="primary"],div[class*="st-key-yp_"] button[data-testid="stBaseButton-primary"]{background:#cc0000 !important;border-color:#cc0000 !important;color:#fff !important}'
     '</style>'
 )
 st.markdown(_CSS, unsafe_allow_html=True)
@@ -100,7 +97,7 @@ META_FILE = os.path.join(BASE_DIR, 'data', 'scan_meta.json')
 LOGO_PATH = os.path.join(BASE_DIR, 'assets', 'aiupscale_logo.png')
 CREATOR_URL = 'https://aiupscalellc.netlify.app/'
 DEFAULT_GITHUB_REPO = 'magicpro33/stock'
-APP_VERSION = '2026-09-24a'  # bump when deploying -- verify in sidebar footer
+APP_VERSION = '2026-09-18c'  # bump when deploying -- verify in sidebar footer
 LIVE_EX_DATE_CAP = 60
 
 def _esc(s):
@@ -185,125 +182,15 @@ def tag(v, good, ok, fmt='{:.1f}', sfx=''):
     if v >= ok:   return '<span class="tag-ok">'   + s + '</span>'
     return '<span class="tag-bad">' + s + '</span>'
 
-def _dividend_trend(divs):
-    """Compare the last 12 months of cash dividends with the 12 months before that."""
-    if not isinstance(divs, pd.Series) or divs.empty:
-        return None
-    try:
-        end = divs.index.max()
-        recent_cut = end - pd.DateOffset(years=1)
-        prior_cut = end - pd.DateOffset(years=2)
-        recent = float(divs[divs.index >= recent_cut].sum())
-        prior = float(divs[(divs.index >= prior_cut) & (divs.index < recent_cut)].sum())
-    except Exception:
-        return None
-    if prior <= 0 or recent <= 0:
-        return None
-    if recent < prior * 0.90:
-        return 'cut'
-    if recent > prior * 1.05:
-        return 'raised'
-    return 'flat'
-
-def _payout_sustainability(yield_pct, payout_pct=None, sector='', quote_type='', divs=None, pass_thru=False):
-    """Whether the cash dividend looks supportable.
-
-    payout_pct is a percent (60 means 60% of earnings), or None when unknown.
-    Funds, ETFs, and REITs are judged more loosely because their distributions
-    are not paid out of earnings per share.
-    """
-    try:
-        y = float(yield_pct or 0)
-    except (TypeError, ValueError):
-        y = 0.0
-    p = None
-    try:
-        if payout_pct is not None and not (isinstance(payout_pct, float) and pd.isna(payout_pct)):
-            p = float(payout_pct)
-            if p <= 0:
-                p = None
-    except (TypeError, ValueError):
-        p = None
-    qt = (quote_type or '').upper()
-    sec = (sector or '').lower()
-    fund_like = pass_thru or qt in ('ETF', 'MUTUALFUND', 'INDEX', 'INDEX FUND') or 'real estate' in sec or 'reit' in sec
-    trend = _dividend_trend(divs)
-    if y <= 0:
-        return {'label': 'No dividend', 'cls': 'tag-ok', 'reason': 'This name is not paying a cash dividend.'}
-
-    if p is None:
-        if y >= 12:
-            level = 'risk'
-        elif y >= 8:
-            level = 'watch'
-        else:
-            level = 'unknown'
-    elif fund_like:
-        if p <= 100 and y < 10:
-            level = 'ok'
-        elif p <= 150 and y < 12:
-            level = 'watch'
-        else:
-            level = 'risk'
-    elif p <= 60 and y < 12:
-        level = 'ok'
-    elif p <= 100:
-        level = 'watch'
-    else:
-        level = 'risk'
-
-    if trend == 'cut':
-        level = 'risk'
-    elif trend == 'raised' and level == 'watch' and (p is None or p <= 80) and y < 12:
-        level = 'ok'
-    if y >= 15 and level == 'ok':
-        level = 'watch'
-
-    labels = {
-        'ok': ('Sustainable', 'tag-good'),
-        'watch': ('Stretched', 'tag-ok'),
-        'risk': ('Not sustainable', 'tag-bad'),
-        'unknown': ('Unknown', 'tag-ok'),
-    }
-    label, cls = labels[level]
-    bits = []
-    if p is None:
-        bits.append('Earnings coverage was not reported, so this uses the yield alone.')
-    elif fund_like:
-        bits.append(
-            'Payout is {:.0f}% of earnings. Funds, ETFs, and REITs often distribute cash that is not earnings, so a ratio near or above 100% can still be normal.'.format(p)
-        )
-    else:
-        bits.append('Payout is {:.0f}% of earnings. Under 60% usually leaves room to keep the dividend. Over 100% means the company is paying more than it earns.'.format(p))
-    if y >= 12:
-        bits.append('A {:.1f}% yield is high enough that a cut is a real risk.'.format(y))
-    elif y >= 8:
-        bits.append('A {:.1f}% yield is elevated and worth checking against cash flow.'.format(y))
-    if trend == 'cut':
-        bits.append('Cash dividends over the last year are lower than the year before.')
-    elif trend == 'raised':
-        bits.append('Cash dividends over the last year are higher than the year before.')
-    elif trend == 'flat':
-        bits.append('The annual cash dividend is about the same as the prior year.')
-    if level == 'unknown':
-        bits.append('There is not enough coverage data to call this sustainable or not.')
-    return {'label': label, 'cls': cls, 'reason': ' '.join(bits)}
-
-def _sustain_badge(result):
-    return '<span class="' + result['cls'] + '">' + _esc(result['label']) + '</span>'
-
 # ══ Dividend / date math helpers ═══════════════════════════════════════════
 # yfinance changed dividendYield from decimal (0.0314) to percent (3.14) in
 # 2025. trailingAnnualDividendYield is still decimal. Normalize both to decimal.
-def _norm_yield(v, scale='auto'):
+def _norm_yield(v):
     try: v = float(v)
     except (TypeError, ValueError): return None
     if v <= 0: return None
-    # yfinance 1.5 reports dividendYield as a percent (0.32 = 0.32%, 3.0 = 3%).
-    # trailingAnnualDividendYield and the ETF "yield" field stay decimals.
-    if scale == 'percent' or (scale == 'auto' and v > 1.0):
-        v = v / 100.0
-    return v if 0 < v <= 0.80 else None
+    if v > 1.0: v = v / 100.0          # value was percent-scaled
+    return v if 0 < v <= 0.60 else None
 
 # Scan stores growth as a decimal already (0.124 = 12.4%). Some feeds send
 # percent (12.4). Disambiguate by magnitude -- >150% growth is vanishingly rare.
@@ -324,10 +211,9 @@ def _resolve_yield(info, price):
     try: rate = float(info.get('trailingAnnualDividendRate') or info.get('dividendRate') or 0)
     except (TypeError, ValueError): rate = 0.0
     from_rate = (rate / price) if (rate > 0 and price and price > 0) else None
-    reported = (_norm_yield(info.get('trailingAnnualDividendYield'), 'decimal')
-                or _norm_yield(info.get('yield'), 'decimal')
-                or _norm_yield(info.get('dividendYield'), 'percent'))
-    if from_rate and 0 < from_rate <= 0.80:
+    reported = (_norm_yield(info.get('trailingAnnualDividendYield'))
+                or _norm_yield(info.get('dividendYield')))
+    if from_rate and 0 < from_rate <= 0.60:
         return from_rate, reported
     return reported, reported
 
@@ -614,157 +500,19 @@ _YF_FIELDS = [
     'numberOfAnalystOpinions', 'recommendationKey',
 ]
 
-def _clean_symbol(sym):
-    s = (sym or '').upper().strip().replace(' ', '')
-    # Class shares: BRK.B is BRK-B on Yahoo.
-    if '.' in s:
-        s = s.replace('.', '-')
-    return s
-
-def _positive_price(info):
-    for k in ('currentPrice', 'regularMarketPrice', 'navPrice', 'previousClose'):
-        try:
-            v = float(info.get(k) or 0)
-        except (TypeError, ValueError):
-            continue
-        if v > 0:
-            info['currentPrice'] = v
-            info['regularMarketPrice'] = info.get('regularMarketPrice') or v
-            return v
-    return 0.0
-
-def _fill_div_rate(info, divs):
-    """Annual cash per share. ETFs often report yield with a 0 dividend rate."""
-    rate = 0.0
-    for k in ('trailingAnnualDividendRate', 'dividendRate'):
-        try:
-            rate = float(info.get(k) or 0)
-        except (TypeError, ValueError):
-            rate = 0.0
-        if rate > 0:
-            break
-    if rate <= 0 and isinstance(divs, pd.Series) and not divs.empty:
-        try:
-            cutoff = divs.index.max() - pd.DateOffset(years=1)
-            rate = float(divs[divs.index >= cutoff].sum())
-        except Exception:
-            rate = 0.0
-    if rate <= 0:
-        px = _positive_price(info)
-        yld = (_norm_yield(info.get('yield'), 'decimal')
-               or _norm_yield(info.get('dividendYield'), 'percent')
-               or _norm_yield(info.get('trailingAnnualDividendYield'), 'decimal'))
-        if px and yld:
-            rate = px * yld
-    if rate > 0:
-        info['trailingAnnualDividendRate'] = rate
-        info['dividendRate'] = rate
-    return info
-
-def _fetch_chart_pack(sym):
-    """Yahoo chart endpoint. Works for stocks, ETFs, and mutual funds when .info is empty."""
-    try:
-        resp = requests.get(
-            'https://query1.finance.yahoo.com/v8/finance/chart/' + requests.utils.quote(sym, safe='-'),
-            params={'interval': '1d', 'range': '1y', 'events': 'div'},
-            headers={'User-Agent': 'Mozilla/5.0'},
-            timeout=12,
-        )
-        if resp.status_code != 200:
-            return {}, pd.DataFrame(), pd.Series(dtype=float)
-        result = (resp.json().get('chart') or {}).get('result') or []
-        if not result:
-            return {}, pd.DataFrame(), pd.Series(dtype=float)
-        block = result[0]
-        meta = block.get('meta') or {}
-        px = float(meta.get('regularMarketPrice') or 0)
-        if px <= 0:
-            return {}, pd.DataFrame(), pd.Series(dtype=float)
-        itype = (meta.get('instrumentType') or 'EQUITY').upper()
-        info = {
-            'symbol': sym,
-            'longName': meta.get('longName') or meta.get('shortName') or sym,
-            'shortName': meta.get('shortName') or meta.get('longName') or sym,
-            'quoteType': itype,
-            'currentPrice': px,
-            'regularMarketPrice': px,
-            'fiftyTwoWeekHigh': meta.get('fiftyTwoWeekHigh'),
-            'fiftyTwoWeekLow': meta.get('fiftyTwoWeekLow'),
-            'exchange': meta.get('fullExchangeName') or meta.get('exchangeName'),
-        }
-        ts = block.get('timestamp') or []
-        quote = ((block.get('indicators') or {}).get('quote') or [{}])[0]
-        closes = quote.get('close') or []
-        hist = pd.DataFrame()
-        if ts and closes and len(ts) == len(closes):
-            hist = pd.DataFrame({
-                'Open': quote.get('open') or closes,
-                'High': quote.get('high') or closes,
-                'Low': quote.get('low') or closes,
-                'Close': closes,
-                'Volume': quote.get('volume') or [0] * len(closes),
-            }, index=pd.to_datetime(ts, unit='s', utc=True)).dropna(subset=['Close'])
-        div_map = ((block.get('events') or {}).get('dividends') or {})
-        items = []
-        for d in div_map.values():
-            try:
-                items.append((pd.to_datetime(int(d.get('date')), unit='s', utc=True),
-                              float(d.get('amount') or 0)))
-            except Exception:
-                continue
-        divs = pd.Series(dict(items), dtype=float).sort_index() if items else pd.Series(dtype=float)
-        _fill_div_rate(info, divs)
-        return info, hist, divs
-    except Exception:
-        return {}, pd.DataFrame(), pd.Series(dtype=float)
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_yfinance(sym):
-    sym = _clean_symbol(sym)
-    info = {}
-    hist = pd.DataFrame()
-    divs = pd.Series(dtype=float)
+    # Step 1: try yfinance directly (works when not rate-limited)
     try:
-        t = yf.Ticker(sym)
-        try:
-            info = dict(t.info or {})
-        except Exception:
-            info = {}
-        try:
-            fi = dict(t.fast_info)
-            last = float(fi.get('lastPrice') or fi.get('last_price') or 0)
-        except Exception:
-            last = 0.0
-        if last > 0:
-            info['regularMarketPrice'] = info.get('regularMarketPrice') or last
-            if not info.get('currentPrice'):
-                info['currentPrice'] = last
-        if _positive_price(info):
-            try:
-                hist = t.history(period='1y')
-            except Exception:
-                hist = pd.DataFrame()
-            try:
-                divs = t.dividends
-            except Exception:
-                divs = pd.Series(dtype=float)
-            if not isinstance(divs, pd.Series):
-                divs = pd.Series(dtype=float)
-            if not isinstance(hist, pd.DataFrame):
-                hist = pd.DataFrame()
-            _fill_div_rate(info, divs)
-            if info.get('quoteType') or info.get('longName') or info.get('shortName') or info.get('symbol'):
-                return info, hist, divs, True
+        import yfinance as yf
+        t    = yf.Ticker(sym)
+        info = t.info or {}
+        if info.get('currentPrice') or info.get('regularMarketPrice'):
+            hist = t.history(period='1y')
+            divs = t.dividends
+            return info, hist, divs, True   # True = success
     except Exception:
         pass
-    c_info, c_hist, c_divs = _fetch_chart_pack(sym)
-    if _positive_price(c_info):
-        if isinstance(hist, pd.DataFrame) and not hist.empty and (c_hist is None or c_hist.empty):
-            c_hist = hist
-        if isinstance(divs, pd.Series) and not divs.empty and (not isinstance(c_divs, pd.Series) or c_divs.empty):
-            c_divs = divs
-            _fill_div_rate(c_info, c_divs)
-        return c_info, c_hist, c_divs, True
     return {}, pd.DataFrame(), pd.Series(dtype=float), False
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -833,7 +581,7 @@ def _fetch_claude_live(sym, missing_fields):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_analysis(sym, live=False):
-    sym = _clean_symbol(sym)
+    sym = sym.upper().strip()
     divs = pd.Series(dtype=float)
     scan_dict = _load_scan_dict()
     rec = scan_dict.get(sym, {})
@@ -998,7 +746,6 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         freq = str(row.get('frequency') or '--')
         mp_str = ('$' + '{:.4f}'.format(mp)) if mp else '--'
         pr_str = '{:.0f}%'.format(pr) if pr else '--'
-        sus = _payout_sustainability(row.get('yield_pct'), pr, sector=row.get('sector') or '')
         bd_str = bd.strftime('%b %d, %Y') if bd else '--'
         ex_str = ex.strftime('%b %d, %Y') if ex else '--'
         alert = ''
@@ -1019,7 +766,6 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
             '<td class="td-num">$' + '{:.4f}'.format(dr) + '</td>'
             '<td class="td-num">' + mp_str + '</td>'
             '<td class="td-num">' + pr_str + '</td>'
-            '<td>' + _sustain_badge(sus) + '</td>'
             '<td class="td-freq">' + _esc(freq) + '</td>'
             '<td class="td-num">$' + '{:.2f}'.format(px) + '</td>'
             + buy_cols +
@@ -1029,8 +775,7 @@ def _render_dividend_table(df_show, today, show_buy_cols=True):
         hdr_buy = '<th>Buy Before</th><th>Ex-Date</th><th>Countdown</th>'
     tbl = ('<div class="tbl-wrap"><table class="stbl"><thead><tr>'
         '<th>Ticker</th><th>Sector</th><th>Yield</th><th>Div/Share</th>'
-        '<th title="Annual dividend divided by 12 -- a monthly equivalent, not necessarily an actual monthly payment">Monthly/Share</th><th>Payout</th>'
-        '<th title="Whether the dividend looks supportable from earnings coverage, yield, and whether the cash payment was cut">Sustainable</th><th>Frequency</th>'
+        '<th title="Annual dividend divided by 12 -- a monthly equivalent, not necessarily an actual monthly payment">Monthly/Share</th><th>Payout</th><th>Frequency</th>'
         '<th>Price</th>' + hdr_buy +
         '</tr></thead><tbody>' + ''.join(rows_html) + '</tbody></table></div>')
     st.markdown(tbl, unsafe_allow_html=True)
@@ -1080,110 +825,6 @@ def render_calendar(df, year, month):
     parts.append('</div>')
     st.markdown(''.join(parts), unsafe_allow_html=True)
 
-# Dividend ETFs, index ETFs, and index mutual funds. Yahoo's ETF screener
-# cannot sort by yield, so these are quoted directly and ranked with stocks.
-_YIELD_FUNDS = (
-    'SCHD', 'VYM', 'DGRO', 'HDV', 'DVY', 'SDY', 'NOBL', 'VIG', 'JEPI', 'JEPQ',
-    'DIVO', 'SPYI', 'QQQI', 'QYLD', 'XYLD', 'RYLD', 'SVOL', 'SPYD', 'DGRW',
-    'VYMI', 'IDV', 'VNQ', 'PFF', 'SPY', 'VOO', 'IVV', 'VTI', 'QQQ', 'DIA',
-    'IWM', 'SCHX', 'VFIAX', 'FXAIX', 'SWPPX', 'VTSAX',
-)
-
-def _kind_label(quote_type, name):
-    qt = (quote_type or '').upper()
-    nm = (name or '').lower()
-    if qt == 'ETF':
-        return 'ETF'
-    if qt in ('MUTUALFUND', 'INDEX') or 'index' in nm:
-        return 'Index fund'
-    return 'Stock'
-
-def _yield_row(symbol, name, kind, price, rate):
-    try:
-        price = float(price or 0)
-        rate = float(rate or 0)
-    except (TypeError, ValueError):
-        return None
-    if price < 5 or rate <= 0:
-        return None
-    yld = rate / price * 100.0
-    if yld < 0.4 or yld > 30:
-        return None
-    return {
-        'ticker': symbol,
-        'name': name or symbol,
-        'kind': kind,
-        'price': price,
-        'div_rate': rate,
-        'yield_pct': yld,
-        'per_1000': yld / 100.0 * 1000.0,
-    }
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_top_yields():
-    """Top payers by cash dividend per dollar invested (annual $ / share price)."""
-    from concurrent.futures import ThreadPoolExecutor
-    rows = {}
-    try:
-        q = yf.EquityQuery('and', [
-            yf.EquityQuery('is-in', ['exchange', 'NMS', 'NYQ', 'ASE', 'PCX']),
-            yf.EquityQuery('gt', ['intradayprice', 5]),
-            yf.EquityQuery('gt', ['intradaymarketcap', 500000000]),
-            yf.EquityQuery('gt', ['forward_dividend_yield', 2]),
-        ])
-        screen = yf.screen(q, sortField='forward_dividend_yield', sortAsc=False, size=80)
-        for quote in (screen.get('quotes') or []):
-            sym = _clean_symbol(quote.get('symbol') or '')
-            if not sym:
-                continue
-            price = quote.get('regularMarketPrice')
-            rate = quote.get('trailingAnnualDividendRate') or quote.get('dividendRate') or 0
-            try:
-                rate = float(rate or 0)
-            except (TypeError, ValueError):
-                rate = 0.0
-            if rate <= 0:
-                dy = _norm_yield(quote.get('dividendYield'), 'percent')
-                try:
-                    price_f = float(price or 0)
-                except (TypeError, ValueError):
-                    price_f = 0.0
-                if dy and price_f:
-                    rate = price_f * dy
-            row = _yield_row(
-                sym,
-                quote.get('longName') or quote.get('shortName') or sym,
-                _kind_label(quote.get('quoteType'), quote.get('longName')),
-                price,
-                rate,
-            )
-            if row:
-                rows[sym] = row
-    except Exception:
-        pass
-
-    def _one_fund(sym):
-        info, _hist, divs = _fetch_chart_pack(sym)
-        if not info:
-            return None
-        return _yield_row(
-            sym,
-            info.get('longName') or sym,
-            _kind_label(info.get('quoteType'), info.get('longName')),
-            info.get('currentPrice'),
-            info.get('trailingAnnualDividendRate'),
-        )
-
-    try:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            for row in pool.map(_one_fund, _YIELD_FUNDS):
-                if row:
-                    rows[row['ticker']] = row
-    except Exception:
-        pass
-    ranked = sorted(rows.values(), key=lambda r: (r['yield_pct'], r['div_rate']), reverse=True)
-    return ranked[:30]
-
 with st.sidebar:
     _clickable_logo(width=200)
     st.markdown('### Dividend Calendar')
@@ -1206,10 +847,9 @@ with st.sidebar:
     st.markdown('**How it works:**\n'
         '- Loads the nightly dump from GitHub (no live API on startup)\n'
         '- Calendar = last trading day before ex-date (T+1)\n'
-        '- Hit **Refresh** to fetch missing live ex-dates\n'
+        '- Hit **Refresh** to fetch missing live ex-dates + enable live analyzer\n'
         '- Calculator tab to model returns\n'
-        '- Analyzer looks up any stock, ETF, or fund live\n'
-        '- Top Yields ranks the highest cash dividend per dollar invested')
+        '- Analyzer tab for a full stock deep-dive')
     st.caption('v' + APP_VERSION)
 
 _logo_col, _title_col = st.columns([1, 4])
@@ -1296,8 +936,7 @@ st.markdown('<div class="src-badge ' + badge_cls + '">&#x2713; ' +
     str(len(df_all)) + ' dividend stocks | ' + str(ex_found) + ' with ex-dates (' + src_label + ')' +
     meta_txt + '</div>', unsafe_allow_html=True)
 
-tab_cal, tab_calc, tab_az, tab_top = st.tabs(
-    ['Calendar', 'Calculator', 'Stock Analyzer', 'Top Yields'])
+tab_cal, tab_calc, tab_az = st.tabs(['Calendar', 'Calculator', 'Stock Analyzer'])
 
 with tab_cal:
     # Sort once by (buy_date asc, yield desc) -- used for both nxt and table
@@ -1380,14 +1019,10 @@ with tab_cal:
 
     st.markdown('<br>', unsafe_allow_html=True)
     with st.expander('Full dividend universe -- ' + str(len(df)) + ' stocks (' + str(len(df_all)) + ' total)'):
-        _univ = df[['ticker','sector','yield_pct','div_rate','monthly_pay','payout','frequency','price','ex_date','buy_date']].copy()
-        _univ['sustain'] = _univ.apply(
-            lambda r: _payout_sustainability(r['yield_pct'], r['payout'], sector=r['sector'])['label'],
-            axis=1)
-        st.dataframe(_univ.rename(columns={'ticker':'Ticker','sector':'Sector','yield_pct':'Yield %',
+        st.dataframe(df[['ticker','sector','yield_pct','div_rate','monthly_pay','payout','frequency','price','ex_date','buy_date']]
+            .rename(columns={'ticker':'Ticker','sector':'Sector','yield_pct':'Yield %',
                 'div_rate':'Div/Share','monthly_pay':'Monthly/Share','payout':'Payout %',
-                'sustain':'Sustainable','frequency':'Frequency','price':'Price',
-                'ex_date':'Ex-Date','buy_date':'Buy Before'}),
+                'frequency':'Frequency','price':'Price','ex_date':'Ex-Date','buy_date':'Buy Before'}),
             width='stretch', hide_index=True)
 
 with tab_calc:
@@ -1440,14 +1075,6 @@ with tab_calc:
             st.markdown('Annual yield: **' + str(calc_info['yield_pct']) + '%**  |  '
                 'Price: **$' + '{:.2f}'.format(calc_info['price']) + '**  |  '
                 'Frequency: **' + calc_info['frequency'] + '**')
-            _calc_sus = _payout_sustainability(
-                calc_info.get('yield_pct'), calc_info.get('payout'),
-                sector=calc_info.get('sector') or '')
-            st.markdown(
-                '<div style="margin-top:8px">' + _sustain_badge(_calc_sus) +
-                '<div style="margin-top:6px;font-size:.8rem;color:#444">' +
-                _esc(_calc_sus['reason']) + '</div></div>',
-                unsafe_allow_html=True)
             st.markdown('---')
             inv = st.number_input('Investment amount ($)', min_value=1.0,
                 max_value=10000000.0, value=1000.0, step=100.0, format='%.2f', key='calc_inv')
@@ -1489,399 +1116,11 @@ with tab_calc:
         st.markdown('#### Monthly Income Over 12 Months')
         st.line_chart(pd.DataFrame({'Month': range(1,13), 'Cumulative Dividends ($)': [mthd*m for m in range(1,13)]}).set_index('Month'), color='#cc0000')
 
-def _render_analysis(stored, invest_key='az_invest'):
-    """Full analyzer panel plus the quick calculator."""
-    _stored = stored
-    ai, ah, ad = _stored[0], _stored[1], _stored[2]
-    _src = _stored[3] if len(_stored) > 3 else {}
-    sym   = (_stored[4] or '').upper().strip() or 'TICKER'
-    name  = _esc(ai.get('longName') or ai.get('shortName') or sym)
-    sec   = _esc(ai.get('sector') or 'Unknown')
-    ind   = _esc(ai.get('industry') or 'Unknown')
-    px    = float(ai.get('currentPrice') or ai.get('regularMarketPrice') or
-                 ai.get('navPrice') or ai.get('previousClose') or 0)
-    mcap  = ai.get('marketCap') or 0
-    pe    = ai.get('trailingPE')
-    fwpe  = ai.get('forwardPE')
-    pb    = ai.get('priceToBook')
-    ps    = ai.get('priceToSalesTrailing12Months')
-    dr    = float(ai.get('trailingAnnualDividendRate') or ai.get('dividendRate') or 0)
-    # Yield is derived from rate/price so it always agrees with the
-    # Div/Share figure shown below it. _resolve_yield also repairs
-    # yfinance's percent-vs-decimal inconsistency.
-    ry, _reported_y = _resolve_yield(ai, px)
-    dy    = round((ry or 0) * 100, 2)
-    _y_mismatch = (ry and _reported_y and abs(ry - _reported_y) > 0.005)
-    # EPS-based payout ratio is not meaningful for REITs (use FFO/AFFO),
-    # closed-end funds (distributions come from NAV/ROC) or MLPs (DCF).
-    pout  = ai.get('payoutRatio')
-    _pass_thru = sec in ('Real Estate', 'Financial Services', 'Energy')
-    _payout_flag = ' *' if (_pass_thru and pout and pout > 0.9) else ''
-    ex_ts = ai.get('exDividendDate')
-    ex_dt = None
-    if ex_ts:
-        ex_dt = _epoch_to_date(ex_ts)
-    hi52  = ai.get('fiftyTwoWeekHigh') or 0
-    lo52  = ai.get('fiftyTwoWeekLow') or 0
-    rng   = ((px - lo52)/(hi52 - lo52)*100) if (hi52 and lo52 and hi52 != lo52) else None
-    beta  = ai.get('beta')
-    spf   = ai.get('shortPercentOfFloat')
-    sratio= ai.get('shortRatio')
-    am    = ai.get('targetMeanPrice')
-    al    = ai.get('targetLowPrice')
-    ahigh = ai.get('targetHighPrice')
-    nana  = ai.get('numberOfAnalystOpinions') or 0
-    recky = ai.get('recommendationKey') or ''
-    rg    = ai.get('revenueGrowth')
-    eg    = ai.get('earningsGrowth')
-    pm    = ai.get('profitMargins')
-    om    = ai.get('operatingMargins')
-    roe   = ai.get('returnOnEquity')
-    roa   = ai.get('returnOnAssets')
-    deq   = ai.get('debtToEquity')
-    cr    = ai.get('currentRatio')
-    aus   = ((am - px) / px * 100) if (am and px > 0) else None
-    mp2   = dr / 12 if dr else 0
-    # Frequency priority: counted actual payments > scan field > default
-    _scan_freq = ai.get('dividendFrequency') or ''
-    if not ad.empty:
-        oyr = pd.Timestamp.now(tz='UTC') - pd.DateOffset(years=1)
-        _recent = ad[ad.index >= oyr]; n = len(_recent)
-        if n >= 10:  pays_yr=12; freq2='Monthly'
-        elif n >= 3: pays_yr=4;  freq2='Quarterly'
-        elif n == 2: pays_yr=2;  freq2='Semi-Annual'
-        elif n == 1: pays_yr=1;  freq2='Annual'
-        else:        pays_yr=4;  freq2='Quarterly'
-    elif _scan_freq and _scan_freq != '--':
-        freq2 = _scan_freq; pays_yr = _freq_to_pays(_scan_freq)
-    else:
-        pays_yr = 4; freq2 = 'Quarterly (assumed)'
-    rsi_v=ma50_v=ma200_v=macd_v=macd_s=vol_avg=vol_td=obv_tr=None
-    pct1d=pct5d=pct1m=pct3m=None
-    if not ah.empty and len(ah) >= 26:
-        cl = ah['Close'].dropna(); vl = ah['Volume'].dropna()
-        try:
-            dlt=cl.diff(); g=dlt.clip(lower=0).rolling(14).mean()
-            ls=(-dlt.clip(upper=0)).rolling(14).mean()
-            rs2=g/ls.replace(0,np.nan)
-            rs3=(100-(100/(1+rs2))).dropna()
-            rsi_v=float(rs3.iloc[-1]) if not rs3.empty else None
-        except Exception: pass
-        try:
-            e12=cl.ewm(span=12,adjust=False).mean()
-            e26=cl.ewm(span=26,adjust=False).mean()
-            ml=e12-e26; sl=ml.ewm(span=9,adjust=False).mean()
-            macd_v=float(ml.iloc[-1]); macd_s=float(sl.iloc[-1])
-        except Exception: pass
-        try:
-            if len(cl)>=50:  ma50_v=float(cl.rolling(50).mean().iloc[-1])
-            if len(cl)>=200: ma200_v=float(cl.rolling(200).mean().iloc[-1])
-        except Exception: pass
-        try:
-            if len(vl)>=20: vol_avg=float(vl.iloc[-20:].mean()); vol_td=float(vl.iloc[-1])
-        except Exception: pass
-        try:
-            obv=(np.sign(cl.diff().fillna(0))*vl).cumsum()
-            obv_tr='rising' if np.polyfit(range(20),obv.iloc[-20:].values,1)[0]>0 else 'falling'
-        except Exception: pass
-        try:
-            if len(cl)>=2:  pct1d=(float(cl.iloc[-1])-float(cl.iloc[-2]))/float(cl.iloc[-2])*100
-            if len(cl)>=6:  pct5d=(float(cl.iloc[-1])-float(cl.iloc[-6]))/float(cl.iloc[-6])*100
-            if len(cl)>=22: pct1m=(float(cl.iloc[-1])-float(cl.iloc[-22]))/float(cl.iloc[-22])*100
-            if len(cl)>=66: pct3m=(float(cl.iloc[-1])-float(cl.iloc[-66]))/float(cl.iloc[-66])*100
-        except Exception: pass
-
-    pills = []
-    if rsi_v is not None:
-        if rsi_v < 30: pills.append(pill('RSI Oversold', True))
-        elif rsi_v > 70: pills.append(pill('RSI Overbought', False))
-        elif 45 < rsi_v < 65: pills.append(pill('RSI Sweet Spot', True))
-        else: pills.append(pill('RSI Neutral', None))
-    if macd_v is not None and macd_s is not None:
-        pills.append(pill('MACD Bullish' if macd_v > macd_s else 'MACD Bearish', macd_v > macd_s))
-    if ma50_v and ma200_v:
-        pills.append(pill('Golden Cross' if ma50_v>ma200_v else 'Death Cross', ma50_v>ma200_v))
-    if ma50_v and px:
-        ab=(px-ma50_v)/ma50_v*100
-        if 0<ab<5: pills.append(pill('Near MA50 Support', True))
-        elif ab<0: pills.append(pill('Below MA50', False))
-    if vol_avg and vol_td:
-        if vol_td>vol_avg*1.5: pills.append(pill('High Volume', True))
-        elif vol_td<vol_avg*0.5: pills.append(pill('Low Volume', None))
-    if spf and spf>0.15: pills.append(pill('High Short Interest', None))
-    if aus and aus>15: pills.append(pill('Analyst Upside '+'{:.0f}'.format(aus)+'%', True))
-    if pout and pout>1: pills.append(pill('Payout > Earnings', False))
-    if beta and beta>1.5: pills.append(pill('High Volatility', None))
-    if beta and beta<0.6: pills.append(pill('Low Volatility', True))
-
-    h1,h2,h3,h4,h5,h6 = st.columns(6)
-    h1.metric('Price', '$'+'{:.2f}'.format(px))
-    h2.metric('Div Yield', str(dy)+'%')
-    h3.metric('Monthly/Share', '$'+'{:.4f}'.format(mp2) if mp2 else '--')
-    h4.metric('Ex-Date', ex_dt.strftime('%b %d, %Y') if ex_dt else '--')
-    h5.metric('Frequency', freq2)
-    h6.metric('Analyst Target', '$'+'{:.2f}'.format(am) if am else '--',
-        delta=('{:.1f}%'.format(aus) if aus else None))
-    st.markdown('<div style="margin:6px 0 4px"><strong>' + name + '</strong>'
-        '  <span style="color:#666;font-size:.82rem">' + sec + ' / ' + ind + '</span></div>',
-        unsafe_allow_html=True)
-    if pills:
-        st.markdown('<div style="margin:6px 0 14px">' + ''.join(pills) + '</div>', unsafe_allow_html=True)
-    _notes = []
-    if _y_mismatch:
-        _notes.append('Yield shown is Div/Share divided by Price ('
-            + '{:.2f}'.format(dy) + '%). The data feed reports '
-            + '{:.2f}'.format((_reported_y or 0) * 100)
-            + '% -- the gap usually means the feed mixes a forward rate '
-              'with a trailing yield, or a special dividend is included.')
-    if _payout_flag:
-        _notes.append('* Payout ratio above 100% is normal for this sector. '
-            'REITs distribute from FFO, closed-end funds from NAV and return '
-            'of capital, MLPs from distributable cash flow -- none of which '
-            'are earnings per share, so the EPS-based ratio overstates risk.')
-    if freq2.endswith('(assumed)'):
-        _notes.append('Payment frequency was not reported, so quarterly is '
-            'assumed. Per-payment amounts below are estimates.')
-    for _n_ in _notes:
-        st.caption(_n_)
-
-    # ── Data source readout ─────────────────────────────────────
-    def _src_badge(label, count, total, color, bg):
-        if count == 0: return ''
-        pct = int(count / total * 100) if total else 0
-        return (
-            '<span style="display:inline-flex;align-items:center;gap:5px;'
-            'background:' + bg + ';border:1px solid ' + color + ';'
-            'border-radius:5px;padding:3px 10px;font-size:0.72rem;'
-            'font-family:DM Mono,monospace;color:' + color + ';margin-right:6px">'
-            + label + ' ' + str(count) + ' fields (' + str(pct) + '%)</span>'
-        )
-    _total = len(_YF_FIELDS)
-    _yfc   = _src.get('yf_count', 0)
-    _sc    = _src.get('scan_count', 0)
-    _cc    = _src.get('claude_count', 0)
-    _nc    = _src.get('none_count', 0)
-    _hs    = _src.get('hist_source', 'unknown')
-    _hist_label = {'yfinance': 'Yahoo Finance', 'scan': 'Nightly Scan', 'none': 'unavailable'}.get(_hs, _hs)
-    _badges = (
-        _src_badge('Yahoo Finance', _yfc, _total, '#4ac4ff', 'rgba(74,196,255,0.08)') +
-        _src_badge('Nightly Scan', _sc, _total, '#ffe066', 'rgba(255,224,102,0.08)') +
-        _src_badge('Claude Web Search', _cc, _total, '#b388ff', 'rgba(179,136,255,0.08)') +
-        (_src_badge('Unavailable', _nc, _total, '#ff6666', 'rgba(255,102,102,0.08)') if _nc > 0 else '')
-    )
-    _price_chart_note = 'Price chart: ' + _hist_label
-    _scan_note = ' | In nightly scan: Yes' if _src.get('scan_in_repo') else ' | Not in nightly scan'
-    if _src:
-        st.markdown(
-            '<div style="margin:4px 0 12px">'
-            '<span style="font-size:0.65rem;color:#666;text-transform:uppercase;'
-            'letter-spacing:0.1em;font-family:DM Mono,monospace">Data sources: </span>'
-            + _badges +
-            '<span style="font-size:0.68rem;color:#666;font-family:DM Mono,monospace">'
-            ' | ' + _price_chart_note + _scan_note + '</span>'
-            '</div>',
-            unsafe_allow_html=True
-        )
-    st.markdown('---')
-    colA, colB, colC = st.columns(3)
-
-    with colA:
-        st.markdown('<div class="az-section">Price History (1Y)</div>', unsafe_allow_html=True)
-        if not ah.empty:
-            cd = ah[['Close']].copy()
-            if ma50_v and len(ah)>=50:  cd['MA50']  = ah['Close'].rolling(50).mean()
-            if ma200_v and len(ah)>=200: cd['MA200'] = ah['Close'].rolling(200).mean()
-            st.line_chart(cd, height=200)
-        else: st.info('No price history.')
-        st.markdown('<div class="az-section">Price Performance</div>', unsafe_allow_html=True)
-        def pf(v):
-            if v is None: return '--'
-            c='#7fff7f' if v>=0 else '#ff9999'
-            return '<span style="color:'+c+';font-family:DM Mono,monospace">'+('+'if v>=0 else '')+'{:.2f}%'.format(v)+'</span>'
-        pr_rows = [('1 Day','1 Day = one trading day. How much the stock price moved today compared to yesterday. A positive number means the stock went up; negative means it went down.',pf(pct1d)),
-            ('5 Day','5 Day = five trading days (roughly one calendar week). Shows short-term price momentum. If positive and rising, buyers are in control over the near term.',pf(pct5d)),
-            ('1 Month','1 Month = approximately 22 trading days. Shows the near-term trend. A stock that is up over one month but down on the day may just be pulling back within a larger uptrend.',pf(pct1m)),
-            ('3 Month','3 Month = approximately 66 trading days (one quarter). Shows the medium-term trend direction. This is the timeframe most institutional investors use to evaluate recent performance.',pf(pct3m))]
-        pr_html = '<table style="width:100%;border-collapse:collapse"><tbody>'
-        for lbl,tt,val in pr_rows:
-            pr_html += '<tr class="mrow"><td class="mrow-label">' + tip(lbl,tt) + '</td><td class="mrow-val">' + val + '</td></tr>'
-        pr_html += '</tbody></table>'
-        st.markdown(pr_html, unsafe_allow_html=True)
-        st.markdown('<div class="az-section">Dividend History (Last 12)</div>', unsafe_allow_html=True)
-        if not ad.empty:
-            ddf = ad.reset_index(); ddf.columns=['Date','Dividend']
-            ddf['Date'] = pd.to_datetime(ddf['Date']).dt.date
-            st.dataframe(ddf.tail(12), width='stretch', hide_index=True)
-        else: st.info('No dividend history.')
-
-    with colB:
-        st.markdown('<div class="az-section">Technical Signals</div>', unsafe_allow_html=True)
-        tech_rows = []
-        def vo(v, fmt='{:.2f}', fb='--'): return fmt.format(v) if v is not None else fb
-        if rsi_v is not None:
-            if rsi_v<30: ri='Oversold -- potential bounce coming'; rc='#7fff7f'
-            elif rsi_v<45: ri='Weak -- losing momentum'; rc='#ff9999'
-            elif rsi_v<55: ri='Neutral -- no clear direction'; rc='#ccc'
-            elif rsi_v<70: ri='Strong -- uptrend confirmed'; rc='#7fff7f'
-            else: ri='Overbought -- pullback possible'; rc='#ff9999'
-            tech_rows.append(mrow('RSI (14-day)',
-                'RSI = Relative Strength Index. A momentum indicator scored 0-100. Below 30 = oversold, the stock has fallen too far too fast and may bounce. Above 70 = overbought, may have risen too fast and a pullback is likely. 45-70 is the sweet spot -- strong upward momentum without being overheated.',
-                '<span style="font-family:DM Mono,monospace;color:'+rc+'">'+vo(rsi_v,'{:.1f}')+'</span> <span style="font-size:.72rem;color:#888">'+ri+'</span>'))
-        if macd_v is not None:
-            mi = 'Bullish -- momentum building' if macd_v>macd_s else 'Bearish -- momentum fading'
-            mc2 = '#7fff7f' if macd_v>macd_s else '#ff9999'
-            tech_rows.append(mrow('MACD',
-                'MACD = Moving Average Convergence Divergence. Compares a 12-day and 26-day exponential moving average (EMA) of the price. When the MACD line is above its 9-day signal line, buyers are in control. Crossing above the signal line is a classic buy signal. Crossing below is a sell signal.',
-                '<span style="font-family:DM Mono,monospace;color:'+mc2+'">'+vo(macd_v,'{:.4f}')+'</span> <span style="font-size:.72rem;color:#888">'+mi+'</span>'))
-        if ma50_v:
-            pvs=(px-ma50_v)/ma50_v*100
-            if pvs>5: m5i='Extended above -- may be overbought'; m5c='#ccc'
-            elif pvs>0: m5i='Just above -- ideal entry zone'; m5c='#7fff7f'
-            elif pvs>-5: m5i='Just below -- watch for reclaim'; m5c='#ffe066'
-            else: m5i='Well below -- downtrend'; m5c='#ff9999'
-            tech_rows.append(mrow('50-Day MA',
-                'MA = Moving Average. The 50-Day MA is the average closing price over the past 50 trading days (~2.5 months). It smooths out daily noise to show the short-to-medium trend. When price is just above the 50-Day MA, it often acts as a floor of support -- this is frequently the ideal low-risk entry point for an uptrending stock.',
-                '$'+vo(ma50_v)+' <span style="color:'+m5c+';font-size:.72rem">('+('+'if pvs>=0 else '')+'{:.1f}%'.format(pvs)+')</span> <span style="font-size:.72rem;color:#888">'+m5i+'</span>'))
-        if ma200_v:
-            m2i='Golden Cross -- long-term uptrend' if (ma50_v and ma50_v>ma200_v) else 'Death Cross -- long-term downtrend'
-            m2c='#7fff7f' if (ma50_v and ma50_v>ma200_v) else '#ff9999'
-            tech_rows.append(mrow('200-Day MA',
-                'MA = Moving Average. The 200-Day MA is the average closing price over the past 200 trading days (~10 months). It is the most widely watched long-term trend line. When the 50-Day MA crosses above the 200-Day MA, that is called the Golden Cross -- a major bullish signal used by large institutions to open long positions. The reverse crossing is called the Death Cross -- a bearish signal.',
-                '$'+vo(ma200_v)+' <span style="font-size:.72rem;color:'+m2c+'">'+m2i+'</span>'))
-        if vol_avg and vol_td:
-            vr=vol_td/vol_avg
-            if vr>1.5: vi='High volume -- strong conviction'; vc='#7fff7f'
-            elif vr>1: vi='Above average -- buyers engaged'; vc='#ccc'
-            elif vr>0.5: vi='Below average -- quiet session'; vc='#888'
-            else: vi='Very low -- no conviction'; vc='#888'
-            tech_rows.append(mrow('Volume',
-                'Volume = the total number of shares bought and sold in a given trading session. Shown here as a multiple of the 20-day average volume (e.g. 1.5x means 50% more shares than usual traded today). High volume confirms a price move has conviction behind it -- many investors agree. Low volume moves are unreliable and often reverse. Volume spikes frequently precede or confirm major breakouts.',
-                '<span style="color:'+vc+';font-family:DM Mono,monospace">'+'{:.1f}x avg'.format(vr)+'</span> <span style="font-size:.72rem;color:#888">'+vi+'</span>'))
-        if obv_tr:
-            oc='#7fff7f' if obv_tr=='rising' else '#ff9999'
-            tech_rows.append(mrow('OBV Trend',
-                'OBV = On-Balance Volume. A cumulative indicator that adds volume on up-days and subtracts it on down-days. A rising OBV means more shares are trading on days the stock goes up -- this signals that large institutions are quietly accumulating (buying) the stock even if the price has not moved much yet. A falling OBV means distribution -- big money is selling into strength, which often precedes a price decline.',
-                '<span style="color:'+oc+';font-family:DM Mono,monospace">'+obv_tr.capitalize()+'</span>'))
-        if rng is not None:
-            if rng<25: rni='Near 52W low -- historically cheap'; rnc='#7fff7f'
-            elif rng<50: rni='Lower half -- value zone'; rnc='#ccc'
-            elif rng<75: rni='Upper half -- momentum zone'; rnc='#ccc'
-            else: rni='Near 52W high -- extended or breakout'; rnc='#ffe066'
-            tech_rows.append(mrow('52W Range Position',
-                '52W = 52-Week (one full year). Shows where the current price sits within its yearly high-low range. 0% = trading at the 52-week low. 100% = trading at the 52-week high. Stocks near the low end often offer better value and a higher effective dividend yield on your purchase price. Stocks near the high end may be breaking out to new highs or may be overextended and due for a pullback.',
-                '<span style="color:'+rnc+';font-family:DM Mono,monospace">'+'{:.0f}% of range'.format(rng)+'</span><span style="font-size:.72rem;color:#888;display:block">$'+'{:.2f}'.format(lo52)+' -- $'+'{:.2f}'.format(hi52)+'</span><span style="font-size:.72rem;color:#888">'+rni+'</span>'))
-        if tech_rows:
-            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(tech_rows) + '</tbody></table>', unsafe_allow_html=True)
-        else: st.info('Not enough price history for technical signals.')
-
-    with colC:
-        st.markdown('<div class="az-section">Dividend Metrics</div>', unsafe_allow_html=True)
-        div_rows = [
-            mrow('Annual Yield',
-                'Annual Yield = Dividend Yield. The total annual dividend payments divided by the current stock price, expressed as a percentage. A 6% yield means for every $100 you invest, you receive $6 per year in dividends. Very high yields above 15% can signal the dividend is at risk of being cut -- often called a yield trap.',
-                tag(dy,6,3,'{:.2f}','%')),
-            mrow('Annual Div/Share',
-                'Annual Div/Share = Annual Dividend Per Share. The total dollar amount paid in dividends for each share you own over the past 12 months (trailing twelve months or TTM). Multiply this by your number of shares to get your total annual dividend income.',
-                ('$'+'{:.4f}'.format(dr)) if dr else '--'),
-            mrow('Monthly/Share',
-                'Monthly/Share = Monthly Dividend Per Share. The annual dividend rate divided by 12, giving you the equivalent monthly income per share. Useful for monthly income planning regardless of whether the stock actually pays monthly, quarterly, or annually. Multiply by your share count to get total monthly income.',
-                ('$'+'{:.4f}'.format(mp2)) if mp2 else '--'),
-            mrow('Payment Frequency',
-                'How often you receive a dividend payment. Monthly=12 payments/year. Quarterly=4 payments/year. Less frequent means longer gaps between income.',
-                freq2),
-            mrow('Ex-Dividend Date',
-                'Ex-Dividend Date (also called Ex-Date). The cutoff date set by the company. You must own the stock BEFORE this date to qualify for the upcoming dividend payment. If you buy ON or AFTER the ex-date, you miss that payment. The stock price typically drops by approximately the dividend amount on this date as the value of that payment leaves the stock.',
-                ex_dt.strftime('%b %d, %Y') if ex_dt else '--'),
-            mrow('Payout Ratio' + _payout_flag,
-                'Payout Ratio = Dividend Payout Ratio. What percentage of the company&apos;s net earnings (EPS) is paid out as dividends. Under 60% is generally sustainable -- the company keeps plenty of earnings to reinvest and grow. 60-80% is a yellow flag. Over 100% means the company is paying MORE in dividends than it earns -- this is unsustainable and a dividend cut is likely.',
-                tag((pout or 0)*100,80,100,'{:.0f}','%') if pout else '--'),
-        ]
-        st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(div_rows) + '</tbody></table>', unsafe_allow_html=True)
-        _sus = _payout_sustainability(
-            dy, (pout * 100 if pout else None),
-            sector=ai.get('sector') or '',
-            quote_type=ai.get('quoteType') or '',
-            divs=ad, pass_thru=_pass_thru)
-        st.markdown('<div class="az-section">Payout Sustainability</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div style="margin:8px 0 12px">' + _sustain_badge(_sus) +
-            '<div style="margin-top:6px;font-size:.8rem;color:#bbb;line-height:1.45">' +
-            _esc(_sus['reason']) + '</div></div>',
-            unsafe_allow_html=True)
-
-        st.markdown('<div class="az-section">Valuation</div>', unsafe_allow_html=True)
-        mcstr = ('$'+'{:.1f}B'.format(mcap/1e9) if mcap>=1e9 else '$'+'{:.0f}M'.format(mcap/1e6) if mcap>=1e6 else '--')
-        val_rows = [
-            mrow('Market Cap','Market Cap = Market Capitalization. The total dollar value of all outstanding shares (share price x total shares). Large-cap above $10B = established, stable companies. Mid-cap $2-10B = growing companies with moderate risk. Small-cap below $2B = higher growth potential but also higher risk and volatility.',mcstr),
-            mrow('P/E (Trailing)','P/E = Price-to-Earnings Ratio. Trailing P/E uses actual earnings from the past 12 months (TTM = Trailing Twelve Months). Calculated as: Stock Price / EPS (Earnings Per Share). A P/E of 15x means you pay $15 for every $1 the company earns annually. Lower P/E can mean the stock is cheap relative to profits. Very high P/E means investors expect strong future growth -- or the stock is overvalued.','{:.1f}x'.format(pe) if pe else '--'),
-            mrow('P/E (Forward)','Forward P/E uses analyst-estimated earnings for the next 12 months instead of past earnings. If forward P/E is lower than trailing P/E, earnings are expected to grow -- a bullish signal. If forward P/E is higher than trailing, earnings are expected to shrink -- a warning sign. NTM = Next Twelve Months is another term for forward P/E.','{:.1f}x'.format(fwpe) if fwpe else '--'),
-            mrow('Price/Book','P/B = Price-to-Book Ratio. Compares the stock price to the company&apos;s book value (net assets = total assets minus total liabilities). Under 1x means the stock is trading below the value of what the company actually owns -- potentially very undervalued. 1-3x is typical for most healthy companies. Very high P/B means the market values intangibles like brand, patents, or future growth.','{:.2f}x'.format(pb) if pb else '--'),
-            mrow('Price/Sales','P/S = Price-to-Sales Ratio (also P/Rev). Compares the stock price to revenue per share. Useful when earnings are negative since every company has revenue. Under 1x = generally cheap. Under 2x = reasonable. Above 10x = investors are paying a huge premium for future growth potential -- common in high-growth tech but risky if growth slows.','{:.2f}x'.format(ps) if ps else '--'),
-            mrow('Beta','Beta measures a stock&apos;s price volatility relative to the overall market (S&P 500). Beta 1.0 = moves exactly with the market. Beta 1.5 = moves 50% more than the market in both directions -- bigger gains AND bigger drops. Beta 0.5 = moves half as much as the market -- stable, defensive. Low-beta stocks (utilities, REITs, consumer staples) are favored during recessions and bear markets.','{:.2f}'.format(beta) if beta else '--'),
-        ]
-        st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(val_rows) + '</tbody></table>', unsafe_allow_html=True)
-
-        st.markdown('<div class="az-section">Financial Health</div>', unsafe_allow_html=True)
-        hlth_rows = [
-            mrow('Profit Margin','Net Profit Margin = Net Income / Revenue. How many cents of profit the company keeps for every dollar of revenue after ALL expenses including taxes and interest. A 20% margin means the company pockets $20 profit from every $100 in sales. Higher margins signal strong pricing power and operational efficiency. Shrinking margins over time are a warning sign of rising costs or increasing competition.',tag((pm or 0)*100,15,5,'{:.1f}','%') if pm else '--'),
-            mrow('Operating Margin','EBIT Margin = Operating Income / Revenue. Similar to profit margin but measured BEFORE interest payments and taxes -- shows how efficient the core business is at turning revenue into profit. If operating margin is high but net profit margin is low, the company likely carries heavy debt (high interest costs eating into profits). Useful for comparing companies with different debt levels.',tag((om or 0)*100,15,5,'{:.1f}','%') if om else '--'),
-            mrow('Return on Equity','ROE = Return on Equity = Net Income / Shareholders Equity. Measures how effectively the company uses shareholder money to generate profit. A 20% ROE means for every $100 of equity, the company earns $20 in profit. Above 15% is considered strong. Warren Buffett looks for consistently high ROE as a sign of durable competitive advantage (a moat). Watch for ROE inflated by high debt.',tag((roe or 0)*100,15,8,'{:.1f}','%') if roe else '--'),
-            mrow('Return on Assets','ROA = Return on Assets = Net Income / Total Assets. Shows how much profit the company generates relative to everything it owns (cash, factories, equipment, intellectual property). Unlike ROE, ROA is not inflated by debt. Above 5% is solid. Asset-heavy industries like utilities and manufacturing typically have lower ROA than software or consumer brands.',tag((roa or 0)*100,8,3,'{:.1f}','%') if roa else '--'),
-            mrow('D/E Ratio','D/E = Debt-to-Equity Ratio = Total Debt / Shareholders Equity. Shows how much the company relies on borrowed money vs its own capital. A D/E of 200% means the company has $2 of debt for every $1 of equity. High D/E is dangerous when earnings fall because interest payments are fixed -- it amplifies losses. Some capital-intensive industries (utilities, pipelines, REITs) routinely carry high D/E because their predictable cash flows can service the debt.','{:.1f}%'.format(deq) if deq else '--'),
-            mrow('Current Ratio','Current Ratio = Current Assets / Current Liabilities. A liquidity measure answering: can the company pay its bills due within the next 12 months? Current assets include cash, receivables, and inventory. Current liabilities include payables and short-term debt. Above 1.5 = comfortable -- plenty of buffer. 1.0-1.5 = manageable but watch closely. Below 1.0 = a warning sign -- the company may struggle to meet near-term financial obligations.',tag(cr or 0,1.5,1.0,'{:.2f}') if cr else '--'),
-        ]
-        st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(hlth_rows) + '</tbody></table>', unsafe_allow_html=True)
-
-        st.markdown('<div class="az-section">Short Interest &amp; Growth</div>', unsafe_allow_html=True)
-        si_rows = [
-            mrow('Short % Float','Short % of Float = the percentage of a company&apos;s freely tradeable shares (float) that are currently sold short. Short sellers borrow and sell shares betting the price will fall. Above 10% = significant bearish conviction. Above 20% = very heavily shorted -- but this also sets up a potential short squeeze: if the stock rises, short sellers must buy to cover losses, which forces the price even higher. Often called short interest as a percentage of float.',tag((spf or 0)*100,20,10,'{:.1f}','%') if spf else '--'),
-            mrow('Days to Cover','Days to Cover = Short Interest / Average Daily Volume. Also called the Short Ratio. Estimates how many average trading days it would take ALL short sellers to buy back their shares and exit their positions. High days-to-cover (above 5) means short sellers are effectively trapped -- if good news hits and the stock starts rising, they are forced to buy to limit losses. This forced buying pushes the price higher still, which is the mechanism of a short squeeze.',tag(sratio or 0,5,3,'{:.1f}','d') if sratio else '--'),
-            mrow('Revenue Growth','YoY Revenue Growth = Year-over-Year change in total revenue (the top line of the income statement). A growing top line means the company is selling more products or services and expanding its business. This is the foundation for long-term stock appreciation. Consistent double-digit revenue growth is highly attractive. Negative growth means the business is shrinking.',tag((rg or 0)*100,10,3,'{:.1f}','%') if rg else '--'),
-            mrow('Earnings Growth','YoY EPS Growth = Year-over-Year change in Earnings Per Share (EPS = Net Income / Shares Outstanding). If earnings grow faster than revenue, the company is becoming more efficient and profitable -- a sign of a strengthening business. If earnings shrink while revenue grows, rising costs are eating into profits. EPS growth is what ultimately drives dividend increases and stock price appreciation over time.',tag((eg or 0)*100,10,3,'{:.1f}','%') if eg else '--'),
-        ]
-        st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(si_rows) + '</tbody></table>', unsafe_allow_html=True)
-
-        if am:
-            st.markdown('<div class="az-section">Analyst Consensus</div>', unsafe_allow_html=True)
-            rdisp = recky.replace('_',' ').title() if recky else '--'
-            rcol = '#7fff7f' if 'buy' in recky.lower() else ('#ff9999' if 'sell' in recky.lower() else '#ffe066')
-            an_rows = [
-                mrow('Recommendation','Wall Street Consensus Rating. Aggregates the buy/sell/hold ratings from all analysts who cover the stock. Strong Buy = most analysts expect the stock to significantly outperform the market. Buy = expected to outperform. Hold = expected to match the market. Underperform/Sell = expected to lag. Note: analysts employed by banks often have conflicts of interest -- their buy ratings outnumber sells by a large ratio. Use as one data point, not gospel.',
-                    '<span style="color:'+rcol+';font-weight:600">'+rdisp+'</span> <span style="font-size:.72rem;color:#888">('+str(nana)+' analysts)</span>'),
-                mrow('Price Target (Mean)','Mean (Average) Price Target = the average 12-month price target across all analysts covering the stock. Represents the consensus expectation for where the stock price will be in one year. The percentage shown is the implied upside or downside from the current price. Treat this as directional guidance -- analysts frequently revise targets and are often wrong on timing.',
-                    '$'+'{:.2f}'.format(am)+(
-                    ' <span style="font-size:.72rem;color:'+('#7fff7f' if aus and aus>0 else '#ff9999')+'">'+('+'if aus and aus>=0 else '')+'{:.1f}%'.format(aus)+' from current</span>' if aus is not None else '')),
-                mrow('Target Range','Analyst Price Target Range = the spread from the most bearish analyst&apos;s low target to the most bullish analyst&apos;s high target. A wide range (e.g. $10 to $50) means analysts fundamentally disagree about the company&apos;s prospects -- high uncertainty. A narrow range (e.g. $20 to $24) means there is strong consensus and the outlook is well-understood. Wide ranges often occur around companies undergoing major change.',
-                    ('$'+'{:.2f}'.format(al)+' -- $'+'{:.2f}'.format(ahigh)) if (al and ahigh) else '--'),
-            ]
-            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(an_rows) + '</tbody></table>', unsafe_allow_html=True)
-
-    st.markdown('---')
-    st.markdown('<div class="section-hdr" style="font-size:1rem">Quick Calculator</div>', unsafe_allow_html=True)
-    qc1, qc2 = st.columns([1,2])
-    with qc1:
-        azinv = st.number_input('Investment ($)', min_value=1.0, value=1000.0, step=100.0, format='%.2f', key=invest_key)
-    with qc2:
-        if px > 0 and dr > 0:
-            azsh=azinv/px; aza=azsh*dr; azm=aza/12; azw=aza/52
-            azup=(azinv*aus/100) if aus else None
-            st.markdown(
-                '<div class="calc-result">'
-                '<div class="calc-result-row"><span class="calc-label">Shares purchased</span><span class="calc-value">'+'{:.4f}'.format(azsh)+'</span></div>'
-                '<div class="calc-result-row"><span class="calc-label">Monthly dividend income</span><span class="calc-value">$'+'{:.2f}'.format(azm)+'</span></div>'
-                '<div class="calc-result-row"><span class="calc-label">Annual dividend income</span><span class="calc-value big">$'+'{:.2f}'.format(aza)+'</span></div>'
-                '<div class="calc-result-row"><span class="calc-label">Weekly income</span><span class="calc-value">$'+'{:.2f}'.format(azw)+'</span></div>'
-                +((
-                '<div class="calc-result-row"><span class="calc-label">Analyst price upside ($)</span><span class="calc-value">$'+'{:.2f}'.format(azup)+'</span></div>'
-                ) if azup else '')+
-                '</div>', unsafe_allow_html=True)
-        else: st.info('No dividend data available for this ticker.')
-
-
-
 with tab_az:
     st.markdown('<div class="section-hdr">Stock Analyzer</div>', unsafe_allow_html=True)
-    st.markdown('Enter any stock, ETF, or fund ticker for a full breakdown.')
+    st.markdown('Enter any ticker for a full breakdown with metric explanations.')
+    if not live_mode:
+        st.caption('Using scan data only. Click **Refresh** in the sidebar for live Yahoo/Claude data.')
     # Show setup tip if no API key configured
     _has_key = bool(_secret('ANTHROPIC_API_KEY'))
     if not _has_key:
@@ -1895,14 +1134,17 @@ with tab_az:
         )
     az1, az2 = st.columns([2,3])
     with az1:
-        az_ticker = st.text_input('Ticker symbol', placeholder='e.g. AAPL, SCHD, VOO, JEPI', key='az_ticker')
+        az_ticker = st.text_input('Ticker symbol', placeholder='e.g. ET, WPM, DOC', key='az_ticker')
         az_btn = st.button('Analyze', type='primary', key='az_analyze')
     # Trigger fetch on button click, store in session_state so
     # the number_input below doesn't reset the whole analysis
     if az_btn and az_ticker:
-        _spin_msg = 'Looking up ' + _clean_symbol(az_ticker) + '...'
+        _has_api = bool(_secret('ANTHROPIC_API_KEY'))
+        _spin_msg = ('Fetching live data for ' + az_ticker.upper() +
+                     ' via web search...' if (_has_api and live_mode) else
+                     'Loading scan data for ' + az_ticker.upper() + '...')
         with st.spinner(_spin_msg):
-            _res = fetch_stock_analysis(az_ticker, live=True)
+            _res = fetch_stock_analysis(az_ticker, live=live_mode)
         # fetch returns 5 values now (added source_summary)
         ai, ah, ad, ae = _res[0], _res[1], _res[2], _res[3]
         _src = _res[4] if len(_res) > 4 else {}
@@ -1913,63 +1155,381 @@ with tab_az:
             st.session_state['az_result'] = (ai, ah, ad, _src, az_ticker.upper().strip())
     # Render from session_state -- survives reruns caused by number_input
     if 'az_result' in st.session_state:
-        _render_analysis(st.session_state['az_result'], 'az_invest')
+        _stored = st.session_state['az_result']
+        ai, ah, ad = _stored[0], _stored[1], _stored[2]
+        _src = _stored[3] if len(_stored) > 3 else {}
+        ae = None
+        sym   = ((_stored[4] if len(_stored) > 4 else az_ticker) or '').upper().strip() or 'TICKER'
+        name  = _esc(ai.get('longName') or ai.get('shortName') or sym)
+        sec   = _esc(ai.get('sector') or 'Unknown')
+        ind   = _esc(ai.get('industry') or 'Unknown')
+        px    = float(ai.get('currentPrice') or ai.get('regularMarketPrice') or
+                     ai.get('navPrice') or ai.get('previousClose') or 0)
+        mcap  = ai.get('marketCap') or 0
+        pe    = ai.get('trailingPE')
+        fwpe  = ai.get('forwardPE')
+        pb    = ai.get('priceToBook')
+        ps    = ai.get('priceToSalesTrailing12Months')
+        dr    = float(ai.get('trailingAnnualDividendRate') or ai.get('dividendRate') or 0)
+        # Yield is derived from rate/price so it always agrees with the
+        # Div/Share figure shown below it. _resolve_yield also repairs
+        # yfinance's percent-vs-decimal inconsistency.
+        ry, _reported_y = _resolve_yield(ai, px)
+        dy    = round((ry or 0) * 100, 2)
+        _y_mismatch = (ry and _reported_y and abs(ry - _reported_y) > 0.005)
+        # EPS-based payout ratio is not meaningful for REITs (use FFO/AFFO),
+        # closed-end funds (distributions come from NAV/ROC) or MLPs (DCF).
+        pout  = ai.get('payoutRatio')
+        _pass_thru = sec in ('Real Estate', 'Financial Services', 'Energy')
+        _payout_flag = ' *' if (_pass_thru and pout and pout > 0.9) else ''
+        ex_ts = ai.get('exDividendDate')
+        ex_dt = None
+        if ex_ts:
+            ex_dt = _epoch_to_date(ex_ts)
+        hi52  = ai.get('fiftyTwoWeekHigh') or 0
+        lo52  = ai.get('fiftyTwoWeekLow') or 0
+        rng   = ((px - lo52)/(hi52 - lo52)*100) if (hi52 and lo52 and hi52 != lo52) else None
+        beta  = ai.get('beta')
+        spf   = ai.get('shortPercentOfFloat')
+        sratio= ai.get('shortRatio')
+        am    = ai.get('targetMeanPrice')
+        al    = ai.get('targetLowPrice')
+        ahigh = ai.get('targetHighPrice')
+        nana  = ai.get('numberOfAnalystOpinions') or 0
+        recky = ai.get('recommendationKey') or ''
+        rg    = ai.get('revenueGrowth')
+        eg    = ai.get('earningsGrowth')
+        pm    = ai.get('profitMargins')
+        om    = ai.get('operatingMargins')
+        roe   = ai.get('returnOnEquity')
+        roa   = ai.get('returnOnAssets')
+        deq   = ai.get('debtToEquity')
+        cr    = ai.get('currentRatio')
+        aus   = ((am - px) / px * 100) if (am and px > 0) else None
+        mp2   = dr / 12 if dr else 0
+        # Frequency priority: counted actual payments > scan field > default
+        _scan_freq = ai.get('dividendFrequency') or ''
+        if not ad.empty:
+            oyr = pd.Timestamp.now(tz='UTC') - pd.DateOffset(years=1)
+            _recent = ad[ad.index >= oyr]; n = len(_recent)
+            if n >= 10:  pays_yr=12; freq2='Monthly'
+            elif n >= 3: pays_yr=4;  freq2='Quarterly'
+            elif n == 2: pays_yr=2;  freq2='Semi-Annual'
+            elif n == 1: pays_yr=1;  freq2='Annual'
+            else:        pays_yr=4;  freq2='Quarterly'
+        elif _scan_freq and _scan_freq != '--':
+            freq2 = _scan_freq; pays_yr = _freq_to_pays(_scan_freq)
+        else:
+            pays_yr = 4; freq2 = 'Quarterly (assumed)'
+        rsi_v=ma50_v=ma200_v=macd_v=macd_s=vol_avg=vol_td=obv_tr=None
+        pct1d=pct5d=pct1m=pct3m=None
+        if not ah.empty and len(ah) >= 26:
+            cl = ah['Close'].dropna(); vl = ah['Volume'].dropna()
+            try:
+                dlt=cl.diff(); g=dlt.clip(lower=0).rolling(14).mean()
+                ls=(-dlt.clip(upper=0)).rolling(14).mean()
+                rs2=g/ls.replace(0,np.nan)
+                rs3=(100-(100/(1+rs2))).dropna()
+                rsi_v=float(rs3.iloc[-1]) if not rs3.empty else None
+            except Exception: pass
+            try:
+                e12=cl.ewm(span=12,adjust=False).mean()
+                e26=cl.ewm(span=26,adjust=False).mean()
+                ml=e12-e26; sl=ml.ewm(span=9,adjust=False).mean()
+                macd_v=float(ml.iloc[-1]); macd_s=float(sl.iloc[-1])
+            except Exception: pass
+            try:
+                if len(cl)>=50:  ma50_v=float(cl.rolling(50).mean().iloc[-1])
+                if len(cl)>=200: ma200_v=float(cl.rolling(200).mean().iloc[-1])
+            except Exception: pass
+            try:
+                if len(vl)>=20: vol_avg=float(vl.iloc[-20:].mean()); vol_td=float(vl.iloc[-1])
+            except Exception: pass
+            try:
+                obv=(np.sign(cl.diff().fillna(0))*vl).cumsum()
+                obv_tr='rising' if np.polyfit(range(20),obv.iloc[-20:].values,1)[0]>0 else 'falling'
+            except Exception: pass
+            try:
+                if len(cl)>=2:  pct1d=(float(cl.iloc[-1])-float(cl.iloc[-2]))/float(cl.iloc[-2])*100
+                if len(cl)>=6:  pct5d=(float(cl.iloc[-1])-float(cl.iloc[-6]))/float(cl.iloc[-6])*100
+                if len(cl)>=22: pct1m=(float(cl.iloc[-1])-float(cl.iloc[-22]))/float(cl.iloc[-22])*100
+                if len(cl)>=66: pct3m=(float(cl.iloc[-1])-float(cl.iloc[-66]))/float(cl.iloc[-66])*100
+            except Exception: pass
 
-with tab_top:
-    st.markdown('<div class="section-hdr">Highest Dividend Payout</div>', unsafe_allow_html=True)
-    st.markdown(
-        'Top 30 stocks, ETFs, and index funds by **cash dividend per dollar you invest** '
-        '(annual dividend per share ÷ share price). '
-        'A $1,000 position in the first row pays the most dividend income.'
-    )
-    with st.spinner('Ranking live dividend yields...'):
-        top_rows = load_top_yields()
-    if not top_rows:
-        st.error('Could not load the yield ranking. Try again in a minute.')
-    else:
-        st.caption('Click a pill to open the full breakdown and calculator.')
-        pending = st.session_state.pop('top_pending', None)
-        if pending:
-            with st.spinner('Looking up ' + pending + '...'):
-                _res = fetch_stock_analysis(pending, live=True)
-            if _res[3] or not _res[0]:
-                st.error('Could not load ' + pending + ': ' + str(_res[3] or 'no data returned'))
-                st.session_state.pop('top_result', None)
-            else:
-                st.session_state['top_result'] = (
-                    _res[0], _res[1], _res[2],
-                    _res[4] if len(_res) > 4 else {},
-                    pending,
-                )
-        picked = ''
-        if isinstance(st.session_state.get('top_result'), tuple) and len(st.session_state['top_result']) > 4:
-            picked = st.session_state['top_result'][4]
-        clicked = None
-        pill_cols = st.columns(6)
-        for i, row in enumerate(top_rows):
-            label = str(i + 1) + '  ' + row['ticker'] + '  ' + '{:.1f}%'.format(row['yield_pct'])
-            _pill_sus = _payout_sustainability(
-                row['yield_pct'], None, quote_type=row['kind'])
-            tip_txt = (row['name'] + ' · ' + row['kind']
-                + ' · $' + '{:.2f}'.format(row['price'])
-                + ' · $' + '{:.2f}'.format(row['div_rate']) + '/share'
-                + ' · $' + '{:.0f}'.format(row['per_1000']) + ' income per $1,000'
-                + ' · ' + _pill_sus['label'])
-            with pill_cols[i % 6]:
-                if st.button(label, key='yp_' + row['ticker'],
-                             type='primary' if row['ticker'] == picked else 'secondary',
-                             help=tip_txt, width='stretch'):
-                    clicked = row['ticker']
-        if clicked and clicked != picked:
-            st.session_state['top_pending'] = clicked
-            st.rerun()
-        if isinstance(st.session_state.get('top_result'), tuple):
-            st.markdown('---')
-            _render_analysis(st.session_state['top_result'], 'top_invest')
-        st.caption(
-            'Yield is trailing cash paid over the last year divided by the current price. '
-            'Very high yields can be cut. This is not a buy list.'
+        pills = []
+        if rsi_v is not None:
+            if rsi_v < 30: pills.append(pill('RSI Oversold', True))
+            elif rsi_v > 70: pills.append(pill('RSI Overbought', False))
+            elif 45 < rsi_v < 65: pills.append(pill('RSI Sweet Spot', True))
+            else: pills.append(pill('RSI Neutral', None))
+        if macd_v is not None and macd_s is not None:
+            pills.append(pill('MACD Bullish' if macd_v > macd_s else 'MACD Bearish', macd_v > macd_s))
+        if ma50_v and ma200_v:
+            pills.append(pill('Golden Cross' if ma50_v>ma200_v else 'Death Cross', ma50_v>ma200_v))
+        if ma50_v and px:
+            ab=(px-ma50_v)/ma50_v*100
+            if 0<ab<5: pills.append(pill('Near MA50 Support', True))
+            elif ab<0: pills.append(pill('Below MA50', False))
+        if vol_avg and vol_td:
+            if vol_td>vol_avg*1.5: pills.append(pill('High Volume', True))
+            elif vol_td<vol_avg*0.5: pills.append(pill('Low Volume', None))
+        if spf and spf>0.15: pills.append(pill('High Short Interest', None))
+        if aus and aus>15: pills.append(pill('Analyst Upside '+'{:.0f}'.format(aus)+'%', True))
+        if pout and pout>1: pills.append(pill('Payout > Earnings', False))
+        if beta and beta>1.5: pills.append(pill('High Volatility', None))
+        if beta and beta<0.6: pills.append(pill('Low Volatility', True))
+
+        h1,h2,h3,h4,h5,h6 = st.columns(6)
+        h1.metric('Price', '$'+'{:.2f}'.format(px))
+        h2.metric('Div Yield', str(dy)+'%')
+        h3.metric('Monthly/Share', '$'+'{:.4f}'.format(mp2) if mp2 else '--')
+        h4.metric('Ex-Date', ex_dt.strftime('%b %d, %Y') if ex_dt else '--')
+        h5.metric('Frequency', freq2)
+        h6.metric('Analyst Target', '$'+'{:.2f}'.format(am) if am else '--',
+            delta=('{:.1f}%'.format(aus) if aus else None))
+        st.markdown('<div style="margin:6px 0 4px"><strong>' + name + '</strong>'
+            '  <span style="color:#666;font-size:.82rem">' + sec + ' / ' + ind + '</span></div>',
+            unsafe_allow_html=True)
+        if pills:
+            st.markdown('<div style="margin:6px 0 14px">' + ''.join(pills) + '</div>', unsafe_allow_html=True)
+        _notes = []
+        if _y_mismatch:
+            _notes.append('Yield shown is Div/Share divided by Price ('
+                + '{:.2f}'.format(dy) + '%). The data feed reports '
+                + '{:.2f}'.format((_reported_y or 0) * 100)
+                + '% -- the gap usually means the feed mixes a forward rate '
+                  'with a trailing yield, or a special dividend is included.')
+        if _payout_flag:
+            _notes.append('* Payout ratio above 100% is normal for this sector. '
+                'REITs distribute from FFO, closed-end funds from NAV and return '
+                'of capital, MLPs from distributable cash flow -- none of which '
+                'are earnings per share, so the EPS-based ratio overstates risk.')
+        if freq2.endswith('(assumed)'):
+            _notes.append('Payment frequency was not reported, so quarterly is '
+                'assumed. Per-payment amounts below are estimates.')
+        for _n_ in _notes:
+            st.caption(_n_)
+
+        # ── Data source readout ─────────────────────────────────────
+        def _src_badge(label, count, total, color, bg):
+            if count == 0: return ''
+            pct = int(count / total * 100) if total else 0
+            return (
+                '<span style="display:inline-flex;align-items:center;gap:5px;'
+                'background:' + bg + ';border:1px solid ' + color + ';'
+                'border-radius:5px;padding:3px 10px;font-size:0.72rem;'
+                'font-family:DM Mono,monospace;color:' + color + ';margin-right:6px">'
+                + label + ' ' + str(count) + ' fields (' + str(pct) + '%)</span>'
+            )
+        _total = len(_YF_FIELDS)
+        _yfc   = _src.get('yf_count', 0)
+        _sc    = _src.get('scan_count', 0)
+        _cc    = _src.get('claude_count', 0)
+        _nc    = _src.get('none_count', 0)
+        _hs    = _src.get('hist_source', 'unknown')
+        _hist_label = {'yfinance': 'Yahoo Finance', 'scan': 'Nightly Scan', 'none': 'unavailable'}.get(_hs, _hs)
+        _badges = (
+            _src_badge('Yahoo Finance', _yfc, _total, '#4ac4ff', 'rgba(74,196,255,0.08)') +
+            _src_badge('Nightly Scan', _sc, _total, '#ffe066', 'rgba(255,224,102,0.08)') +
+            _src_badge('Claude Web Search', _cc, _total, '#b388ff', 'rgba(179,136,255,0.08)') +
+            (_src_badge('Unavailable', _nc, _total, '#ff6666', 'rgba(255,102,102,0.08)') if _nc > 0 else '')
         )
+        _price_chart_note = 'Price chart: ' + _hist_label
+        _scan_note = ' | In nightly scan: Yes' if _src.get('scan_in_repo') else ' | Not in nightly scan'
+        if _src:
+            st.markdown(
+                '<div style="margin:4px 0 12px">'
+                '<span style="font-size:0.65rem;color:#666;text-transform:uppercase;'
+                'letter-spacing:0.1em;font-family:DM Mono,monospace">Data sources: </span>'
+                + _badges +
+                '<span style="font-size:0.68rem;color:#666;font-family:DM Mono,monospace">'
+                ' | ' + _price_chart_note + _scan_note + '</span>'
+                '</div>',
+                unsafe_allow_html=True
+            )
+        st.markdown('---')
+        colA, colB, colC = st.columns(3)
+
+        with colA:
+            st.markdown('<div class="az-section">Price History (1Y)</div>', unsafe_allow_html=True)
+            if not ah.empty:
+                cd = ah[['Close']].copy()
+                if ma50_v and len(ah)>=50:  cd['MA50']  = ah['Close'].rolling(50).mean()
+                if ma200_v and len(ah)>=200: cd['MA200'] = ah['Close'].rolling(200).mean()
+                st.line_chart(cd, height=200)
+            else: st.info('No price history.')
+            st.markdown('<div class="az-section">Price Performance</div>', unsafe_allow_html=True)
+            def pf(v):
+                if v is None: return '--'
+                c='#7fff7f' if v>=0 else '#ff9999'
+                return '<span style="color:'+c+';font-family:DM Mono,monospace">'+('+'if v>=0 else '')+'{:.2f}%'.format(v)+'</span>'
+            pr_rows = [('1 Day','1 Day = one trading day. How much the stock price moved today compared to yesterday. A positive number means the stock went up; negative means it went down.',pf(pct1d)),
+                ('5 Day','5 Day = five trading days (roughly one calendar week). Shows short-term price momentum. If positive and rising, buyers are in control over the near term.',pf(pct5d)),
+                ('1 Month','1 Month = approximately 22 trading days. Shows the near-term trend. A stock that is up over one month but down on the day may just be pulling back within a larger uptrend.',pf(pct1m)),
+                ('3 Month','3 Month = approximately 66 trading days (one quarter). Shows the medium-term trend direction. This is the timeframe most institutional investors use to evaluate recent performance.',pf(pct3m))]
+            pr_html = '<table style="width:100%;border-collapse:collapse"><tbody>'
+            for lbl,tt,val in pr_rows:
+                pr_html += '<tr class="mrow"><td class="mrow-label">' + tip(lbl,tt) + '</td><td class="mrow-val">' + val + '</td></tr>'
+            pr_html += '</tbody></table>'
+            st.markdown(pr_html, unsafe_allow_html=True)
+            st.markdown('<div class="az-section">Dividend History (Last 12)</div>', unsafe_allow_html=True)
+            if not ad.empty:
+                ddf = ad.reset_index(); ddf.columns=['Date','Dividend']
+                ddf['Date'] = pd.to_datetime(ddf['Date']).dt.date
+                st.dataframe(ddf.tail(12), width='stretch', hide_index=True)
+            else: st.info('No dividend history.')
+
+        with colB:
+            st.markdown('<div class="az-section">Technical Signals</div>', unsafe_allow_html=True)
+            tech_rows = []
+            def vo(v, fmt='{:.2f}', fb='--'): return fmt.format(v) if v is not None else fb
+            if rsi_v is not None:
+                if rsi_v<30: ri='Oversold -- potential bounce coming'; rc='#7fff7f'
+                elif rsi_v<45: ri='Weak -- losing momentum'; rc='#ff9999'
+                elif rsi_v<55: ri='Neutral -- no clear direction'; rc='#ccc'
+                elif rsi_v<70: ri='Strong -- uptrend confirmed'; rc='#7fff7f'
+                else: ri='Overbought -- pullback possible'; rc='#ff9999'
+                tech_rows.append(mrow('RSI (14-day)',
+                    'RSI = Relative Strength Index. A momentum indicator scored 0-100. Below 30 = oversold, the stock has fallen too far too fast and may bounce. Above 70 = overbought, may have risen too fast and a pullback is likely. 45-70 is the sweet spot -- strong upward momentum without being overheated.',
+                    '<span style="font-family:DM Mono,monospace;color:'+rc+'">'+vo(rsi_v,'{:.1f}')+'</span> <span style="font-size:.72rem;color:#888">'+ri+'</span>'))
+            if macd_v is not None:
+                mi = 'Bullish -- momentum building' if macd_v>macd_s else 'Bearish -- momentum fading'
+                mc2 = '#7fff7f' if macd_v>macd_s else '#ff9999'
+                tech_rows.append(mrow('MACD',
+                    'MACD = Moving Average Convergence Divergence. Compares a 12-day and 26-day exponential moving average (EMA) of the price. When the MACD line is above its 9-day signal line, buyers are in control. Crossing above the signal line is a classic buy signal. Crossing below is a sell signal.',
+                    '<span style="font-family:DM Mono,monospace;color:'+mc2+'">'+vo(macd_v,'{:.4f}')+'</span> <span style="font-size:.72rem;color:#888">'+mi+'</span>'))
+            if ma50_v:
+                pvs=(px-ma50_v)/ma50_v*100
+                if pvs>5: m5i='Extended above -- may be overbought'; m5c='#ccc'
+                elif pvs>0: m5i='Just above -- ideal entry zone'; m5c='#7fff7f'
+                elif pvs>-5: m5i='Just below -- watch for reclaim'; m5c='#ffe066'
+                else: m5i='Well below -- downtrend'; m5c='#ff9999'
+                tech_rows.append(mrow('50-Day MA',
+                    'MA = Moving Average. The 50-Day MA is the average closing price over the past 50 trading days (~2.5 months). It smooths out daily noise to show the short-to-medium trend. When price is just above the 50-Day MA, it often acts as a floor of support -- this is frequently the ideal low-risk entry point for an uptrending stock.',
+                    '$'+vo(ma50_v)+' <span style="color:'+m5c+';font-size:.72rem">('+('+'if pvs>=0 else '')+'{:.1f}%'.format(pvs)+')</span> <span style="font-size:.72rem;color:#888">'+m5i+'</span>'))
+            if ma200_v:
+                m2i='Golden Cross -- long-term uptrend' if (ma50_v and ma50_v>ma200_v) else 'Death Cross -- long-term downtrend'
+                m2c='#7fff7f' if (ma50_v and ma50_v>ma200_v) else '#ff9999'
+                tech_rows.append(mrow('200-Day MA',
+                    'MA = Moving Average. The 200-Day MA is the average closing price over the past 200 trading days (~10 months). It is the most widely watched long-term trend line. When the 50-Day MA crosses above the 200-Day MA, that is called the Golden Cross -- a major bullish signal used by large institutions to open long positions. The reverse crossing is called the Death Cross -- a bearish signal.',
+                    '$'+vo(ma200_v)+' <span style="font-size:.72rem;color:'+m2c+'">'+m2i+'</span>'))
+            if vol_avg and vol_td:
+                vr=vol_td/vol_avg
+                if vr>1.5: vi='High volume -- strong conviction'; vc='#7fff7f'
+                elif vr>1: vi='Above average -- buyers engaged'; vc='#ccc'
+                elif vr>0.5: vi='Below average -- quiet session'; vc='#888'
+                else: vi='Very low -- no conviction'; vc='#888'
+                tech_rows.append(mrow('Volume',
+                    'Volume = the total number of shares bought and sold in a given trading session. Shown here as a multiple of the 20-day average volume (e.g. 1.5x means 50% more shares than usual traded today). High volume confirms a price move has conviction behind it -- many investors agree. Low volume moves are unreliable and often reverse. Volume spikes frequently precede or confirm major breakouts.',
+                    '<span style="color:'+vc+';font-family:DM Mono,monospace">'+'{:.1f}x avg'.format(vr)+'</span> <span style="font-size:.72rem;color:#888">'+vi+'</span>'))
+            if obv_tr:
+                oc='#7fff7f' if obv_tr=='rising' else '#ff9999'
+                tech_rows.append(mrow('OBV Trend',
+                    'OBV = On-Balance Volume. A cumulative indicator that adds volume on up-days and subtracts it on down-days. A rising OBV means more shares are trading on days the stock goes up -- this signals that large institutions are quietly accumulating (buying) the stock even if the price has not moved much yet. A falling OBV means distribution -- big money is selling into strength, which often precedes a price decline.',
+                    '<span style="color:'+oc+';font-family:DM Mono,monospace">'+obv_tr.capitalize()+'</span>'))
+            if rng is not None:
+                if rng<25: rni='Near 52W low -- historically cheap'; rnc='#7fff7f'
+                elif rng<50: rni='Lower half -- value zone'; rnc='#ccc'
+                elif rng<75: rni='Upper half -- momentum zone'; rnc='#ccc'
+                else: rni='Near 52W high -- extended or breakout'; rnc='#ffe066'
+                tech_rows.append(mrow('52W Range Position',
+                    '52W = 52-Week (one full year). Shows where the current price sits within its yearly high-low range. 0% = trading at the 52-week low. 100% = trading at the 52-week high. Stocks near the low end often offer better value and a higher effective dividend yield on your purchase price. Stocks near the high end may be breaking out to new highs or may be overextended and due for a pullback.',
+                    '<span style="color:'+rnc+';font-family:DM Mono,monospace">'+'{:.0f}% of range'.format(rng)+'</span><span style="font-size:.72rem;color:#888;display:block">$'+'{:.2f}'.format(lo52)+' -- $'+'{:.2f}'.format(hi52)+'</span><span style="font-size:.72rem;color:#888">'+rni+'</span>'))
+            if tech_rows:
+                st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(tech_rows) + '</tbody></table>', unsafe_allow_html=True)
+            else: st.info('Not enough price history for technical signals.')
+
+        with colC:
+            st.markdown('<div class="az-section">Dividend Metrics</div>', unsafe_allow_html=True)
+            div_rows = [
+                mrow('Annual Yield',
+                    'Annual Yield = Dividend Yield. The total annual dividend payments divided by the current stock price, expressed as a percentage. A 6% yield means for every $100 you invest, you receive $6 per year in dividends. Very high yields above 15% can signal the dividend is at risk of being cut -- often called a yield trap.',
+                    tag(dy,6,3,'{:.2f}','%')),
+                mrow('Annual Div/Share',
+                    'Annual Div/Share = Annual Dividend Per Share. The total dollar amount paid in dividends for each share you own over the past 12 months (trailing twelve months or TTM). Multiply this by your number of shares to get your total annual dividend income.',
+                    ('$'+'{:.4f}'.format(dr)) if dr else '--'),
+                mrow('Monthly/Share',
+                    'Monthly/Share = Monthly Dividend Per Share. The annual dividend rate divided by 12, giving you the equivalent monthly income per share. Useful for monthly income planning regardless of whether the stock actually pays monthly, quarterly, or annually. Multiply by your share count to get total monthly income.',
+                    ('$'+'{:.4f}'.format(mp2)) if mp2 else '--'),
+                mrow('Payment Frequency',
+                    'How often you receive a dividend payment. Monthly=12 payments/year. Quarterly=4 payments/year. Less frequent means longer gaps between income.',
+                    freq2),
+                mrow('Ex-Dividend Date',
+                    'Ex-Dividend Date (also called Ex-Date). The cutoff date set by the company. You must own the stock BEFORE this date to qualify for the upcoming dividend payment. If you buy ON or AFTER the ex-date, you miss that payment. The stock price typically drops by approximately the dividend amount on this date as the value of that payment leaves the stock.',
+                    ex_dt.strftime('%b %d, %Y') if ex_dt else '--'),
+                mrow('Payout Ratio' + _payout_flag,
+                    'Payout Ratio = Dividend Payout Ratio. What percentage of the company&apos;s net earnings (EPS) is paid out as dividends. Under 60% is generally sustainable -- the company keeps plenty of earnings to reinvest and grow. 60-80% is a yellow flag. Over 100% means the company is paying MORE in dividends than it earns -- this is unsustainable and a dividend cut is likely.',
+                    tag((pout or 0)*100,80,100,'{:.0f}','%') if pout else '--'),
+            ]
+            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(div_rows) + '</tbody></table>', unsafe_allow_html=True)
+
+            st.markdown('<div class="az-section">Valuation</div>', unsafe_allow_html=True)
+            mcstr = ('$'+'{:.1f}B'.format(mcap/1e9) if mcap>=1e9 else '$'+'{:.0f}M'.format(mcap/1e6) if mcap>=1e6 else '--')
+            val_rows = [
+                mrow('Market Cap','Market Cap = Market Capitalization. The total dollar value of all outstanding shares (share price x total shares). Large-cap above $10B = established, stable companies. Mid-cap $2-10B = growing companies with moderate risk. Small-cap below $2B = higher growth potential but also higher risk and volatility.',mcstr),
+                mrow('P/E (Trailing)','P/E = Price-to-Earnings Ratio. Trailing P/E uses actual earnings from the past 12 months (TTM = Trailing Twelve Months). Calculated as: Stock Price / EPS (Earnings Per Share). A P/E of 15x means you pay $15 for every $1 the company earns annually. Lower P/E can mean the stock is cheap relative to profits. Very high P/E means investors expect strong future growth -- or the stock is overvalued.','{:.1f}x'.format(pe) if pe else '--'),
+                mrow('P/E (Forward)','Forward P/E uses analyst-estimated earnings for the next 12 months instead of past earnings. If forward P/E is lower than trailing P/E, earnings are expected to grow -- a bullish signal. If forward P/E is higher than trailing, earnings are expected to shrink -- a warning sign. NTM = Next Twelve Months is another term for forward P/E.','{:.1f}x'.format(fwpe) if fwpe else '--'),
+                mrow('Price/Book','P/B = Price-to-Book Ratio. Compares the stock price to the company&apos;s book value (net assets = total assets minus total liabilities). Under 1x means the stock is trading below the value of what the company actually owns -- potentially very undervalued. 1-3x is typical for most healthy companies. Very high P/B means the market values intangibles like brand, patents, or future growth.','{:.2f}x'.format(pb) if pb else '--'),
+                mrow('Price/Sales','P/S = Price-to-Sales Ratio (also P/Rev). Compares the stock price to revenue per share. Useful when earnings are negative since every company has revenue. Under 1x = generally cheap. Under 2x = reasonable. Above 10x = investors are paying a huge premium for future growth potential -- common in high-growth tech but risky if growth slows.','{:.2f}x'.format(ps) if ps else '--'),
+                mrow('Beta','Beta measures a stock&apos;s price volatility relative to the overall market (S&P 500). Beta 1.0 = moves exactly with the market. Beta 1.5 = moves 50% more than the market in both directions -- bigger gains AND bigger drops. Beta 0.5 = moves half as much as the market -- stable, defensive. Low-beta stocks (utilities, REITs, consumer staples) are favored during recessions and bear markets.','{:.2f}'.format(beta) if beta else '--'),
+            ]
+            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(val_rows) + '</tbody></table>', unsafe_allow_html=True)
+
+            st.markdown('<div class="az-section">Financial Health</div>', unsafe_allow_html=True)
+            hlth_rows = [
+                mrow('Profit Margin','Net Profit Margin = Net Income / Revenue. How many cents of profit the company keeps for every dollar of revenue after ALL expenses including taxes and interest. A 20% margin means the company pockets $20 profit from every $100 in sales. Higher margins signal strong pricing power and operational efficiency. Shrinking margins over time are a warning sign of rising costs or increasing competition.',tag((pm or 0)*100,15,5,'{:.1f}','%') if pm else '--'),
+                mrow('Operating Margin','EBIT Margin = Operating Income / Revenue. Similar to profit margin but measured BEFORE interest payments and taxes -- shows how efficient the core business is at turning revenue into profit. If operating margin is high but net profit margin is low, the company likely carries heavy debt (high interest costs eating into profits). Useful for comparing companies with different debt levels.',tag((om or 0)*100,15,5,'{:.1f}','%') if om else '--'),
+                mrow('Return on Equity','ROE = Return on Equity = Net Income / Shareholders Equity. Measures how effectively the company uses shareholder money to generate profit. A 20% ROE means for every $100 of equity, the company earns $20 in profit. Above 15% is considered strong. Warren Buffett looks for consistently high ROE as a sign of durable competitive advantage (a moat). Watch for ROE inflated by high debt.',tag((roe or 0)*100,15,8,'{:.1f}','%') if roe else '--'),
+                mrow('Return on Assets','ROA = Return on Assets = Net Income / Total Assets. Shows how much profit the company generates relative to everything it owns (cash, factories, equipment, intellectual property). Unlike ROE, ROA is not inflated by debt. Above 5% is solid. Asset-heavy industries like utilities and manufacturing typically have lower ROA than software or consumer brands.',tag((roa or 0)*100,8,3,'{:.1f}','%') if roa else '--'),
+                mrow('D/E Ratio','D/E = Debt-to-Equity Ratio = Total Debt / Shareholders Equity. Shows how much the company relies on borrowed money vs its own capital. A D/E of 200% means the company has $2 of debt for every $1 of equity. High D/E is dangerous when earnings fall because interest payments are fixed -- it amplifies losses. Some capital-intensive industries (utilities, pipelines, REITs) routinely carry high D/E because their predictable cash flows can service the debt.','{:.1f}%'.format(deq) if deq else '--'),
+                mrow('Current Ratio','Current Ratio = Current Assets / Current Liabilities. A liquidity measure answering: can the company pay its bills due within the next 12 months? Current assets include cash, receivables, and inventory. Current liabilities include payables and short-term debt. Above 1.5 = comfortable -- plenty of buffer. 1.0-1.5 = manageable but watch closely. Below 1.0 = a warning sign -- the company may struggle to meet near-term financial obligations.',tag(cr or 0,1.5,1.0,'{:.2f}') if cr else '--'),
+            ]
+            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(hlth_rows) + '</tbody></table>', unsafe_allow_html=True)
+
+            st.markdown('<div class="az-section">Short Interest &amp; Growth</div>', unsafe_allow_html=True)
+            si_rows = [
+                mrow('Short % Float','Short % of Float = the percentage of a company&apos;s freely tradeable shares (float) that are currently sold short. Short sellers borrow and sell shares betting the price will fall. Above 10% = significant bearish conviction. Above 20% = very heavily shorted -- but this also sets up a potential short squeeze: if the stock rises, short sellers must buy to cover losses, which forces the price even higher. Often called short interest as a percentage of float.',tag((spf or 0)*100,20,10,'{:.1f}','%') if spf else '--'),
+                mrow('Days to Cover','Days to Cover = Short Interest / Average Daily Volume. Also called the Short Ratio. Estimates how many average trading days it would take ALL short sellers to buy back their shares and exit their positions. High days-to-cover (above 5) means short sellers are effectively trapped -- if good news hits and the stock starts rising, they are forced to buy to limit losses. This forced buying pushes the price higher still, which is the mechanism of a short squeeze.',tag(sratio or 0,5,3,'{:.1f}','d') if sratio else '--'),
+                mrow('Revenue Growth','YoY Revenue Growth = Year-over-Year change in total revenue (the top line of the income statement). A growing top line means the company is selling more products or services and expanding its business. This is the foundation for long-term stock appreciation. Consistent double-digit revenue growth is highly attractive. Negative growth means the business is shrinking.',tag((rg or 0)*100,10,3,'{:.1f}','%') if rg else '--'),
+                mrow('Earnings Growth','YoY EPS Growth = Year-over-Year change in Earnings Per Share (EPS = Net Income / Shares Outstanding). If earnings grow faster than revenue, the company is becoming more efficient and profitable -- a sign of a strengthening business. If earnings shrink while revenue grows, rising costs are eating into profits. EPS growth is what ultimately drives dividend increases and stock price appreciation over time.',tag((eg or 0)*100,10,3,'{:.1f}','%') if eg else '--'),
+            ]
+            st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(si_rows) + '</tbody></table>', unsafe_allow_html=True)
+
+            if am:
+                st.markdown('<div class="az-section">Analyst Consensus</div>', unsafe_allow_html=True)
+                rdisp = recky.replace('_',' ').title() if recky else '--'
+                rcol = '#7fff7f' if 'buy' in recky.lower() else ('#ff9999' if 'sell' in recky.lower() else '#ffe066')
+                an_rows = [
+                    mrow('Recommendation','Wall Street Consensus Rating. Aggregates the buy/sell/hold ratings from all analysts who cover the stock. Strong Buy = most analysts expect the stock to significantly outperform the market. Buy = expected to outperform. Hold = expected to match the market. Underperform/Sell = expected to lag. Note: analysts employed by banks often have conflicts of interest -- their buy ratings outnumber sells by a large ratio. Use as one data point, not gospel.',
+                        '<span style="color:'+rcol+';font-weight:600">'+rdisp+'</span> <span style="font-size:.72rem;color:#888">('+str(nana)+' analysts)</span>'),
+                    mrow('Price Target (Mean)','Mean (Average) Price Target = the average 12-month price target across all analysts covering the stock. Represents the consensus expectation for where the stock price will be in one year. The percentage shown is the implied upside or downside from the current price. Treat this as directional guidance -- analysts frequently revise targets and are often wrong on timing.',
+                        '$'+'{:.2f}'.format(am)+(
+                        ' <span style="font-size:.72rem;color:'+('#7fff7f' if aus and aus>0 else '#ff9999')+'">'+('+'if aus and aus>=0 else '')+'{:.1f}%'.format(aus)+' from current</span>' if aus is not None else '')),
+                    mrow('Target Range','Analyst Price Target Range = the spread from the most bearish analyst&apos;s low target to the most bullish analyst&apos;s high target. A wide range (e.g. $10 to $50) means analysts fundamentally disagree about the company&apos;s prospects -- high uncertainty. A narrow range (e.g. $20 to $24) means there is strong consensus and the outlook is well-understood. Wide ranges often occur around companies undergoing major change.',
+                        ('$'+'{:.2f}'.format(al)+' -- $'+'{:.2f}'.format(ahigh)) if (al and ahigh) else '--'),
+                ]
+                st.markdown('<table style="width:100%;border-collapse:collapse"><tbody>' + ''.join(an_rows) + '</tbody></table>', unsafe_allow_html=True)
+
+        st.markdown('---')
+        st.markdown('<div class="section-hdr" style="font-size:1rem">Quick Calculator</div>', unsafe_allow_html=True)
+        qc1, qc2 = st.columns([1,2])
+        with qc1:
+            azinv = st.number_input('Investment ($)', min_value=1.0, value=1000.0, step=100.0, format='%.2f', key='az_invest')
+        with qc2:
+            if px > 0 and dr > 0:
+                azsh=azinv/px; aza=azsh*dr; azm=aza/12; azw=aza/52
+                azup=(azinv*aus/100) if aus else None
+                st.markdown(
+                    '<div class="calc-result">'
+                    '<div class="calc-result-row"><span class="calc-label">Shares purchased</span><span class="calc-value">'+'{:.4f}'.format(azsh)+'</span></div>'
+                    '<div class="calc-result-row"><span class="calc-label">Monthly dividend income</span><span class="calc-value">$'+'{:.2f}'.format(azm)+'</span></div>'
+                    '<div class="calc-result-row"><span class="calc-label">Annual dividend income</span><span class="calc-value big">$'+'{:.2f}'.format(aza)+'</span></div>'
+                    '<div class="calc-result-row"><span class="calc-label">Weekly income</span><span class="calc-value">$'+'{:.2f}'.format(azw)+'</span></div>'
+                    +((
+                    '<div class="calc-result-row"><span class="calc-label">Analyst price upside ($)</span><span class="calc-value">$'+'{:.2f}'.format(azup)+'</span></div>'
+                    ) if azup else '')+
+                    '</div>', unsafe_allow_html=True)
+            else: st.info('No dividend data available for this ticker.')
 
 st.markdown(
     '<hr><p style="font-size:.7rem;color:#ccc;text-align:center">'
