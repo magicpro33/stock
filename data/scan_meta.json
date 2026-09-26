@@ -1,32 +1,33 @@
 {
-  "scanned_at_utc": "2026-09-25 02:03 UTC",
-  "scanned_at_display": "2026-09-25 02:03 AM UTC",
-  "elapsed_minutes": 84.7,
-  "total_tickers": 6268,
-  "valid_results": 6252,
-  "target_session": "2026-09-24",
-  "target_coverage": 0.9976,
-  "target_printed": 6237,
+  "scanned_at_utc": "2026-09-26 02:12 UTC",
+  "scanned_at_display": "2026-09-26 02:12 AM UTC",
+  "elapsed_minutes": 89.0,
+  "total_tickers": 6270,
+  "valid_results": 6254,
+  "target_session": "2026-09-25",
+  "target_coverage": 0.996,
+  "target_printed": 6229,
   "carried_forward": 8,
   "reused_as_is": 0,
-  "hist_only": 6239,
+  "hist_only": 6241,
   "yahoo_backfill": 29,
-  "hist_incremental": 6241,
+  "hist_incremental": 6243,
   "hist_full": 27,
-  "profile_holes": 27,
+  "profile_holes": 26,
   "statement_holes": 29,
   "field_completeness": 0.8333,
   "last_date_counts": {
-    "2026-09-24": 6237,
-    "2026-09-23": 8,
+    "2026-09-25": 6229,
+    "2026-09-24": 15,
     "2026-09-21": 4,
+    "2026-09-23": 3,
     "2026-09-22": 1,
     "2026-09-16": 1,
     "2026-09-17": 1
   },
   "exchanges": {
     "sp500": 501,
-    "nyse": 2656,
-    "nasdaq": 3611
+    "nyse": 2657,
+    "nasdaq": 3612
   }
 }
