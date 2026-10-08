@@ -1,34 +1,34 @@
 {
-  "scanned_at_utc": "2026-10-07 02:34 UTC",
-  "scanned_at_display": "2026-10-07 02:34 AM UTC",
-  "elapsed_minutes": 52.9,
-  "total_tickers": 6258,
-  "valid_results": 6274,
-  "target_session": "2026-10-06",
-  "target_coverage": 0.9931,
-  "target_printed": 6231,
-  "carried_forward": 38,
+  "scanned_at_utc": "2026-10-08 03:01 UTC",
+  "scanned_at_display": "2026-10-08 03:01 AM UTC",
+  "elapsed_minutes": 53.9,
+  "total_tickers": 6256,
+  "valid_results": 6276,
+  "target_session": "2026-10-07",
+  "target_coverage": 0.992,
+  "target_printed": 6226,
+  "carried_forward": 42,
   "reused_as_is": 0,
-  "hist_only": 6227,
-  "yahoo_backfill": 31,
-  "hist_incremental": 6228,
-  "hist_full": 30,
+  "hist_only": 6228,
+  "yahoo_backfill": 28,
+  "hist_incremental": 6229,
+  "hist_full": 27,
   "profile_holes": 24,
-  "statement_holes": 31,
+  "statement_holes": 28,
   "field_completeness": 0.8333,
   "last_date_counts": {
-    "2026-10-06": 6231,
+    "2026-10-07": 6226,
     "2026-10-02": 12,
-    "2026-10-05": 6,
+    "2026-10-06": 9,
+    "2026-10-05": 5,
     "2026-10-01": 4,
     "2026-09-29": 4,
     "2026-09-25": 4,
-    "2026-09-21": 4,
-    "2026-09-30": 3
+    "2026-09-21": 4
   },
   "exchanges": {
     "sp500": 501,
     "nyse": 2643,
-    "nasdaq": 3613
+    "nasdaq": 3610
   }
 }
