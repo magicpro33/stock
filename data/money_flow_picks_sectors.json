@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-08",
+  "as_of": "2026-10-09",
   "flow_lookback": 21,
   "top_sectors": [
     "Technology",
@@ -7,16 +7,16 @@
     "Consumer Defensive"
   ],
   "sector_flows": {
-    "Technology": 0.1106,
-    "Communication Services": 0.0755,
-    "Consumer Defensive": 0.006,
-    "Energy": -0.01,
-    "Industrials": -0.0524,
-    "Healthcare": -0.0545,
-    "Consumer Cyclical": -0.0997,
-    "Financial Services": -0.1201,
-    "Utilities": -0.1711,
-    "Basic Materials": -0.1741,
-    "Real Estate": -0.2358
+    "Technology": 0.1147,
+    "Communication Services": 0.0802,
+    "Consumer Defensive": 0.0364,
+    "Industrials": -0.0016,
+    "Healthcare": -0.0057,
+    "Energy": -0.0272,
+    "Consumer Cyclical": -0.0432,
+    "Financial Services": -0.0902,
+    "Utilities": -0.1055,
+    "Basic Materials": -0.1607,
+    "Real Estate": -0.1794
   }
 }
