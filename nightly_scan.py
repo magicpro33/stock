@@ -36,6 +36,9 @@ import sys
 import copy
 import gzip
 import json
+import csv
+import io
+import re
 import time
 import random
 import logging
@@ -389,6 +392,9 @@ def _earnings_from_info(info):
              or _to_iso_date(info.get("EarningsDate")))
     end = (_to_iso_date(info.get("earningsTimestampEnd"))
            or _to_iso_date(info.get("earningsDateEnd")))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if last and last < today:
+        last = None
     upcoming = start or last
     if end == upcoming:
         end = None
@@ -402,9 +408,31 @@ def _earnings_from_info(info):
     return upcoming, end, last, est
 
 
+def _put_earn_date(out: dict, tk: str, iso: str, today: str) -> None:
+    tk = str(tk or "").strip().upper()
+    if not tk or not iso or iso < today:
+        return
+    prev = out.get(tk)
+    if prev is None or iso < prev:
+        out[tk] = iso
+    if "." in tk and tk.count(".") == 1:
+        left, _, right = tk.partition(".")
+        if len(right) == 1 and right.isalpha():
+            out.setdefault(f"{left}-{right}", iso)
+    elif tk.count("-") == 1:
+        left, _, right = tk.partition("-")
+        if len(right) == 1 and right.isalpha():
+            out.setdefault(f"{left}.{right}", iso)
+
+
 def _nasdaq_earnings_calendar(days: int = 90) -> dict:
-    """Upcoming Nasdaq earnings calendar → {TICKER: YYYY-MM-DD}."""
+    """Upcoming Nasdaq earnings calendar → {TICKER: YYYY-MM-DD}.
+
+    Nasdaq only lists names that have a confirmed print on that day. January
+    season is empty until they publish it, so this is near-term only.
+    """
     today = datetime.now(timezone.utc).date()
+    today_s = today.isoformat()
     fetch = []
     d = today
     through = today + timedelta(days=int(days))
@@ -450,21 +478,266 @@ def _nasdaq_earnings_calendar(days: int = 90) -> dict:
                     continue
                 iso = day.isoformat()
                 for tk in hits:
-                    prev = out.get(tk)
-                    if prev is None or iso < prev:
-                        out[tk] = iso
+                    _put_earn_date(out, tk, iso, today_s)
     except Exception as e:
         log.warning(f"  Nasdaq earnings calendar: {e}")
     return out
 
 
-def _apply_nasdaq_earnings(rows: list, cal: dict | None = None) -> int:
-    """Stamp upcoming Nasdaq print dates onto dump rows. Returns how many got a date."""
-    if cal is None:
-        cal = _nasdaq_earnings_calendar()
-    if not cal:
-        return 0
+def _parse_yahoo_earnings_html(text: str) -> list:
+    """Ticker list from a Yahoo earnings-calendar HTML page."""
+    if not text:
+        return []
+    out, seen = [], set()
+
+    def _add(tk):
+        tk = str(tk or "").strip().upper()
+        if not tk or tk in seen or tk in ("SYMBOL", "NAN", "NONE", "-", "N/A"):
+            return
+        if not re.match(r"^[A-Z][A-Z0-9.-]{0,9}$", tk):
+            return
+        seen.add(tk)
+        out.append(tk)
+
+    try:
+        for df in pd.read_html(io.StringIO(text)):
+            if "Symbol" not in getattr(df, "columns", []):
+                continue
+            for val in df["Symbol"].tolist():
+                _add(val)
+            if out:
+                return out
+    except Exception:
+        pass
+    for tk in re.findall(r"slk:([A-Z][A-Z0-9.-]{0,9})", text):
+        _add(tk)
+    return out
+
+
+def _yahoo_html_earnings_calendar(days: int = 270) -> dict:
+    """Yahoo earnings calendar HTML — includes estimated dates months out.
+
+    Nasdaq only lists confirmed near-term prints. This page is how Yahoo shows
+    Q4/Q1 estimates (AAPL etc. in late January) without a quote API call.
+    Runs at scan time only; chart load is unchanged.
+    """
+    today = datetime.now(timezone.utc).date()
+    today_s = today.isoformat()
+    fetch = [today + timedelta(days=i) for i in range(int(days) + 1)]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/calendar/earnings",
+    }
+
+    def _one(day):
+        hits = []
+        offset = 0
+        while offset <= 400:
+            url = (f"https://finance.yahoo.com/calendar/earnings"
+                   f"?day={day.isoformat()}&offset={offset}&size=100")
+            try:
+                r = requests.get(url, timeout=20, headers=headers)
+                if r.status_code in (429, 503):
+                    time.sleep(10)
+                    r = requests.get(url, timeout=20, headers=headers)
+                if r.status_code != 200 or not (r.text or "").strip():
+                    return day, hits, "http" if r.status_code != 200 else None
+                if "Too Many Requests" in r.text:
+                    return day, hits, "rate"
+                rows = _parse_yahoo_earnings_html(r.text)
+            except Exception:
+                return day, hits, None
+            if not rows:
+                break
+            hits.extend(rows)
+            if len(rows) < 100:
+                break
+            offset += 100
+        return day, hits, None
+
+    out = {}
+    empty_streak = 0
+    horizon = today + timedelta(days=150)
+    i = 0
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            while i < len(fetch):
+                batch = fetch[i:i + 2]
+                futs = [pool.submit(_one, day) for day in batch]
+                any_hits = False
+                stop = False
+                for fut in futs:
+                    try:
+                        day, hits, err = fut.result()
+                    except Exception:
+                        continue
+                    if err == "rate":
+                        log.warning("  Yahoo HTML earnings calendar rate-limited; keeping dates so far")
+                        stop = True
+                    iso = day.isoformat()
+                    if hits:
+                        any_hits = True
+                        for tk in hits:
+                            _put_earn_date(out, tk, iso, today_s)
+                if stop:
+                    break
+                if any_hits:
+                    empty_streak = 0
+                else:
+                    empty_streak += len(batch)
+                    if batch[0] >= horizon and empty_streak >= 16:
+                        log.info(f"  Yahoo HTML earnings calendar stopped after empty streak "
+                                 f"({batch[0].isoformat()})")
+                        break
+                i += 2
+    except Exception as e:
+        log.warning(f"  Yahoo HTML earnings calendar: {e}")
+    return out
+
+
+def _av_earnings_calendar() -> dict:
+    """Alpha Vantage EARNINGS_CALENDAR CSV — one call, estimated dates out 3–12 months."""
+    key = (_get_av_key() or "").strip()
+    if not key:
+        log.info("  Alpha Vantage earnings calendar skipped (no AV_API_KEY)")
+        return {}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = {}
+    for horizon in ("12month", "3month"):
+        try:
+            r = requests.get(
+                "https://www.alphavantage.co/query",
+                params={"function": "EARNINGS_CALENDAR", "horizon": horizon,
+                        "apikey": key},
+                timeout=45,
+            )
+            text = r.text or ""
+            if not text or text.lstrip().startswith("{") or "reportDate" not in text[:200]:
+                log.warning(f"  Alpha Vantage earnings calendar ({horizon}) "
+                            f"empty/limited: {text[:120].replace(chr(10), ' ')}")
+                continue
+            n = 0
+            for row in csv.DictReader(io.StringIO(text)):
+                _put_earn_date(out, row.get("symbol"), row.get("reportDate"), today)
+                n += 1
+            log.info(f"  Alpha Vantage earnings calendar ({horizon}): "
+                     f"{n} rows → {len(out)} tickers")
+            if out:
+                return out
+        except Exception as e:
+            log.warning(f"  Alpha Vantage earnings calendar ({horizon}): {e}")
+    return out
+
+
+def _yahoo_quote_earnings(tickers: list) -> dict:
+    """Next earnings from Yahoo v7 quote, largest names first.
+
+    One batched request per ~40 symbols. Stops on rate-limit so the nightly
+    scan still finishes. Does not run at chart-load time.
+    """
+    want = []
+    seen = set()
+    for tk in tickers or []:
+        t = str(tk or "").strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            want.append(t)
+    if not want:
+        return {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = {}
+    try:
+        from yfinance.data import YfData
+        data = YfData(session=requests.Session())
+    except Exception as e:
+        log.warning(f"  Yahoo quote earnings: {e}")
+        return {}
+    chunk_n = 40
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    for i in range(0, len(want), chunk_n):
+        chunk = want[i:i + chunk_n]
+        try:
+            resp = data.get(url, params={"symbols": ",".join(chunk)})
+            payload = resp.json() if hasattr(resp, "json") else resp
+            rows = ((payload or {}).get("quoteResponse") or {}).get("result") or []
+        except Exception as e:
+            msg = str(e).lower()
+            log.warning(f"  Yahoo quote earnings stopped at {i}/{len(want)}: {e}")
+            if "rate" in msg or "401" in msg or "429" in msg or "too many" in msg:
+                break
+            time.sleep(1.5)
+            continue
+        for q in rows:
+            if not isinstance(q, dict):
+                continue
+            tk = str(q.get("symbol") or "").strip().upper()
+            iso = (_to_iso_date(q.get("earningsTimestampStart"))
+                   or _to_iso_date(q.get("earningsTimestampEnd"))
+                   or _to_iso_date(q.get("earningsTimestamp")))
+            _put_earn_date(out, tk, iso, today)
+        if i + chunk_n < len(want):
+            time.sleep(0.35)
+    log.info(f"  Yahoo quote earnings: {len(out)} dates from {len(want)} missing")
+    return out
+
+
+def _apply_earnings_calendars(rows: list) -> int:
+    """Stamp upcoming earnings onto dump rows from Nasdaq + AV + Yahoo quote.
+
+    Chart load is unchanged: this runs only in the nightly scan, and the extra
+    fields are short ISO strings on records the panel already stores.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cal = {}
+    try:
+        ns = _nasdaq_earnings_calendar()
+        for tk, iso in ns.items():
+            _put_earn_date(cal, tk, iso, today)
+        log.info(f"  Nasdaq earnings calendar: {len(ns)} tickers")
+    except Exception as e:
+        log.warning(f"  Nasdaq earnings calendar failed: {e}")
+    try:
+        yh = _yahoo_html_earnings_calendar()
+        for tk, iso in yh.items():
+            _put_earn_date(cal, tk, iso, today)
+        log.info(f"  Yahoo HTML earnings calendar: {len(yh)} tickers")
+    except Exception as e:
+        log.warning(f"  Yahoo HTML earnings calendar failed: {e}")
+    try:
+        av = _av_earnings_calendar()
+        for tk, iso in av.items():
+            _put_earn_date(cal, tk, iso, today)
+    except Exception as e:
+        log.warning(f"  Alpha Vantage earnings calendar failed: {e}")
+
+    missing = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        tk = str(row.get("Ticker") or "").strip().upper()
+        if not tk:
+            continue
+        have = _to_iso_date(row.get("EarningsDate"))
+        if have and have >= today:
+            continue
+        if cal.get(tk):
+            continue
+        cap = 0.0
+        try:
+            cap = float(row.get("MarketCap") or 0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        missing.append((cap, tk))
+    missing.sort(reverse=True)
+    try:
+        yq = _yahoo_quote_earnings([tk for _cap, tk in missing[:400]])
+        for tk, iso in yq.items():
+            _put_earn_date(cal, tk, iso, today)
+    except Exception as e:
+        log.warning(f"  Yahoo quote earnings failed: {e}")
+
     n = 0
     for row in rows or []:
         if not isinstance(row, dict):
@@ -485,11 +758,17 @@ def _apply_nasdaq_earnings(rows: list, cal: dict | None = None) -> int:
             if not isinstance(an, dict):
                 an = {}
                 row["_analyzer"] = an
-            if not an.get("earningsDate"):
-                an["earningsDate"] = chosen
-        if not row.get("_earnings_checked"):
+            an["earningsDate"] = chosen
             row["_earnings_checked"] = today
+    log.info(f"  Earnings dates on dump: "
+             f"{sum(1 for r in rows if isinstance(r, dict) and r.get('EarningsDate'))}"
+             f"/{len(rows)}")
     return n
+
+
+def _apply_nasdaq_earnings(rows: list, cal: dict | None = None) -> int:
+    """Back-compat wrapper. `cal` is ignored; all sources are merged."""
+    return _apply_earnings_calendars(rows)
 
 
 def _earnings_stale(row, today=None) -> bool:
@@ -1903,8 +2182,29 @@ def process_ticker(args):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _get_av_key() -> str:
-    """Read AV_API_KEY from environment (nightly scan runs as GitHub Action)."""
-    return os.environ.get("AV_API_KEY", "")
+    """AV_API_KEY from the environment, then a local Streamlit secrets file."""
+    env = (os.environ.get("AV_API_KEY") or "").strip()
+    if env:
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (
+        os.path.join(here, ".streamlit", "secrets.toml"),
+        os.path.join(os.path.dirname(here), "stormwatch", ".streamlit", "secrets.toml"),
+    ):
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#") or "AV_API_KEY" not in s or "=" not in s:
+                        continue
+                    key = s.split("=", 1)[1].strip().strip("\"'")
+                    if key:
+                        return key
+        except Exception:
+            pass
+    return ""
 
 
 def main():
@@ -2190,11 +2490,12 @@ def main():
                     "Stormwatch will still prefer this date when enough names printed.")
 
     # ── 3. Save results ───────────────────────────────────────────────
+    n_earn = 0
     try:
-        n_earn = _apply_nasdaq_earnings(all_results)
-        log.info(f"  Nasdaq earnings calendar stamped {n_earn} tickers")
+        n_earn = _apply_earnings_calendars(all_results)
+        log.info(f"  Earnings calendars stamped {n_earn} tickers")
     except Exception as e:
-        log.warning(f"  Nasdaq earnings calendar failed: {e}")
+        log.warning(f"  Earnings calendars failed: {e}")
 
     for r in all_results:
         try:
@@ -2318,6 +2619,9 @@ def main():
         "profile_holes": n_need_info,
         "statement_holes": n_need_fin,
         "field_completeness": completeness,
+        "earnings_stamped": n_earn,
+        "earnings_dated": sum(1 for r in all_results
+                              if isinstance(r, dict) and r.get("EarningsDate")),
         "last_date_counts": dict(last_counts.most_common(8)),
         "exchanges": {
             exch: len(tl) for exch, tl in all_tickers.items()
