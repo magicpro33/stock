@@ -331,6 +331,70 @@ def _hist_ok(row, min_bars: int = 120) -> bool:
     return len(dates) >= int(min_bars)
 
 
+def _epoch_to_iso(v):
+    """Yahoo epoch seconds (or ms) to a UTC calendar date, or None."""
+    try:
+        sec = float(v)
+    except (TypeError, ValueError):
+        return None
+    if sec > 1e12:
+        sec /= 1000.0
+    if sec < 1e9:
+        return None
+    try:
+        return datetime.fromtimestamp(sec, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _earnings_from_info(info):
+    """Next report date, window end, last report date, and whether it is an estimate.
+
+    earningsTimestamp is the latest report. earningsTimestampStart/End is the
+    next window when Yahoo has one (often an estimate).
+    """
+    if not isinstance(info, dict):
+        return None, None, None, None
+    last = _epoch_to_iso(info.get("earningsTimestamp"))
+    start = _epoch_to_iso(info.get("earningsTimestampStart"))
+    end = _epoch_to_iso(info.get("earningsTimestampEnd"))
+    upcoming = start or last
+    if end == upcoming:
+        end = None
+    if last == upcoming:
+        last = None
+    est = info.get("isEarningsDateEstimate")
+    if isinstance(est, str):
+        est = est.strip().lower() in ("1", "true", "yes")
+    elif est is not None:
+        est = bool(est)
+    return upcoming, end, last, est
+
+
+def _earnings_stale(row, today=None) -> bool:
+    """True when the dump has no upcoming earnings date, or that date has passed.
+
+    A name Yahoo does not date is not retried every night; it waits 30 days.
+    """
+    if not row:
+        return True
+    today = today or datetime.now(timezone.utc).date()
+    raw = row.get("EarningsDate")
+    if raw:
+        try:
+            return datetime.strptime(str(raw)[:10], "%Y-%m-%d").date() < today
+        except ValueError:
+            return True
+    checked = row.get("_earnings_checked")
+    if not checked:
+        return True
+    try:
+        seen = datetime.strptime(str(checked)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return True
+    return (today - seen).days >= 30
+
+
 def _info_ok(row) -> bool:
     """Previous row already has a real Yahoo profile (not a rate-limit stub)."""
     if not row:
@@ -1330,7 +1394,7 @@ def process_ticker(args):
     """
     t, mfi_period, range_days, pre_hist, prev_row = args
     prev_row = prev_row if isinstance(prev_row, dict) else None
-    fetch_info = not _info_ok(prev_row)
+    fetch_info = (not _info_ok(prev_row)) or _earnings_stale(prev_row)
     fetch_fin = not _fin_ok(prev_row)
     hist = _merge_hist(
         _df_from_cache((prev_row or {}).get("_hist")),
@@ -1578,6 +1642,11 @@ def process_ticker(args):
                     "dividendYield":     _num(info.get("dividendYield")),
                     "grossMarginCalc":   gross_margin,
                 }
+                _ed, _ed_end, _ed_last, _ed_est = _earnings_from_info(info)
+                analyzer["earningsDate"] = _ed
+                analyzer["earningsDateEnd"] = _ed_end
+                analyzer["lastEarningsDate"] = _ed_last
+                analyzer["earningsDateEstimate"] = _ed_est
             else:
                 analyzer = dict((prev_row or {}).get("_analyzer") or {})
                 analyzer["currentPrice"] = _num(price)
@@ -1671,6 +1740,10 @@ def process_ticker(args):
                 "CleanSetupScore":     clean_setup,
                 "GrossMargin":         gross_margin,
                 "ExDividendDate":      info.get("exDividendDate") if fetch_info else (prev_row or {}).get("ExDividendDate"),
+                "EarningsDate":        _ed if fetch_info else (prev_row or {}).get("EarningsDate"),
+                "EarningsDateEnd":     _ed_end if fetch_info else (prev_row or {}).get("EarningsDateEnd"),
+                "LastEarningsDate":    _ed_last if fetch_info else (prev_row or {}).get("LastEarningsDate"),
+                "EarningsDateEstimate": _ed_est if fetch_info else (prev_row or {}).get("EarningsDateEstimate"),
                 "FirstTradeDate":      _ft,
                 "_hist":          hist_cache,
                 "_exchange":      "",
@@ -1681,6 +1754,7 @@ def process_ticker(args):
                         out[_k] = _v
             if fetch_info:
                 _stamp_info(out, True)
+                out["_earnings_checked"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             elif prev_row:
                 if prev_row.get("_info_ok"):
                     out["_info_ok"] = True
