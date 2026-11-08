@@ -1,7 +1,7 @@
 {
-  "scanned_at_utc": "2026-11-08 21:11 UTC",
-  "scanned_at_display": "2026-11-08 09:11 PM UTC",
-  "elapsed_minutes": 46.1,
+  "scanned_at_utc": "2026-11-08 22:51 UTC",
+  "scanned_at_display": "2026-11-08 10:51 PM UTC",
+  "elapsed_minutes": 60.3,
   "total_tickers": 6244,
   "valid_results": 6322,
   "target_session": "2026-11-06",
@@ -16,6 +16,8 @@
   "profile_holes": 19,
   "statement_holes": 20,
   "field_completeness": 0.8333,
+  "earnings_stamped": 1,
+  "earnings_dated": 4717,
   "last_date_counts": {
     "2026-11-06": 6220,
     "2026-10-02": 12,
