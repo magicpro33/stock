@@ -42,7 +42,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -347,17 +347,48 @@ def _epoch_to_iso(v):
         return None
 
 
+def _to_iso_date(v):
+    """Epoch, datetime, ISO string, or a list of those → YYYY-MM-DD (earliest)."""
+    if v is None or v == "" or v is False:
+        return None
+    if isinstance(v, (list, tuple)):
+        got = [_to_iso_date(x) for x in v]
+        got = [x for x in got if x]
+        return min(got) if got else None
+    iso = _epoch_to_iso(v)
+    if iso:
+        return iso
+    if isinstance(v, datetime):
+        if v.tzinfo is not None:
+            v = v.astimezone(timezone.utc)
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
+        return v.isoformat()
+    try:
+        ts = pd.to_datetime(v, utc=True, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return None
+
+
 def _earnings_from_info(info):
     """Next report date, window end, last report date, and whether it is an estimate.
 
     earningsTimestamp is the latest report. earningsTimestampStart/End is the
-    next window when Yahoo has one (often an estimate).
+    next window when Yahoo has one (often an estimate). earningsDate is the
+    same window as a list of datetimes on newer Yahoo payloads.
     """
     if not isinstance(info, dict):
         return None, None, None, None
-    last = _epoch_to_iso(info.get("earningsTimestamp"))
-    start = _epoch_to_iso(info.get("earningsTimestampStart"))
-    end = _epoch_to_iso(info.get("earningsTimestampEnd"))
+    last = _to_iso_date(info.get("earningsTimestamp")) or _to_iso_date(
+        info.get("lastEarningsDate"))
+    start = (_to_iso_date(info.get("earningsTimestampStart"))
+             or _to_iso_date(info.get("earningsDate"))
+             or _to_iso_date(info.get("EarningsDate")))
+    end = (_to_iso_date(info.get("earningsTimestampEnd"))
+           or _to_iso_date(info.get("earningsDateEnd")))
     upcoming = start or last
     if end == upcoming:
         end = None
@@ -369,6 +400,96 @@ def _earnings_from_info(info):
     elif est is not None:
         est = bool(est)
     return upcoming, end, last, est
+
+
+def _nasdaq_earnings_calendar(days: int = 90) -> dict:
+    """Upcoming Nasdaq earnings calendar → {TICKER: YYYY-MM-DD}."""
+    today = datetime.now(timezone.utc).date()
+    fetch = []
+    d = today
+    through = today + timedelta(days=int(days))
+    while d <= through:
+        if d.weekday() < 5:
+            fetch.append(d)
+        d += timedelta(days=1)
+    if not fetch:
+        return {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/",
+    }
+
+    def _one(day):
+        hits = []
+        try:
+            r = requests.get(
+                f"https://api.nasdaq.com/api/calendar/earnings?date={day.isoformat()}",
+                timeout=8, headers=headers)
+            if r.status_code != 200:
+                return day, hits
+            rows = ((r.json() or {}).get("data") or {}).get("rows") or []
+            for row in rows:
+                tk = str((row or {}).get("symbol") or "").strip().upper()
+                if tk:
+                    hits.append(tk)
+        except Exception:
+            pass
+        return day, hits
+
+    out = {}
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(_one, day) for day in fetch]
+            for fut in as_completed(futs):
+                try:
+                    day, hits = fut.result()
+                except Exception:
+                    continue
+                iso = day.isoformat()
+                for tk in hits:
+                    prev = out.get(tk)
+                    if prev is None or iso < prev:
+                        out[tk] = iso
+    except Exception as e:
+        log.warning(f"  Nasdaq earnings calendar: {e}")
+    return out
+
+
+def _apply_nasdaq_earnings(rows: list, cal: dict | None = None) -> int:
+    """Stamp upcoming Nasdaq print dates onto dump rows. Returns how many got a date."""
+    if cal is None:
+        cal = _nasdaq_earnings_calendar()
+    if not cal:
+        return 0
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    n = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        tk = str(row.get("Ticker") or "").strip().upper()
+        cal_d = cal.get(tk)
+        cur = _to_iso_date(row.get("EarningsDate"))
+        chosen = None
+        for cand in (cur, cal_d):
+            if cand and cand >= today:
+                if chosen is None or cand < chosen:
+                    chosen = cand
+        if chosen:
+            if row.get("EarningsDate") != chosen:
+                n += 1
+            row["EarningsDate"] = chosen
+            an = row.get("_analyzer")
+            if not isinstance(an, dict):
+                an = {}
+                row["_analyzer"] = an
+            if not an.get("earningsDate"):
+                an["earningsDate"] = chosen
+        if not row.get("_earnings_checked"):
+            row["_earnings_checked"] = today
+    return n
 
 
 def _earnings_stale(row, today=None) -> bool:
@@ -1838,15 +1959,23 @@ def main():
         fin_ok = _fin_ok(prev)
         hist_ok = _hist_ok(prev)
         on_tgt = bool(hist_ok and (_hist_last(prev) or "") >= planned)
+        earn_past = False
+        raw_ed = (prev or {}).get("EarningsDate")
+        if raw_ed:
+            try:
+                earn_past = (datetime.strptime(str(raw_ed)[:10], "%Y-%m-%d").date()
+                             < datetime.now(timezone.utc).date())
+            except ValueError:
+                earn_past = True
         if not info_ok:
             n_need_info += 1
         if not fin_ok:
             n_need_fin += 1
-        if info_ok and fin_ok and on_tgt:
+        if info_ok and fin_ok and on_tgt and not earn_past:
             classified[t] = "reuse"
             n_reuse += 1
             n_skip_hist += 1
-        elif info_ok and fin_ok:
+        elif info_ok and fin_ok and not earn_past:
             classified[t] = "hist"
             n_hist_only += 1
             incremental_tickers.append(t)
@@ -2061,6 +2190,12 @@ def main():
                     "Stormwatch will still prefer this date when enough names printed.")
 
     # ── 3. Save results ───────────────────────────────────────────────
+    try:
+        n_earn = _apply_nasdaq_earnings(all_results)
+        log.info(f"  Nasdaq earnings calendar stamped {n_earn} tickers")
+    except Exception as e:
+        log.warning(f"  Nasdaq earnings calendar failed: {e}")
+
     for r in all_results:
         try:
             _fill_known_absences(r)
